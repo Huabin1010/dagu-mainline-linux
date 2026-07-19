@@ -1,0 +1,25 @@
+{
+  "device_codename": "dagu",
+  "expected_product": "dagu",
+  "golden_backup_dir": "backups/golden",
+  "logs_dir": "logs/test-lab",
+  "sessions_dir": "logs/test-lab/sessions",
+  "serial_port": "",
+  "serial_baud": 115200,
+  "usb_log_timeout_sec": 120,
+  "usb_log_poll_sec": 1.0,
+  "partitions_to_backup": [
+    "boot_a",
+    "boot_b",
+    "vendor_boot_a",
+    "vendor_boot_b",
+    "vbmeta_a",
+    "vbmeta_b",
+    "dtbo_a",
+    "dtbo_b"
+  ],
+  "uefi_test_image": "artifacts/boot-dagu-latest.img",
+  "post_test_auto_reboot_android": true,
+  "mi_flash_rom_path": "",
+  "edl_note": "If fastboot is dead: power off, hold VolUp+VolDown+Power for EDL, then Mi Flash full ROM."
+}

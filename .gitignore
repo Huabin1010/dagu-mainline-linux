@@ -1,0 +1,24 @@
+.wsl-layer/
+.wsl-workspace
+artifacts/
+artifacts/*.stamp
+backups/golden/*
+!backups/golden/README.md
+logs/
+dumps/
+tools/downloads/
+tools/mi-unlock-cn/
+tools/platform-tools/
+
+# Upstream clones — bootstrap via git, not tracked in project repo
+edk2-msm/
+vendor/
+
+# Large binaries in artifacts only
+*.img
+
+# OS / editor
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc

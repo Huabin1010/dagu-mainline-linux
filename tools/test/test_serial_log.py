@@ -136,7 +136,7 @@ class TestSerialLogTool(unittest.TestCase):
         ).read_text(encoding="utf-8", errors="replace")
         self.assertIn("TestLabAppendLog", src)
         self.assertIn("TESTLAB_BOOT_LOG", src)
-        self.assertIn("TestLabPublishUsbMassStorage", src)
+        self.assertNotIn("TestLabPublishUsbMassStorage", src)
         self.assertNotIn("SCREEN.BMP", src)
 
 

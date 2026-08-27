@@ -1,8 +1,0 @@
-{
-  "host": "127.0.0.1",
-  "port": 19627,
-  "wsl_distro": "Ubuntu-22.04",
-  "wsl_workspace": "~/projects/xiaomi-pad870-win11-arm",
-  "win_repo_path": "E:/Projects/xiaomi-pad870-win11-arm",
-  "initial_cwd": "~/projects/xiaomi-pad870-win11-arm"
-}

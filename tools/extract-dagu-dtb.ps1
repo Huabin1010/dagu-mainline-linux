@@ -15,7 +15,7 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 Write-Host "[extract-dagu-dtb] boot.img -> $work"
 Write-Host "[extract-dagu-dtb] Install Android build-tools or use magiskboot manually."
 Write-Host ""
-Write-Host "Suggested steps (WSL/Linux with unpack_bootimg):"
+Write-Host "Suggested steps (Linux with unpack_bootimg):"
 Write-Host "  unpack_bootimg --boot_img $BootImg --out $work"
 Write-Host "  # locate *.dtb in $work and copy to:"
 Write-Host "  $OutDtb"

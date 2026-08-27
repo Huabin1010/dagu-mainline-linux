@@ -22,6 +22,7 @@
 
 [Components.common]
   Silicon/Qualcomm/QcomPkg/Drivers/TestLabBridgeDxe/TestLabBridgeDxe.inf
+  MdeModulePkg/Application/BootManagerMenuApp/BootManagerMenuApp.inf
   Silicon/Qualcomm/QcomPkg/PrePi/PrePi.inf {
     <LibraryClasses>
       SerialPortLib|Silicon/Qualcomm/QcomPkg/Library/FrameBufferSerialPortLib/FrameBufferSerialPortLib.inf
@@ -37,6 +38,13 @@
   gQcomTokenSpaceGuid.PcdMipiFrameBufferRotation|90
   gQcomTokenSpaceGuid.PcdMipiFrameBufferConsoleScale|150
   gQcomTokenSpaceGuid.PcdDebugUartPortBase|0x988000
+
+  # No auto-boot timeout — PlatformBm forces BootManagerMenuApp.
+  gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|0
+
+  # Use popup Boot Manager (not UiApp FrontPage) so Vol/Power can pick Simple Init / Shell.
+  # FILE_GUID of BootManagerMenuApp.inf
+  gEfiMdeModulePkgTokenSpaceGuid.PcdBootManagerMenuFile|{ 0xdc, 0x5b, 0xc2, 0xee, 0xf2, 0x67, 0x95, 0x4d, 0xb1, 0xd5, 0xf8, 0x1b, 0x20, 0x39, 0xd1, 0x1d }
 
   gSimpleInitTokenSpaceGuid.PcdGuiDefaultDPI|450
 

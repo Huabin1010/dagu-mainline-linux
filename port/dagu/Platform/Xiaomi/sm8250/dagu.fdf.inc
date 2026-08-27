@@ -1,7 +1,10 @@
-//ButtonsDxe
+// ButtonsDxe — elish tablet map + dagu HOME-skip patch (ButtonsDxe.dagu.efi).
+// Stock elish aborts ButtonsInit when HOME GPIO EnableInput fails (no HOME key
+// on Pad 5 Pro 12.4) → Vol+/Vol-/Power never appear. apply-dagu-port.sh builds
+// ButtonsDxe.dagu.efi and rewrites Apriori to the same PE32 path.
 FILE DRIVER = 5bd181db-0487-4f1a-ae73-820e165611b3 {
   SECTION DXE_DEPEX = Platform/EFI_Binaries/Drivers/sm8250/ButtonsDxe/ButtonsDxe.depex
-  SECTION PE32 = Platform/EFI_Binaries/Drivers/sm8250/ButtonsDxe/ButtonsDxe.efi
+  SECTION PE32 = Platform/EFI_Binaries/Drivers/Devices/elish/ButtonsDxe/ButtonsDxe.dagu.efi
   SECTION UI = "ButtonsDxe"
 }
 
@@ -15,10 +18,8 @@ FILE FREEFORM = 7E374E25-8E01-4FEE-87F2-390C23C606CD {
   SECTION UI = "AcpiTables"
 }
 
-// DTB: use elish.dtb until KernelFdt/SimpleInit is validated with stock dagu.dtb
-FILE FREEFORM = 25462CDA-221F-47DF-AC1D-259CFAA4E326 {
-  SECTION RAW = Platform/Xiaomi/sm8250/FdtBlob_compat/elish.dtb
-}
+# Popup boot menu (Vol+/- select, Power confirm) — must match PcdBootManagerMenuFile
+INF MdeModulePkg/Application/BootManagerMenuApp/BootManagerMenuApp.inf
 
-# TestLab USB v2 — safe mode (no ConOut hook; usb-on to export logs)
-INF Silicon/Qualcomm/QcomPkg/Drivers/TestLabBridgeDxe/TestLabBridgeDxe.inf
+# TestLabBridge OFF (ramdisk alloc was OOR). MSC/LSMS path removed.
+# INF Silicon/Qualcomm/QcomPkg/Drivers/TestLabBridgeDxe/TestLabBridgeDxe.inf

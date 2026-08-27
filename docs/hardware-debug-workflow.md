@@ -29,7 +29,7 @@
 ```
 L0  Android (Stock / 已 root)     ← 硬件清单、分区、DTB、iomem 【必做 baseline】
 L1  Fastboot / Bootloader        ← 解锁状态、分区可见性、救砖通路
-L2  UEFI (fastboot boot)         ← SimpleFb、Shell、Mass Storage、UART
+L2  UEFI (fastboot boot)         ← SimpleFb、Shell、按键菜单、UART
 L3  Linux (UEFI 引导)            ← dmesg 验证 clk/UFS/USB/面板/GPU
 L4  WinPE                         ← 存储/USB/基础 ACPI 是否够安装程序跑起来
 L5  Windows + 驱动包 (增量)       ← 单驱动、单 ACPI 变更验证
@@ -187,7 +187,7 @@ adb shell dumpsys display | head -80
 1. 黑屏 → 有背光无内容 → **查 SimpleFb 分辨率 / DTB 面板节点**
 2. Logo 后卡死 → **查内存映射 reserved region 与 /proc/iomem 冲突**
 3. 进 Shell → **跑 `map -r` `devices` 确认 DXE 加载**
-4. Mass Storage 出现 → **PC 磁盘管理见 UFS LUN**
+4. 菜单可选 Simple Init / Shell → **不要再走自编 USB Mass Storage**
 
 **UART：** SM8250 常见调试 UART 需从 DT 或 schematics 确认；edk2-msm 可配 `QcomGeniSerialPortLib`。无 UART 时，**屏幕 + USB 是唯一反馈**，改动需更小步。
 
@@ -286,7 +286,7 @@ DriverUpdater.exe -d "...\definitions\..." -r "..." -p X:\
 ### 7.2 存储 (UFS)
 
 - [ ] `/proc/iomem` 中 UFHCS 基地址已记录
-- [ ] UEFI Mass Storage 能列出 LUN
+- [ ] WinPE / USB 安装介质能识别 UFS 容量
 - [ ] WinPE 安装程序识别磁盘容量正确
 - [ ] 不使用过时 UFS 驱动（参考 nabu 社区 UFS 警告）
 
@@ -364,7 +364,7 @@ docs/sessions/  # 实验日志
 ### 9.3 PC 端环境建议
 
 - **Windows PC：** 编译 edk2、DriverUpdater、WinPE、WinDbg
-- **Linux VM/WSL2 或实体机：** edk2-msm 官方推荐 Arch/Ubuntu 编译链
+- **Linux：** edk2-msm 官方推荐 Arch/Ubuntu 编译链
 - **adb / fastboot：** Google platform-tools，固定 PATH
 - **串口：** USB-TTL + 杜邦线（若硬件支持 UART test point）
 
@@ -385,7 +385,7 @@ docs/sessions/  # 实验日志
 | 项目 Phase | 本流程层 | 退出标准 |
 |------------|----------|----------|
 | Phase 0 硬件摸底 | L0 | Golden Baseline + hardware-inventory 填完 |
-| Phase 1 UEFI | L2 | Shell + Mass Storage 稳定 3 次连续成功 |
+| Phase 1 UEFI | L2 | Shell + 按键菜单稳定 3 次连续成功 |
 | Phase 1.5 可选 | L3 | Linux dmesg 中 UFS+显示+USB OK |
 | Phase 2 Windows | L4～L5 | WinPE 见盘 + 最小驱动进桌面 |
 | Phase 3～4 外设/GPU | L5 增量 | 检查表 7.x 逐项通过 |

@@ -81,7 +81,7 @@ class TestUsbLogClient(unittest.TestCase):
         self.assertIn("BOOT.SEQ", hdr)
         self.assertNotIn("SCREEN.BMP", hdr)
 
-    def test_firmware_deferred_usb_msc(self) -> None:
+    def test_firmware_does_not_start_usb_msc(self) -> None:
         src = (
             ROOT
             / "port/dagu/Silicon/Qualcomm/QcomPkg/Drivers/TestLabBridgeDxe/TestLabBridgeDxe.c"
@@ -89,14 +89,14 @@ class TestUsbLogClient(unittest.TestCase):
         hdr = (
             ROOT / "port/dagu/Silicon/Qualcomm/QcomPkg/Include/Guid/TestLabBridgeGuid.h"
         ).read_text(encoding="utf-8")
-        self.assertIn("TestLabPublishUsbMassStorage", src)
+        self.assertNotIn("TestLabPublishUsbMassStorage", src)
+        self.assertNotIn("gLinuxSimpleMassStorageGuid", src)
         self.assertIn("TestLabReadyToBootCallback", src)
         self.assertIn("EfiCreateEventReadyToBootEx", src)
         self.assertIn("TESTLAB_ENABLE_CONOUT_HOOK", hdr)
-        self.assertIn("TESTLAB_ENABLE_AUTO_USB_MSC", hdr)
+        self.assertNotIn("TESTLAB_ENABLE_AUTO_USB_MSC", hdr)
         self.assertIn("#define TESTLAB_ENABLE_CONOUT_HOOK  0", hdr)
-        self.assertIn("#define TESTLAB_ENABLE_AUTO_USB_MSC 1", hdr)
-        self.assertIn("usb-on", src)
+        self.assertIn("ERR msc-removed", src)
 
     def test_gen_fat_template_v2(self) -> None:
         text = (ROOT / "tools/gen-testlab-fat.sh").read_text(encoding="utf-8")

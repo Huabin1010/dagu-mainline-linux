@@ -1,5 +1,3 @@
-.wsl-layer/
-.wsl-workspace
 artifacts/
 artifacts/*.stamp
 backups/golden/*
@@ -14,8 +12,18 @@ tools/platform-tools/
 edk2-msm/
 vendor/
 
+# Mainline Linux clone + build (see linux-mainline/README.md)
+linux-mainline/linux/
+linux-mainline/out/
+linux-mainline/firmware/dagu/qca6390/
+linux-mainline/firmware/dagu/bt_firmware/
+linux-mainline/firmware/dagu/persist/
+linux-mainline/firmware/dagu/vendor/
+
 # Large binaries in artifacts only
 *.img
+/boot-dagu-latest.img
+boot-dagu-latest.img
 
 # OS / editor
 .DS_Store

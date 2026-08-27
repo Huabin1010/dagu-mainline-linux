@@ -8,7 +8,7 @@ PORT="${ROOT}/port/dagu"
 EDK2="${ROOT}/edk2-msm"
 
 if [[ ! -d "${EDK2}/.git" ]]; then
-  echo "[apply-dagu-port] edk2-msm not found. Run bootstrap-wsl-workspace.sh first." >&2
+  echo "[apply-dagu-port] edk2-msm not found. Run tools/bootstrap-workspace.sh first." >&2
   exit 1
 fi
 
@@ -38,6 +38,18 @@ if [[ "${TESTLAB_ON}" -eq 0 ]]; then
     [[ -f "${f}" ]] && sed -i '/TestLabBridgeDxe/d' "${f}"
   done
 fi
+
+# Do not ship LinuxSimpleMassStorage in the dagu FV (MSC path abandoned).
+echo "[apply-dagu-port] strip LinuxSimpleMassStorage from sm8250 FDF/DSC"
+for f in \
+  "${EDK2}/Platform/Qualcomm/sm8250/sm8250.fdf" \
+  "${EDK2}/Platform/Qualcomm/sm8250/sm8250.dsc" \
+  "${EDK2}/Silicon/Qualcomm/QcomPkg/QcomCommonDsc.inc"
+do
+  if [[ -f "${f}" ]] && grep -q 'LinuxSimpleMassStorage' "${f}"; then
+    sed -i '/LinuxSimpleMassStorage/d' "${f}"
+  fi
+done
 
 if [[ "${USE_ROTATION_FB}" -eq 0 ]]; then
   echo "[apply-dagu-port] portrait FB — stock GraphicsConsole"
@@ -89,6 +101,48 @@ fi
 FB_SER="${EDK2}/Silicon/Qualcomm/QcomPkg/Library/FrameBufferSerialPortLib/FrameBufferSerialPortLib.c"
 if [[ -f "${FB_SER}" ]]; then
   echo "[apply-dagu-port] FrameBufferSerialPortLib overlay from port (red splash)"
+fi
+
+BM="${EDK2}/Common/edk2/MdeModulePkg/Application/BootManagerMenuApp/BootManagerMenu.c"
+if [[ -f "${BM}" ]]; then
+  if grep -q 'DaguReadAnyKey' "${BM}"; then
+    echo "[apply-dagu-port] BootManagerMenu: multi-ConIn + volume/power (from port overlay)"
+  else
+    echo "[apply-dagu-port] BootManagerMenu: applying multi-ConIn patch"
+    python3 "${ROOT}/tools/patch-boot-manager-menu.py" "${BM}"
+  fi
+fi
+
+# Build dagu-patched ButtonsDxe (skip HOME GPIO abort) from elish binary.
+BTN_DIR="${EDK2}/Platform/EFI_Binaries/Drivers/Devices/elish/ButtonsDxe"
+if [[ -f "${ROOT}/tools/patch-buttons-skip-home.py" && -f "${BTN_DIR}/ButtonsDxe.efi" ]]; then
+  echo "[apply-dagu-port] patching ButtonsDxe HOME-skip -> ButtonsDxe.dagu.efi"
+  python3 "${ROOT}/tools/patch-buttons-skip-home.py"
+fi
+
+# Apriori loads ButtonsDxe by GUID from its own PE32 path — must be the dagu
+# patched elish binary (HOME-skip). Generic sm8250 is phone layout; stock elish
+# still aborts on missing HOME.
+APRIORI="${EDK2}/Platform/Qualcomm/sm8250/Apriori.fdf.inc"
+DAGU_BTN="Platform/EFI_Binaries/Drivers/Devices/elish/ButtonsDxe/ButtonsDxe.dagu.efi"
+if [[ -f "${APRIORI}" ]]; then
+  if grep -q 'ButtonsDxe.dagu.efi' "${APRIORI}"; then
+    echo "[apply-dagu-port] Apriori ButtonsDxe already dagu-patched"
+  else
+    echo "[apply-dagu-port] Apriori ButtonsDxe -> Devices/elish ButtonsDxe.dagu.efi"
+    sed -i \
+      -e 's|Platform/EFI_Binaries/Drivers/sm8250/ButtonsDxe/ButtonsDxe\.efi|'"${DAGU_BTN}"'|g' \
+      -e 's|Platform/EFI_Binaries/Drivers/Devices/elish/ButtonsDxe/ButtonsDxe\.efi|'"${DAGU_BTN}"'|g' \
+      "${APRIORI}"
+    if ! grep -q 'ButtonsDxe.dagu.efi' "${APRIORI}"; then
+      echo "[apply-dagu-port] WARN: Apriori ButtonsDxe path unexpected" >&2
+    fi
+  fi
+fi
+
+if [[ ! -f "${BTN_DIR}/ButtonsDxe.dagu.efi" ]]; then
+  echo "[apply-dagu-port] ERROR: ${BTN_DIR}/ButtonsDxe.dagu.efi missing" >&2
+  exit 1
 fi
 
 echo "[apply-dagu-port] OK"

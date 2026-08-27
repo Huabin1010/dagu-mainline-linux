@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build/publish pipeline tests — ensure Windows gets the WSL-built boot image."""
+"""Build/artifact stamp pipeline tests — local Linux workspace only."""
 from __future__ import annotations
 
 import unittest
@@ -8,25 +8,38 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-class TestArtifactPublishPipeline(unittest.TestCase):
-    def test_build_script_publishes_to_windows(self) -> None:
+class TestArtifactStampPipeline(unittest.TestCase):
+    def test_build_script_writes_local_stamp(self) -> None:
         text = (ROOT / "tools/build-dagu-uefi.sh").read_text(
             encoding="utf-8", errors="replace"
         )
-        self.assertIn("publish_boot_artifact_to_win", text)
+        self.assertIn("write_boot_artifact_stamp", text)
+        self.assertIn("sha256=", text)
+        self.assertNotIn("publish_boot_artifact_to_win", text)
+        self.assertNotIn("wsl-workspace-lib", text)
 
-    def test_wsl_lib_has_publish_helper(self) -> None:
-        text = (ROOT / "tools/wsl-workspace-lib.sh").read_text(
+    def test_verify_script_is_local_only(self) -> None:
+        text = (ROOT / "tools/verify-boot-artifact.sh").read_text(
             encoding="utf-8", errors="replace"
         )
-        self.assertIn("resolve_win_repo_path", text)
-        self.assertIn("publish_boot_artifact_to_win", text)
-        self.assertIn("win_repo_path", text)
+        self.assertIn("sha256", text)
+        self.assertNotIn("wsl-workspace-lib", text)
+        self.assertNotIn("resolve_win_repo_path", text)
+        self.assertNotIn("Windows", text)
 
-    def test_publish_script_exists(self) -> None:
-        path = ROOT / "tools/publish-artifacts-to-win.sh"
+    def test_wsl_pipeline_removed(self) -> None:
+        self.assertFalse((ROOT / "tools/wsl-workspace-lib.sh").is_file())
+        self.assertFalse((ROOT / "wsl-layer.json").is_file())
+        self.assertFalse((ROOT / "tools/publish-artifacts-to-win.sh").is_file())
+        self.assertFalse((ROOT / "tools/wsl-layer").is_dir())
+        self.assertFalse((ROOT / "tools/bootstrap-wsl-workspace.sh").is_file())
+
+    def test_bootstrap_workspace_exists(self) -> None:
+        path = ROOT / "tools/bootstrap-workspace.sh"
         self.assertTrue(path.is_file())
-        self.assertIn("publish_boot_artifact_to_win", path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("edk2-msm", text)
+        self.assertIn("apply-dagu-port.sh", text)
 
 
 if __name__ == "__main__":

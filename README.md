@@ -25,16 +25,17 @@
 
 ---
 
-## Windows / WSL 怎么分工
+## 构建环境
 
-| 在 **Windows**（本目录 `E:\Projects\...`） | 在 **WSL**（`~/projects/xiaomi-pad870-win11-arm`） |
-|-------------------------------------------|-----------------------------------------------------|
-| 文档、调研、硬件清单 | edk2-msm **编译** |
-| adb / fastboot、刷机 | apt 安装 iasl / 交叉 gcc |
-| Cursor 日常改代码 | 长时间 bash 构建 |
+UEFI 在 **本机 Linux** 编译（edk2-msm 需要 bash + 交叉工具链）。Windows 仍可用于 adb / fastboot、DriverUpdater、WinPE。
 
-**不需要 WSL 的事就在 Windows 做**；只有编译 UEFI 等 Linux 任务才去 WSL。两边通过 **git** 同步同一仓库，不用 `/mnt` 复制整仓。  
-详见 [docs/windows-wsl-split.md](docs/windows-wsl-split.md)。
+```bash
+./tools/bootstrap-workspace.sh   # 首次：clone edk2-msm + vendor
+./tools/build-dagu-uefi.sh       # 产物：artifacts/boot-dagu-latest.img
+```
+
+主线 Linux（P0，对照 Kernel-Build / ginkgo）在 [`linux-mainline/`](linux-mainline/README.md)：`fastboot boot` 进 ramdisk，不写分区、不碰 userdata。
+
 
 ---
 
@@ -51,7 +52,8 @@
 | 3 | **WOA-Drivers + DriverUpdater** | 社区 Windows 驱动来自 [WOA-Drivers](https://github.com/edk2-porting/WOA-Drivers)，用 [DriverUpdater](https://github.com/WOA-Project/DriverUpdater) 离线注入 |
 | 4 | **Mu-Silicium (Cedros/SM8250)** | [Project Silicium](https://github.com/Project-Silicium/Mu-Silicium) 为新一代 UEFI 栈，SM8250 有 Cedros 支持但 `dagu` 仍需自行移植，作备选 |
 
-**安装方式：** Mass Storage Mode（优先）或 Windows PE 自定义引导（见 [Renegade 安装指南](https://renegade-project.tech/en/install)）。
+**安装方式：** 不再走自编 Linux Mass Storage（该路径曾导致 USB 假死，已从固件中移除）。后续安装改 **Windows PE / USB 启动介质**（见 [Renegade 安装指南](https://renegade-project.tech/en/install)）。  
+历史记录：[docs/mass-storage-blocker-analysis.md](docs/mass-storage-blocker-analysis.md)。
 
 **GPU 预期：** 走社区 WDDM 驱动（WOA-Drivers 提取 + INF 适配），**不是** 2025 年底面向 Snapdragon X Elite PC 的 UGD 可下载驱动。
 
@@ -107,7 +109,7 @@
 Android Bootloader (ABL/XBL, 已签名)
         ↓ fastboot boot boot-dagu.img
 edk2-msm UEFI (Renegade Project)
-        ↓ Mass Storage / USB 启动 WinPE / ISO
+        ↓ USB 启动 WinPE / ISO（不再使用自编 LSMS）
 Windows 11 ARM64 + WOA-Drivers (社区驱动包)
 ```
 
@@ -136,8 +138,6 @@ xiaomi-pad870-win11-arm/
 │   ├── hardware-debug-workflow.md  # 硬件快速调试流程
 │   ├── bootloader-unlock-guide.md  # BL 解锁指南
 │   ├── uefi-port-dagu.md       # dagu UEFI 移植与编译
-│   ├── windows-wsl-split.md    # Windows / WSL 分工（主说明）
-│   ├── wsl-native-workflow.md  # WSL bootstrap / 编译环境
 │   ├── hardware-inventory.md # 硬件清单 (ACPI dump, lsusb 等)
 │   ├── boot-guide.md         # 刷机/启动指南
 │   └── gpu-driver-notes.md   # GPU 驱动适配笔记
@@ -145,7 +145,7 @@ xiaomi-pad870-win11-arm/
 ├── drivers/                  # 自研或修改过的驱动 INF/二进制
 │   └── gpu/                  # Adreno 650 GPU 驱动相关
 ├── port/dagu/                # dagu UEFI 覆盖层（打入 edk2-msm）
-├── edk2-msm/                 # 仅 WSL bootstrap 后存在；Windows 侧可不 clone
+├── edk2-msm/                 # bootstrap 后 git clone，不入库
 ├── vendor/kernel_devicetree/ # 同上
 ├── artifacts/                # boot-dagu-*.img 编译产物
 ├── tools/                    # 辅助脚本 (打包、签名、刷写)
@@ -153,8 +153,8 @@ xiaomi-pad870-win11-arm/
     ├── mi-unlock-cn/         # 已解压的国行 Mi 解锁工具
     ├── platform-tools/       # adb / fastboot
     ├── test-lab/               # 可恢复测试实验室 → [docs/test-lab-workflow.md](docs/test-lab-workflow.md)
-    ├── bootstrap-wsl-workspace.ps1  # WSL 内 git clone 初始化（不用 /mnt 复制）
-    ├── build-dagu-uefi.sh    # WSL/Linux 编译 boot-dagu.img
+    ├── bootstrap-workspace.sh # clone edk2-msm + vendor
+    ├── build-dagu-uefi.sh    # Linux 编译 boot-dagu.img
     ├── extract-dagu-dtb.ps1  # 从 boot.img 提取 DTB 指引
     ├── collect-hw-dump.sh    # Golden Baseline 一键采集 (Linux/macOS)
     └── collect-hw-dump.ps1   # Golden Baseline 一键采集 (Windows)
@@ -176,11 +176,11 @@ xiaomi-pad870-win11-arm/
 - [ ] **Phase 1 — UEFI (edk2-msm)**
   - [ ] 基于 j716f 模板创建 `dagu` 设备配置，编译 `boot-dagu.img` → [docs/uefi-port-dagu.md](docs/uefi-port-dagu.md)（**首版已编出**，待 fastboot 实测）
   - [ ] fastboot 链式引导 → UEFI Shell / SimpleFb 显示（用 `tools/test-lab/lab.ps1 test-uefi`）
-  - [ ] 验证 Mass Storage Mode 与 USB 启动
+  - [ ] 验证 USB 启动 WinPE / ISO（不使用 Mass Storage）
 
 - [ ] **Phase 2 — Windows 部署**
   - [ ] 参考 nabu 流程改造 GPT 分区（双系统）
-  - [ ] Mass Storage 或 PE 方式部署 Win11 ARM64
+  - [ ] WinPE / USB 方式部署 Win11 ARM64
   - [ ] WOA-Drivers extract + DriverUpdater 灌入基础驱动
 
 - [ ] **Phase 3 — ACPI 与外设**
@@ -200,7 +200,8 @@ xiaomi-pad870-win11-arm/
 
 - 一台 **小米平板5 Pro 12.4** (Xiaomi Pad 5 Pro 12.4, 型号 22081281AC)
 - **已解锁 Bootloader**（当前为 **locked**，见 [解锁指南](docs/bootloader-unlock-guide.md)）
-- Windows PC (用于编译驱动、制作启动盘)
+- Windows PC（可选：DriverUpdater、WinPE、adb/fastboot）
+- Linux 环境（编译 edk2-msm / UEFI）
 - 备用 Android 系统 / 完整备份 (刷机失败可恢复)
 - 基本嵌入式/驱动开发经验
 
@@ -217,8 +218,10 @@ xiaomi-pad870-win11-arm/
 
 - [Bootloader 解锁指南](docs/bootloader-unlock-guide.md) — 国行 HyperOS 流程 + 本仓库已下载工具
 - [硬件快速调试流程](docs/hardware-debug-workflow.md) — 分层验证、Golden Baseline、日常实验循环
+- [dagu EDL 救砖完整流程](docs/dagu-edl-recovery-full-playbook.md) — 9008 诊断、授权、线刷与恢复记录（2026-07-21）
+- [「魔改 boot」与假死/9008 原因分析](docs/why-boot-modification-caused-dead-device.md) — 链式引导 vs 写分区、LSMS 与 EDL 演化链
 - [可恢复测试实验室](docs/test-lab-workflow.md) — Golden 备份、UEFI 自动测试、一键 recover
-- [Windows / WSL 分工](docs/windows-wsl-split.md) — 什么在 Win 做、什么在 WSL 做
+- [dagu UEFI 移植与编译](docs/uefi-port-dagu.md) — bootstrap、依赖与 `build-dagu-uefi.sh`
 - [Renegade Project](https://renegade-project.tech/) — 安装 / 移植 / FAQ
 - [edk2-porting/edk2-msm](https://github.com/edk2-porting/edk2-msm) — SM8250 UEFI 固件
 - [edk2-porting/WOA-Drivers](https://github.com/edk2-porting/WOA-Drivers) — 社区 Windows 驱动包
@@ -251,4 +254,4 @@ xiaomi-pad870-win11-arm/
 
 ---
 
-**Status:** ✅ Bootloader 已解锁 · 🚧 dagu UEFI port 骨架已加入 edk2-msm，待 WSL 编译与 fastboot 实测
+**Status:** ✅ Bootloader 已解锁 · 🚧 dagu UEFI port 骨架已加入 edk2-msm，待 Linux 编译与 fastboot 实测

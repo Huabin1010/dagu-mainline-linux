@@ -1,11 +1,11 @@
 # 硬件清单 — dagu (小米平板5 Pro 12.4)
 
-> Golden Baseline 最新采集：**2026-07-19（解锁后）**  
-> 原始数据：`dumps/dagu-20260719-094103/`  
-> 摘要：`dumps/dagu-20260719-094103/device-summary.txt`  
+> Golden Baseline 最新采集：**2026-08-26（Magisk root）**  
+> 原始数据：`dumps/dagu-20260826-210700-root/`（约 1.9 GiB，gitignore）  
+> 说明：`dumps/dagu-20260826-210700-root/README.md`  
 > 首次采集（解锁前）：`dumps/dagu-20260719-092500/`
 
-**状态：** ✅ Bootloader 已解锁 · ✅ fastboot 信息已采集 · ⬜ iomem/DTB 需 root 或开源 DT 参考
+**状态：** ✅ Bootloader 已解锁 · ✅ Magisk 30.7 root · ✅ iomem / live DTB / dmesg / 启动分区已采集
 
 ---
 
@@ -24,8 +24,8 @@
 | 内核 | 4.19.157-perf (2025-07-01) | `uname -a` |
 | **Bootloader** | **unlocked** | `ro.secureboot.lockstate` / fastboot |
 | Verified Boot | **orange**（已解锁预期状态） | `ro.boot.verifiedbootstate` |
-| 当前 slot | **b** | fastboot `current-slot` |
-| ADB Root | 仍不可用（HyperOS 量产版） | `adb root` 被拒绝 |
+| 当前 slot | **a** | fastboot `current-slot` |
+| Root | **Magisk 30.7**（`su` 可用） | `adb shell su -c id` |
 
 ---
 
@@ -68,12 +68,14 @@
 
 | 资源 | 状态 | 说明 |
 |------|------|------|
-| `/proc/iomem` | ❌ Permission denied | 解锁 BL 后量产 HyperOS 仍禁止 shell 读取 |
-| `/sys/firmware/fdt` | ❌ Permission denied | 同上 |
-| `dmesg` | ❌ Permission denied | 同上 |
-| **开源 DT 参考** | ✅ 可用 | [MiCode/kernel_devicetree `dagu-s-oss`](https://github.com/MiCode/kernel_devicetree/tree/dagu-s-oss) |
+| `/proc/iomem` | ✅ | `dumps/.../memory/iomem.txt`；UFS `1d84000`、GPU `03d00000`、USB `dwc3@a600000` |
+| live FDT | ✅ | `dt/fdt.dtb` + `dt/fdt.dts`（model=`xiaomi dagu`，`qcom,kona-mtp`） |
+| `dmesg` | ✅ | `logs/dmesg.txt` |
+| 面板 | ✅ | `qcom,mdss_dsi_l81a_42_04_0a_dual_dphy_video` |
+| 触控 | ✅ | `himax,hxcommon`；input=`himax-touchscreen` |
+| **开源 DT 参考** | ✅ | [MiCode/kernel_devicetree `dagu-s-oss`](https://github.com/MiCode/kernel_devicetree/tree/dagu-s-oss) |
 
-UEFI 移植可先用开源 `dagu-sm8250.dtsi` 等文件提取 reserved-memory、面板、外设节点；后续如有 Magisk/root 再与真机 DTB diff。
+UEFI 内存映射与 ACPI 应对这份 live DTB / iomem，不要再只用临时 elish DTB。
 
 ---
 
@@ -83,7 +85,7 @@ UEFI 移植可先用开源 `dagu-sm8250.dtsi` 等文件提取 reserved-memory、
 product: dagu
 unlocked: yes
 serialno: 53dcc70
-current-slot: b
+current-slot: a
 variant: SM8 UFS
 verified boot state: orange (post-unlock)
 ```
@@ -100,7 +102,7 @@ verified boot state: orange (post-unlock)
 | `fastboot-getvar-all.txt` | ✅ 新增 |
 | `partition-by-name.txt` | ✅ |
 | `getevent-lp.txt` / `dumpsys-display.txt` | ✅ |
-| `iomem.txt` / `fdt.dtb` / `dmesg.txt` | ❌ 需 root |
+| `iomem.txt` / `fdt.dtb` / `fdt.dts` / `dmesg.txt` | ✅ 2026-08-26 root 采集 |
 
 ---
 
@@ -113,4 +115,4 @@ verified boot state: orange (post-unlock)
 
 ---
 
-**最后更新：** 2026-07-19（BL 解锁后）
+**最后更新：** 2026-08-26（Magisk root 全量 dump）

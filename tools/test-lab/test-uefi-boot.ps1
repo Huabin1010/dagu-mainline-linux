@@ -77,7 +77,7 @@ try { Assert-FastbootReady } catch {
     throw
 }
 
-$imgPath = if ($Image) { Resolve-RepoPath $Image } else { Resolve-RepoPath $cfg.uefi_test_image }
+$imgPath = if ($Image) { Resolve-RepoPath $Image } else { Get-CanonicalUefiImagePath }
 try {
     $imgBytes = Assert-UefiArtifactPublished -ImagePath $imgPath
 } catch {

@@ -39,12 +39,10 @@
 [Guids]
   gTestLabBridgeProtocolGuid
   gTestLabBridgeRamDiskGuid
-  gLinuxSimpleMassStorageGuid
 
 [Protocols]
   gEfiBlockIoProtocolGuid
   gEfiDevicePathProtocolGuid
-  gEfiLoadedImageProtocolGuid
   gEfiShellProtocolGuid
   gEfiSimpleFileSystemProtocolGuid
   gEfiSimpleTextOutProtocolGuid

@@ -45,20 +45,54 @@ function Assert-UefiArtifactPublished {
     }
     if (-not (Test-Path $stampPath)) {
         throw @(
-            "Stale Windows artifact (no publish stamp): $ImagePath ($imgBytes bytes)",
-            "WSL builds to ~/projects/.../artifacts — run:",
-            "  wsl -d Ubuntu-22.04 -- bash ~/projects/xiaomi-pad870-win11-arm/tools/publish-artifacts-to-win.sh",
-            "or rebuild: wsl ... ./tools/build-dagu-uefi.sh"
+            "UEFI artifact missing stamp: $ImagePath ($imgBytes bytes)",
+            "Rebuild:  ./tools/build-dagu-uefi.sh"
         ) -join "`n"
     }
     $stamp = Get-Content $stampPath -Raw
     if ($stamp -match 'bytes=(\d+)') {
         $publishedBytes = [int64]$Matches[1]
         if ($publishedBytes -ne $imgBytes) {
-            throw "Artifact size mismatch: file=$imgBytes stamp=$publishedBytes — republish from WSL"
+            throw "Artifact size mismatch: file=$imgBytes stamp=$publishedBytes — rebuild"
+        }
+    }
+    if ($stamp -match 'sha256=([0-9a-f]{64})') {
+        $expectedSha = $Matches[1]
+        $actualSha = (Get-FileHash -Algorithm SHA256 -Path $ImagePath).Hash.ToLower()
+        if ($actualSha -ne $expectedSha) {
+            throw "Artifact SHA256 mismatch — file may be stale or corrupt. Rebuild."
         }
     }
     return $imgBytes
+}
+
+function Get-CanonicalUefiImagePath {
+    $cfg = Get-TestLabConfig
+    $img = Resolve-RepoPath $cfg.uefi_test_image
+    if (-not (Test-Path $img)) {
+        throw @(
+            "Canonical UEFI image not found: $img",
+            "Build first:  ./tools/build-dagu-uefi.sh"
+        ) -join "`n"
+    }
+    return (Resolve-Path $img).Path
+}
+
+function Remove-StaleBootImageCopies {
+    $root = Get-TestLabRoot
+    $stale = Join-Path $root "boot-dagu-latest.img"
+    $removed = @()
+    if (Test-Path $stale) {
+        $len = (Get-Item $stale).Length
+        if ($len -lt 1MB) {
+            Remove-Item -Force $stale -ErrorAction SilentlyContinue
+            $removed += $stale
+            Write-Host "[artifact-guard] removed stale root image ($len bytes): $stale" -ForegroundColor Yellow
+        } else {
+            Write-Host "[artifact-guard] WARN: non-canonical boot image at repo root ($len bytes). Use artifacts\boot-dagu-latest.img" -ForegroundColor Yellow
+        }
+    }
+    return $removed
 }
 
 function New-TestLabSession {

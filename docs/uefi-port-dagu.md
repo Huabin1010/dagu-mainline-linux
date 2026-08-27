@@ -3,6 +3,8 @@
 > 设备：小米平板5 Pro 12.4 (`dagu`, SM8250)  
 > 上游：[edk2-porting/edk2-msm](https://github.com/edk2-porting/edk2-msm)
 
+**Mass Storage / LSMS 路径已放弃：** 自编 Linux gadget 曾导致 USB 假死，已从 `dagu` 固件中移除。安装改走 WinPE。历史分析见 [mass-storage-blocker-analysis.md](mass-storage-blocker-analysis.md)。
+
 ---
 
 ## 1. 本仓库已添加的内容
@@ -22,16 +24,15 @@ dagu 设备 port 跟踪在 **`port/dagu/`**（构建时打入 edk2-msm）：
 
 ---
 
-## 2. 构建环境（WSL 原生根，git clone）
+## 2. 构建环境（本机 Linux）
 
-工作目录：**`~/projects/xiaomi-pad870-win11-arm`**（仅编译时用，见 [windows-wsl-split.md](windows-wsl-split.md)）
+在仓库根目录操作。首次需要 clone 上游：
 
-```powershell
-# 项目 push 到 Git 后，在 WSL clone + 拉 upstream
-.\tools\bootstrap-wsl-workspace.ps1 -RepoUrl https://github.com/<you>/xiaomi-pad870-win11-arm.git -RestartLayer
+```bash
+./tools/bootstrap-workspace.sh
 ```
 
-依赖安装（在 WSL 工作区内）：
+依赖：
 
 ```bash
 sudo apt update
@@ -44,7 +45,6 @@ sudo apt install -y build-essential uuid-dev iasl git nasm python3 \
 ## 3. 编译
 
 ```bash
-cd ~/projects/xiaomi-pad870-win11-arm
 ./tools/build-dagu-uefi.sh
 ```
 
@@ -65,9 +65,8 @@ cd edk2-msm
 1. 平板关机 → **电源 + 音量下** → Fastboot
 2. PC 执行：
 
-```powershell
-cd E:\Projects\xiaomi-pad870-win11-arm\tools\platform-tools
-.\fastboot.exe boot ..\..\artifacts\boot-dagu-latest.img
+```bash
+fastboot boot artifacts/boot-dagu-latest.img
 ```
 
 3. 预期：Renegade Logo / UEFI Shell / SimpleFb 显示  
@@ -83,7 +82,7 @@ cd E:\Projects\xiaomi-pad870-win11-arm\tools\platform-tools
 | P0 | **校验内存映射** | 对比 `/proc/iomem` 与 `PlatformMemoryMapLib.c` |
 | P1 | **ACPI / DSDT** | 参考 `elish` / `lmi`，按 dagu 外设修改 |
 | P1 | **面板 SimpleFb** | 确认 2560×1600 与 DSI 节点一致 |
-| P2 | **Mass Storage** | UEFI 菜单验证 UFS 枚举 |
+| P2 | **WinPE USB 启动** | UEFI 菜单验证 U 盘 / ISO，不走 LSMS |
 | P2 | **WinPE 烟雾测试** | ACPI 就绪后再做 |
 
 ### 提取 dagu.dtb（有 root 后）

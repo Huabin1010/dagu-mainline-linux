@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import struct
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,17 +31,17 @@ def write_c_header(image: bytes, out_h: Path, var_name: str = "gTestLabFatDiskIm
     out_h.write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
-def win_to_wsl(path: Path) -> str:
-    resolved = path.resolve()
-    drive = resolved.drive.rstrip(":").lower()
-    rest = resolved.as_posix().split(":", 1)[1]
-    return f"/mnt/{drive}{rest}"
-
-
-def build_with_wsl(img_path: Path) -> None:
-    wsl_img = win_to_wsl(img_path)
-    wsl_script = win_to_wsl(Path(__file__).resolve().parent / "gen-testlab-fat.sh")
-    subprocess.run(["wsl", "-d", "Ubuntu-22.04", "bash", "-lc", f"bash '{wsl_script}'"], check=True)
+def build_fat_bin(img_path: Path) -> None:
+    tools = Path(__file__).resolve().parent
+    sh = tools / "gen-testlab-fat.sh"
+    standalone = tools / "gen-testlab-fat-standalone.py"
+    if shutil.which("mkfs.vfat") and sh.is_file():
+        subprocess.run(["bash", str(sh)], check=True)
+        return
+    subprocess.run(
+        [sys.executable, str(standalone), "--out-bin", str(img_path)],
+        check=True,
+    )
 
 
 def main() -> int:
@@ -68,7 +68,7 @@ def main() -> int:
         image = args.out_bin.read_bytes()
         write_c_header(image, args.out_h)
         return 0
-    build_with_wsl(args.out_bin)
+    build_fat_bin(args.out_bin)
     image = args.out_bin.read_bytes()
     if len(image) != 8 * 1024 * 1024:
         print(f"unexpected image size: {len(image)} (expected 8 MiB)", file=sys.stderr)

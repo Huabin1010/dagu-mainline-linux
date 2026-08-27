@@ -106,7 +106,7 @@ Test-Path artifacts\boot-dagu-latest.img
 | 最近一次 UEFI 测试 | `logs/test-lab/sessions/<最新目录>/` |
 | fastboot 输出 | `fastboot-boot.log` / `fastboot-getvar-all.txt` |
 | 恢复操作 | `*-recover-*/manifest.json` |
-| WSL 编译失败 | `.wsl-layer/live.log` + WSL build 终端输出 |
+| UEFI 编译失败 | `./tools/build-dagu-uefi.sh` 终端输出 |
 
 ```powershell
 .\tools\test-lab\lab.ps1 logs

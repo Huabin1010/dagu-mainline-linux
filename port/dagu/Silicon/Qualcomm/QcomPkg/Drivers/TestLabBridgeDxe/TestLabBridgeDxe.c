@@ -15,7 +15,6 @@
 #include <Library/UefiLib.h>
 #include <Protocol/BlockIo.h>
 #include <Protocol/DevicePath.h>
-#include <Protocol/LoadedImage.h>
 #include <Protocol/Shell.h>
 #include <Protocol/SimpleFileSystem.h>
 #include <Protocol/SimpleTextOut.h>
@@ -35,10 +34,7 @@ typedef struct {
   UINTN                           ConsoleTail;
   EFI_EVENT                       TimerEvent;
   EFI_EVENT                       ReadyToBootEvent;
-  EFI_EVENT                       UsbStartEvent;
   EFI_FILE_PROTOCOL              *RootDir;
-  BOOLEAN                         UsbPublishDone;
-  BOOLEAN                         UsbPublishOk;
   BOOLEAN                         LateInitDone;
 #if TESTLAB_ENABLE_CONOUT_HOOK
   EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *OriginalConOut;
@@ -534,45 +530,17 @@ TestLabExecuteShellCommand(
 
 STATIC
 EFI_STATUS
-TestLabPublishUsbMassStorage(VOID);
-
-STATIC
-VOID
-EFIAPI
-TestLabUsbStartCallback(
-  IN EFI_EVENT Event,
-  IN VOID     *Context);
-
-STATIC
-EFI_STATUS
 TestLabHandleCommand(
   IN TESTLAB_BRIDGE_PRIVATE *Private,
   IN CHAR8                  *CommandAscii)
 {
-  CHAR8       Ack[64];
-  EFI_STATUS  Status;
+  CHAR8 Ack[64];
 
   if (AsciiStrCmp(CommandAscii, "usb-on") == 0) {
-    if (Private->UsbPublishDone) {
-      AsciiSPrint(Ack, sizeof(Ack), "OK already");
-    } else {
-      if (Private->UsbStartEvent == NULL) {
-        Status = gBS->CreateEvent(
-            EVT_NOTIFY_SIGNAL, TPL_APPLICATION,
-            TestLabUsbStartCallback, Private, &Private->UsbStartEvent);
-        if (EFI_ERROR(Status)) {
-          AsciiSPrint(Ack, sizeof(Ack), "ERR 0x%llx", (UINT64)Status);
-          TestLabWriteFile(Private, TESTLAB_COMMAND_ACK, Ack, AsciiStrLen(Ack));
-          TestLabWriteFile(Private, TESTLAB_COMMAND_IN, "", 0);
-          return Status;
-        }
-      }
-      gBS->SignalEvent(Private->UsbStartEvent);
-      AsciiSPrint(Ack, sizeof(Ack), "OK starting");
-    }
+    AsciiSPrint(Ack, sizeof(Ack), "ERR msc-removed");
     TestLabWriteFile(Private, TESTLAB_COMMAND_ACK, Ack, AsciiStrLen(Ack));
     TestLabWriteFile(Private, TESTLAB_COMMAND_IN, "", 0);
-    return EFI_SUCCESS;
+    return EFI_UNSUPPORTED;
   }
 
   return TestLabExecuteShellCommand(Private, CommandAscii);
@@ -602,81 +570,16 @@ TestLabPollCommand(
 }
 
 STATIC
-EFI_STATUS
-TestLabPublishUsbMassStorage(VOID)
-{
-  MEDIA_FW_VOL_FILEPATH_DEVICE_PATH FnNode;
-  EFI_DEVICE_PATH_PROTOCOL         *BootPath;
-  EFI_HANDLE                        ImageHandle;
-  EFI_STATUS                        Status;
-  EFI_LOADED_IMAGE_PROTOCOL        *LoadedImage;
-
-  Status = gBS->HandleProtocol(
-      gImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&LoadedImage);
-  if (EFI_ERROR(Status)) {
-    return Status;
-  }
-
-  EfiInitializeFwVolDevicepathNode(&FnNode, &gLinuxSimpleMassStorageGuid);
-  BootPath = AppendDevicePathNode(
-      DevicePathFromHandle(LoadedImage->DeviceHandle),
-      (EFI_DEVICE_PATH_PROTOCOL *)&FnNode);
-  if (BootPath == NULL) {
-    return EFI_OUT_OF_RESOURCES;
-  }
-
-  Status = gBS->LoadImage(FALSE, gImageHandle, BootPath, NULL, 0, &ImageHandle);
-  FreePool(BootPath);
-  if (EFI_ERROR(Status)) {
-    return Status;
-  }
-
-  return gBS->StartImage(ImageHandle, NULL, NULL);
-}
-
-STATIC
-VOID
-EFIAPI
-TestLabUsbStartCallback(
-  IN EFI_EVENT Event,
-  IN VOID     *Context)
-{
-  TESTLAB_BRIDGE_PRIVATE *Private = Context;
-  EFI_STATUS              Status;
-
-  if (Private == NULL || Private->UsbPublishDone) {
-    return;
-  }
-
-  Private->UsbPublishDone = TRUE;
-  Status = TestLabPublishUsbMassStorage();
-  Private->UsbPublishOk = !EFI_ERROR(Status);
-  DEBUG((
-      EFI_D_ERROR,
-      "TestLabBridge: USB MSC deferred start %r\n",
-      Status));
-}
-
-STATIC
 VOID
 TestLabUsbStatusString(
   IN TESTLAB_BRIDGE_PRIVATE *Private,
   OUT CHAR8                 *Buffer,
   IN UINTN                   BufferSize)
 {
-  CONST CHAR8 *State;
-
-  if (Private->UsbPublishDone) {
-    State = Private->UsbPublishOk ? "ready" : "failed";
-  } else {
-    State = "waiting";
-  }
-
   AsciiSPrint(
       Buffer, BufferSize,
-      "{\"seq\":%llu,\"usb\":\"%a\",\"bridge\":\"v2\"}",
-      Private->Protocol.BootSeq,
-      State);
+      "{\"seq\":%llu,\"usb\":\"disabled\",\"bridge\":\"v2\"}",
+      Private->Protocol.BootSeq);
 }
 
 STATIC
@@ -809,7 +712,12 @@ TestLabInstallRamDisk(
     return Status;
   }
 
-  return gBS->ConnectController(Private->Handle, NULL, NULL, FALSE);
+  //
+  // Fat/DiskIo may bind later — do not fail the whole bridge if no consumer
+  // attaches on the first ConnectController (was printing "ramdisk failed").
+  //
+  gBS->ConnectController(Private->Handle, NULL, NULL, TRUE);
+  return EFI_SUCCESS;
 }
 
 STATIC
@@ -887,24 +795,9 @@ TestLabStartServices(
         EFI_TIMER_PERIOD_MILLISECONDS(500));
   }
 
-#if TESTLAB_ENABLE_AUTO_USB_MSC
-  Status = gBS->CreateEvent(
-      EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_APPLICATION,
-      TestLabUsbStartCallback, Private, &Private->UsbStartEvent);
-  if (!EFI_ERROR(Status)) {
-    gBS->SetTimer(
-        Private->UsbStartEvent, TimerRelative,
-        EFI_TIMER_PERIOD_SECONDS(TESTLAB_USB_MSC_DELAY_SEC));
-  }
   AsciiSPrint(
       Banner, sizeof(Banner),
-      "\r\nTestLabBridge v2: USB MSC in %u s (Type-C log)\r\n",
-      TESTLAB_USB_MSC_DELAY_SEC);
-#else
-  AsciiSPrint(
-      Banner, sizeof(Banner),
-      "\r\nTestLabBridge v2: log bridge ready (usb-on to export)\r\n");
-#endif
+      "\r\nTestLabBridge v2: log bridge ready (MSC removed)\r\n");
   TestLabMirrorToSerial(Banner, AsciiStrLen(Banner));
   DEBUG((EFI_D_ERROR, "%a", Banner));
   return EFI_SUCCESS;

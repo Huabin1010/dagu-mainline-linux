@@ -95,7 +95,7 @@ if ($last.fastboot) {
 }
 
 Write-Host "[usb-debug] UEFI USB tips:" -ForegroundColor DarkGray
-Write-Host "  - Mass Storage: boot SimpleInit / LinuxSimpleMassStorage from UEFI menu" -ForegroundColor DarkGray
+Write-Host "  - Boot Simple Init or UEFI Shell from the menu (Mass Storage / LSMS removed)" -ForegroundColor DarkGray
 Write-Host "  - Serial debug: UART (if wired); USB serial depends on UsbfnDwc3 + host driver" -ForegroundColor DarkGray
 
 Write-SessionManifest -Session $session -Data @{

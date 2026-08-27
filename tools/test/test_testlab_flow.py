@@ -35,7 +35,7 @@ class TestFirmwareUsbV2(unittest.TestCase):
             "port/dagu/Silicon/Qualcomm/QcomPkg/Drivers/TestLabBridgeDxe/TestLabBridgeDxe.inf"
         )
         self.assertIn("TestLabFatDisk.S", text)
-        self.assertIn("gLinuxSimpleMassStorageGuid", text)
+        self.assertNotIn("gLinuxSimpleMassStorageGuid", text)
         self.assertIn("SerialPortLib", text)
 
     def test_bridge_source_v2_files(self) -> None:
@@ -43,7 +43,8 @@ class TestFirmwareUsbV2(unittest.TestCase):
             "port/dagu/Silicon/Qualcomm/QcomPkg/Drivers/TestLabBridgeDxe/TestLabBridgeDxe.c"
         )
         self.assertIn("TESTLAB_BOOT_LOG", text)
-        self.assertIn("TestLabPublishUsbMassStorage", text)
+        self.assertNotIn("TestLabPublishUsbMassStorage", text)
+        self.assertNotIn("gLinuxSimpleMassStorageGuid", text)
         self.assertIn("TestLabReadyToBootCallback", text)
         self.assertIn("TESTLAB_ENABLE_CONOUT_HOOK", text)
         self.assertNotIn("SCREEN.BMP", text)

@@ -1,12 +1,8 @@
 /** @file
   TestLab USB debug bridge v2 for dagu UEFI bring-up.
 
-  RAM FAT volume (TESTLAB) exposed over USB Mass Storage:
-    TESTLAB/BOOT.LOG, BOOT.SEQ, STATUS.JSON, COMMAND.IN, COMMAND.ACK
-
-  Hooks ConOut, mirrors to BOOT.LOG and optional UART (USE_UART=1).
-  Defers LinuxSimpleMassStorage until TESTLAB_USB_MSC_DELAY_SEC so early
-  display/USB init is not blocked by StartImage in a timer callback.
+  RAM FAT volume (TESTLAB) for BOOT.LOG / COMMAND.* when the driver is enabled.
+  LinuxSimpleMassStorage / USB MSC export was removed — do not re-enable.
 **/
 
 #ifndef TESTLAB_BRIDGE_GUID_H_
@@ -32,12 +28,10 @@ extern EFI_GUID gTestLabBridgeRamDiskGuid;
 #define TESTLAB_CONSOLE_RING_SIZE (128 * 1024)
 #define TESTLAB_DISK_SIZE         (1U * 1024U * 1024U)
 #define TESTLAB_SECTOR_SIZE       512U
-#define TESTLAB_USB_MSC_DELAY_SEC 45U
 
-// ConOut hook still off (breaks SimpleInit). USB MSC auto-starts after display is up.
+// HARD OFF. Ramdisk alloc was EFI_OUT_OF_RESOURCES on this tablet.
 #define TESTLAB_ENABLE_CONOUT_HOOK  0
-#define TESTLAB_ENABLE_AUTO_USB_MSC 1
-#define TESTLAB_ENABLE_BRIDGE       1
+#define TESTLAB_ENABLE_BRIDGE       0
 
 typedef struct _TESTLAB_BRIDGE_PROTOCOL TESTLAB_BRIDGE_PROTOCOL;
 

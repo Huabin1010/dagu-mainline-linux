@@ -1,0 +1,2 @@
+# Xiaomi/Google fastboot (18d1:d00d). USB2 LPM + AMD xHCI: devices works, getvar/flash hangs.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="d00d", ATTR{power/usb2_hardware_lpm}="0"

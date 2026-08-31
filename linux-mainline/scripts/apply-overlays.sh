@@ -23,6 +23,7 @@ install_src drivers/usb/misc/ps5169-dagu.c
 install_src drivers/input/keyboard/nanosic-dagu.c
 install_src drivers/power/supply/bq2597x-dagu.c
 install_src drivers/power/supply/p9418-dagu.c
+install_src drivers/watchdog/qcom-wdt-early-dagu.c
 
 append_once() {
 	local file=$1
@@ -54,6 +55,10 @@ append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
 append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
 	'p9418-dagu.o' \
 	'obj-$(CONFIG_CHARGER_P9418_DAGU) += p9418-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/watchdog/Makefile" \
+	'qcom-wdt-early-dagu.o' \
+	'obj-$(CONFIG_QCOM_WDT) += qcom-wdt-early-dagu.o'
 
 python3 - "$KERNEL_SRC" <<'PY'
 from pathlib import Path
@@ -140,6 +145,9 @@ config CHARGER_P9418_DAGU
 
 """,
 )
+
+# Do not poke KPSS WDT from primary_entry: MMU is off and that
+# physical store SErrors on this ABL map. Pet from early_initcall instead.
 PY
 
 echo "==> overlays installed"

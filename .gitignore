@@ -20,6 +20,14 @@ linux-mainline/firmware/dagu/bt_firmware/
 linux-mainline/firmware/dagu/persist/
 linux-mainline/firmware/dagu/vendor/
 
+# magiskboot unpack leftovers next to scripts (kernel Image, ramdisk, header)
+linux-mainline/kernel
+linux-mainline/kernel_dtb
+linux-mainline/header
+linux-mainline/ramdisk.cpio
+linux-mainline/*.cpio
+linux-mainline/*.cpio.gz
+
 # Large binaries in artifacts only
 *.img
 /boot-dagu-latest.img

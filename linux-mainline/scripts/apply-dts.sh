@@ -25,5 +25,11 @@ if ! grep -q 'sm8250-xiaomi-dagu.dtb' "$MAKEFILE"; then
 	fi
 fi
 
+# ABL applies DTBO via phandle __fixups__. Stock CAF DTB is built with -@;
+# mainline qcom dtbs are not, so overlay apply Load Errors (~3s fastboot).
+if ! grep -q 'DTC_FLAGS_sm8250-xiaomi-dagu' "$MAKEFILE"; then
+	echo 'DTC_FLAGS_sm8250-xiaomi-dagu := -@' >>"$MAKEFILE"
+fi
+
 echo "==> installed $DTS_DIR/sm8250-xiaomi-dagu.dts"
 grep 'sm8250-xiaomi-dagu' "$MAKEFILE"

@@ -1,6 +1,6 @@
 /*
  * Tiny /bin/sh for ramdisk SSH. Supports: -c <cmd>, dmesg, cat, ls, echo, reboot.
- * Never mounts userdata.
+ * Used when userdata has no Ubuntu yet; init mounts userdata and switch_root.
  */
 #define _GNU_SOURCE
 #include <dirent.h>

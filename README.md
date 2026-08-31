@@ -34,7 +34,7 @@ UEFI 在 **本机 Linux** 编译（edk2-msm 需要 bash + 交叉工具链）。W
 ./tools/build-dagu-uefi.sh       # 产物：artifacts/boot-dagu-latest.img
 ```
 
-主线 Linux（P0，对照 Kernel-Build / ginkgo）在 [`linux-mainline/`](linux-mainline/README.md)：`fastboot boot` 进 ramdisk，不写分区、不碰 userdata。
+主线 Linux（对照 ginkgo）在 [`linux-mainline/`](linux-mainline/README.md)：内核只 `fastboot boot`；Ubuntu 刷 **userdata**，覆盖安卓，不另建分区。
 
 
 ---

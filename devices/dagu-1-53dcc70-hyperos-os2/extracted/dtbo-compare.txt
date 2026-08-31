@@ -1,0 +1,3 @@
+dagu-empty	size=4096	head=d7b7ab1e000000200000002000000020	dt_table count=0
+dagu-stub	size=11165	head=d7b7ab1e00002b9d0000002000000020	dt_table count=29
+ginkgo-empty	size=25165824	head=00000000000000000000000000000000	all zeros (first 256)

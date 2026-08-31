@@ -268,7 +268,8 @@ static int l81a_enable(struct drm_panel *panel)
 	int ret;
 
 	/* CAF default timing@0 is 120 Hz. 60 Hz is DFPS via E2=0x10. */
-	ret = l81a_set_fps(ctx, 120);
+	/* 60 Hz uncompressed first: 120 Hz + DSC never even modeset (Logo frozen). */
+	ret = l81a_set_fps(ctx, 60);
 	if (ret)
 		return ret;
 
@@ -276,10 +277,11 @@ static int l81a_enable(struct drm_panel *panel)
 	if (ret)
 		return ret;
 
-	ret = l81a_dsc_enable(ctx);
-	if (ret)
-		dev_warn(panel->dev, "DSC enable failed: %d (60 Hz uncompressed still possible)\n",
-			 ret);
+	if (ctx->dsc_enabled) {
+		ret = l81a_dsc_enable(ctx);
+		if (ret)
+			dev_warn(panel->dev, "DSC enable failed: %d\n", ret);
+	}
 
 	l81a_sync_aux_bl(ctx);
 	return 0;
@@ -317,7 +319,7 @@ static const struct drm_display_mode l81a_mode_120 = {
 	.vtotal = L81A_VTOTAL,
 	.width_mm = 166,
 	.height_mm = 266,
-	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
+	.type = DRM_MODE_TYPE_DRIVER,
 };
 
 static const struct drm_display_mode l81a_mode_60 = {
@@ -332,15 +334,15 @@ static const struct drm_display_mode l81a_mode_60 = {
 	.vtotal = L81A_VTOTAL,
 	.width_mm = 166,
 	.height_mm = 266,
-	.type = DRM_MODE_TYPE_DRIVER,
+	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
 };
 
 static int l81a_get_modes(struct drm_panel *panel,
 			  struct drm_connector *connector)
 {
 	static const struct drm_display_mode *modes[] = {
-		&l81a_mode_120,
 		&l81a_mode_60,
+		&l81a_mode_120,
 	};
 	unsigned int i;
 
@@ -381,7 +383,8 @@ static void l81a_init_dsc(struct dagu_l81a *ctx)
 	dsc->bits_per_component = 8;
 	dsc->bits_per_pixel = 8 << 4;
 	dsc->block_pred_enable = true;
-	ctx->dsc_enabled = true;
+	/* Off until 60 Hz uncompressed actually modesets. */
+	ctx->dsc_enabled = false;
 }
 
 static int l81a_probe(struct mipi_dsi_device *dsi)
@@ -404,12 +407,13 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 
 	ctx->vddio = devm_regulator_get_optional(dev, "vddio");
 	if (IS_ERR(ctx->vddio)) {
-		if (PTR_ERR(ctx->vddio) != -ENODEV)
-			return PTR_ERR(ctx->vddio);
+		dev_info(dev, "vddio %ld (ABL already powered the panel)\n",
+			 PTR_ERR(ctx->vddio));
 		ctx->vddio = NULL;
 	}
 
-	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+	/* Logical 0 = deasserted (ACTIVE_LOW pin high). Do not hold reset. */
+	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(ctx->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio), "reset GPIO\n");
 
@@ -432,16 +436,17 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 
 	drm_panel_init(&ctx->panel, dev, &l81a_funcs, DRM_MODE_CONNECTOR_DSI);
 	ctx->panel.prepare_prev_first = true;
+	/* Optional: missing KTZ8866 must not defer MDSS forever. ABL left BL on. */
 	ret = drm_panel_of_backlight(&ctx->panel);
-	if (ret)
-		return ret;
+	if (ret && ret != -EPROBE_DEFER)
+		dev_warn(dev, "backlight: %d (continuing)\n", ret);
+	else if (ret == -EPROBE_DEFER)
+		dev_info(dev, "no backlight yet, continuing without it\n");
 
 	bl_np = of_parse_phandle(dev->of_node, "backlight-aux", 0);
 	if (bl_np) {
 		ctx->backlight_aux = of_find_backlight_by_node(bl_np);
 		of_node_put(bl_np);
-		if (!ctx->backlight_aux)
-			return -EPROBE_DEFER;
 	}
 
 	drm_panel_add(&ctx->panel);
@@ -449,9 +454,11 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 	for (i = 0; i < 2; i++) {
 		ctx->dsi[i]->lanes = 4;
 		ctx->dsi[i]->format = MIPI_DSI_FMT_RGB888;
-		ctx->dsi[i]->dsc = &ctx->dsc;
-		/* CAF: non_burst_sync_event, 4-lane DPHY */
+		if (ctx->dsc_enabled)
+			ctx->dsi[i]->dsc = &ctx->dsc;
+		/* CAF: non_burst_sync_event. NON_CONTINUOUS matches elish NT36523. */
 		ctx->dsi[i]->mode_flags = MIPI_DSI_MODE_VIDEO |
+					  MIPI_DSI_CLOCK_NON_CONTINUOUS |
 					  MIPI_DSI_MODE_LPM;
 		ret = devm_mipi_dsi_attach(dev, ctx->dsi[i]);
 		if (ret)

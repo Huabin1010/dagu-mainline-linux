@@ -1,5 +1,14 @@
 /linux/
 /out/
+
+# magiskboot unpack leftovers (not source)
+/kernel
+/kernel_dtb
+/header
+/ramdisk.cpio
+/*.cpio
+/*.cpio.gz
+
 /firmware/dagu/qca6390/
 /firmware/dagu/bt_firmware/
 /firmware/dagu/persist/

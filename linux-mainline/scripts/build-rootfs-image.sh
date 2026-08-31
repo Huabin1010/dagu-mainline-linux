@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ext4 image for a dedicated Linux partition. Does not target userdata.
+# ext4 image for userdata. Replaces Android.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOTFS="${ROOTFS:-$ROOT/out/rootfs}"
@@ -17,6 +17,5 @@ truncate -s "$SIZE" "$IMG"
 mkfs.ext4 -F -L dagu-linux -d "$ROOTFS" "$IMG"
 chmod 644 "$IMG" || true
 echo "==> $IMG"
-echo "Do not: fastboot flash userdata $IMG"
-echo "Do:    pick an unused partition (see linux-mainline/README.md) then flash that name."
+echo "Flash (wipes Android): ./scripts/flash-rootfs.sh"
 ls -lh "$IMG"

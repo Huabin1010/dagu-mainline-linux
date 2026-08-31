@@ -1,29 +1,22 @@
 #!/usr/bin/env bash
-# Load boot-dagu.img via fastboot boot. Never flashes partitions.
+# Load boot-dagu.img via fastboot boot. Never writes boot_a/boot_b/dtbo.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/fastboot-common.sh
+source "$ROOT/scripts/fastboot-common.sh"
 BOOTIMG="${BOOTIMG:-$ROOT/out/boot-dagu.img}"
 WAIT="${WAIT:-60}"
 
 [[ -f "$BOOTIMG" ]] || { echo "missing $BOOTIMG — build-bootimg.sh" >&2; exit 1; }
 
-echo "==> waiting for fastboot (${WAIT}s)"
-for ((i = 1; i <= WAIT; i++)); do
-	if fastboot devices | grep -q .; then
-		fastboot devices
-		break
-	fi
-	sleep 1
-	if [[ "$i" -eq WAIT ]]; then
-		echo "error: no fastboot device. adb reboot bootloader, then retry." >&2
-		exit 1
-	fi
-done
+wait_fastboot
+print_ab_status
+slot=$(dagu_slot)
 
 echo
-echo "RAM boot only. Android boot/dtbo/userdata are not written."
-echo "If the tablet snaps back to fastboot: empty DTBO once (make-empty-dtbo.sh)."
+echo "RAM boot only. Does not write boot_${slot}, dtbo_${slot}, or userdata."
+echo "If the tablet snaps back to fastboot: ./scripts/make-empty-dtbo.sh flash"
 echo
 fastboot boot "$BOOTIMG"
 echo "Host: ./scripts/usb-connect.sh"

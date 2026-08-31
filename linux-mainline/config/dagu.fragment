@@ -1,12 +1,25 @@
 # dagu (SM8250) P0 — ramdisk-only boot. Applied on arm64 defconfig.
 # Lessons from Kernel-Build/ginkgo: SoC clocks and storage/USB must be
-# built-in; modules are useless until userdata exists.
+# built-in; modules are useless until Ubuntu on userdata is mounted.
 
 # Kryo 585 = Cortex-A77 + A55: no FEAT_LVA.
-# Linux 7.0 arm64 defconfig defaults to VA_BITS_52 (ginkgo died on this class).
+# Live HyperOS 4.19 dump: VA_BITS_39 + 3-level tables. Kernel code sits at
+# 0xa0080000 (ABL 2MB base 0xa0000000 + text_offset 0x80000). 7.0 defconfig
+# is VA_BITS_52; 48 still uses 4-level tables that this QHEE map may reject.
 # CONFIG_ARM64_VA_BITS_52 is not set
-CONFIG_ARM64_VA_BITS_48=y
-CONFIG_ARM64_VA_BITS=48
+# CONFIG_ARM64_VA_BITS_48 is not set
+CONFIG_ARM64_VA_BITS_39=y
+CONFIG_ARM64_VA_BITS=39
+# CONFIG_ARM64_PTR_AUTH_KERNEL is not set
+# CONFIG_ARM64_BTI_KERNEL is not set
+# Live 4.19 dump has no KVM. 7.0 defconfig installs nVHE at EL2 and
+# fights QHEE already running on this HyperOS boot chain.
+# CONFIG_KVM is not set
+
+# Stock 4.19 Image is not an EFI stub (no MZ). ABL loads raw Image and jumps
+# it; EFI stub + CONFIG_EFI=y from arm64 defconfig is a boot-protocol mismatch.
+# CONFIG_EFI_STUB is not set
+# CONFIG_EFI is not set
 
 # arm64 defconfig does NOT set SM_GCC_8250 (same trap as ginkgo SM_GCC_6125).
 CONFIG_SM_GCC_8250=y
@@ -22,10 +35,11 @@ CONFIG_SERIAL_QCOM_GENI_CONSOLE=y
 CONFIG_SERIAL_EARLYCON=y
 CONFIG_CONSOLE_LOGLEVEL_DEFAULT=8
 
-# simplefb @ 0x9c000000 (same splash as elish, confirmed in live FDT)
+# Console via DRM_MSM fbdev. simplefb @ 0x9c000000 never moved this Logo.
 CONFIG_FB=y
-CONFIG_SYSFB_SIMPLEFB=y
-CONFIG_FB_SIMPLE=y
+# CONFIG_FB_SIMPLE is not set
+# CONFIG_DRM_SIMPLEDRM is not set
+# CONFIG_SYSFB_SIMPLEFB is not set
 CONFIG_FRAMEBUFFER_CONSOLE=y
 CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
 CONFIG_VT=y
@@ -54,26 +68,25 @@ CONFIG_USB_CONFIGFS_RNDIS=y
 CONFIG_USB_CONFIGFS_F_FS=y
 CONFIG_PHY_QCOM_QMP_USB=y
 CONFIG_PHY_QCOM_QUSB2=y
+# sm8250 HS PHY is qcom,usb-snps-hs-7nm-phy (FEMTO V2), not QUSB2.
+# =m never loads in ramdisk → DWC3 waits forever, no UDC, no RNDIS.
+CONFIG_PHY_QCOM_USB_SNPS_FEMTO_V2=y
 CONFIG_TYPEC=y
 CONFIG_TYPEC_TCPM=y
 CONFIG_TYPEC_QCOM_PMIC=y
 CONFIG_USB_ROLE_SWITCH=y
 CONFIG_EXTCON=y
-# TYPEC_QCOM_PMIC depends on (DRM || DRM=n); defconfig has DRM=m which forces =m
+# TYPEC_QCOM_PMIC depends on (DRM || DRM=n); defconfig has DRM=m which forces =m.
+# L81A dual-DPHY + MDP (not elish CPHY). GPU stays off.
 CONFIG_DRM=y
 CONFIG_DRM_KMS_HELPER=y
 CONFIG_DRM_DISPLAY_HELPER=y
 CONFIG_DRM_MSM=y
-# DRM_MSM: depends on (QCOM_OCMEM || =n) and (QCOM_LLCC || =n)
 CONFIG_QCOM_OCMEM=y
 CONFIG_QCOM_LLCC=y
-CONFIG_DRM_MSM_DPU=y
-CONFIG_DRM_MSM_DSI=y
-CONFIG_DRM_MSM_MDSS=y
 CONFIG_BACKLIGHT_CLASS_DEVICE=y
 CONFIG_BACKLIGHT_KTZ8866=y
 CONFIG_DRM_PANEL_XIAOMI_DAGU_L81A=y
-CONFIG_DRM_MSM_DP=y
 CONFIG_PHY_QCOM_QMP_COMBO=y
 CONFIG_USB_PS5169_DAGU=y
 
@@ -86,11 +99,25 @@ CONFIG_CONFIGFS_FS=y
 CONFIG_INPUT_MISC=y
 CONFIG_INPUT_PM8941_PWRKEY=y
 CONFIG_KEYBOARD_GPIO=y
-CONFIG_POWER_RESET_MSM=y
+# MSM restart turns an early panic into a ~2s fastboot bounce.
+# CONFIG_POWER_RESET_MSM is not set
+# PON + elish-common `mode-bootloader = <0x2>` makes reboot(bootloader) work.
+CONFIG_MFD_SPMI_PMIC=y
 CONFIG_POWER_RESET_QCOM_PON=y
+# CONFIG_POWER_RESET_SYSCON is not set
+# CONFIG_POWER_RESET_SYSCON_POWEROFF is not set
+
+# ABL leaves the KPSS watchdog armed. =m never loads in ramdisk, so it
+# resets to fastboot in ~2s. Built-in driver keeps pinging.
+CONFIG_WATCHDOG=y
+CONFIG_QCOM_WDT=y
+# Kernel must not ping forever if PID1 never starts (90s+ black USB).
+# CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED is not set
+# CONFIG_ARM_SBSA_WATCHDOG is not set
 
 CONFIG_PSTORE=y
 CONFIG_PSTORE_RAM=y
+CONFIG_PSTORE_CONSOLE=y
 CONFIG_MAGIC_SYSRQ=y
 
 CONFIG_REGULATOR_FIXED_VOLTAGE=y

@@ -169,6 +169,13 @@ class Fastboot:
 			raise SystemExit(r)
 		print("OKAY")
 
+	def erase(self, part: str) -> None:
+		print(f"Erasing '{part}'")
+		r = self.cmd("erase:" + part, timeout=120000)
+		if not r.startswith("OKAY"):
+			raise SystemExit(r)
+		print("OKAY")
+
 	def reboot(self) -> None:
 		self.cmd("reboot")
 		print("rebooting")
@@ -184,6 +191,8 @@ def main() -> int:
 	f.add_argument("part")
 	f.add_argument("file")
 	sub.add_parser("reboot")
+	e = sub.add_parser("erase")
+	e.add_argument("part")
 	a = sub.add_parser("set-active")
 	a.add_argument("slot", choices=("a", "b"))
 	ns = p.parse_args()
@@ -214,6 +223,8 @@ def main() -> int:
 			fb.flash(ns.part, ns.file)
 		elif ns.op == "reboot":
 			fb.reboot()
+		elif ns.op == "erase":
+			fb.erase(ns.part)
 		elif ns.op == "set-active":
 			fb.cmd("set_active:" + ns.slot)
 			print(f"current-slot: {ns.slot}")

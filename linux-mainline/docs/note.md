@@ -1,4 +1,4 @@
-> **dagu 对照（不是本页设备）：** 这是 11" **elish** 的 pmOS wiki 摘录。12.4" dagu **不要**照抄 `fastboot erase dtbo_b` 去刷 `dtbo-empty.img`（合法空表、`count=0`）。那会让 HyperOS ABL Load Error，约 6 秒回 fastboot。机制：[dagu-dtbo-abl.md](dagu-dtbo-abl.md)。
+> **dagu 对照（不是本页设备）：** 这是 11" **elish** 的 pmOS wiki 摘录。自造 boot 是 header **v0** + `append_dtb`，不是原厂 v2：[elish-pmos-boot-format.md](elish-pmos-boot-format.md)。12.4" dagu **不要**照抄 `fastboot erase dtbo_b` 去刷 `dtbo-empty.img`（合法空表、`count=0`）。那会让 HyperOS ABL Load Error，约 6 秒回 fastboot。机制：[dagu-dtbo-abl.md](dagu-dtbo-abl.md)。
 
 Xiaomi Mi Pad 5 Pro (xiaomi-elish)
 Page

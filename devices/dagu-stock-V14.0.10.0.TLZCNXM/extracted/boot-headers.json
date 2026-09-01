@@ -1,0 +1,37 @@
+{
+  "source": "dagu_images_V14.0.10.0.TLZCNXM",
+  "boot": {
+    "path": "boot.img",
+    "file_size": 134217728,
+    "magic": "ANDROID!",
+    "header_version": 3,
+    "header_size": 1580,
+    "kernel_size": 52748304,
+    "ramdisk_size": 18531292,
+    "os_version_raw": "0x1a000177",
+    "head_hex": "414e44524f49442110e02403dcc31a017701001a2c060000000000000000000000000000000000000300000000000000",
+    "verdict": "v3"
+  },
+  "vendor_boot": {
+    "path": "vendor_boot.img",
+    "file_size": 100663296,
+    "magic": "VNDRBOOT",
+    "header_version": 3,
+    "page_size": 4096,
+    "dtb_size": 1613832,
+    "dtb_addr": "0x1f00000",
+    "vendor_ramdisk_size": 2230,
+    "cmdline": "console=ttyMSM0,115200n8 androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 video=vfb:640x400,bpp=32,memsize=3072000 msm_rtb.filter=0x237 service_locator.enable=1 androidboot.usbcontroller=a600000.dwc3 swiotlb=2048 loop.max_part=7 cgroup.memory=nokmem,nosocket reboot=panic_warm cnss2.disable_nv_mac=1 buildvariant=user",
+    "head_hex": "564e4452424f4f5403000000001000000080000000000001b6080000636f6e736f6c653d7474794d534d302c31313532",
+    "verdict": "vendor_boot v3"
+  },
+  "dtbo": {
+    "path": "dtbo.img",
+    "file_size": 33554432,
+    "magic": "0xd7b7ab1e",
+    "dt_entry_count": 29,
+    "total_size_in_header": 14175320,
+    "page_size": 4096,
+    "head_hex": "d7b7ab1e00d84c5800000020000000200000001d000000200000100000000000"
+  }
+}

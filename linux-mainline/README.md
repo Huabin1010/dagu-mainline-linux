@@ -1,6 +1,6 @@
 # dagu 主线 Linux
 
-对照 `~/Projects/xiaomi-ginkgo-mainline`（ginkgo / Linux 7.0），以及 11" Pad 5 Pro（**elish**）的 postmarketOS 主线：[docs/elish-pmos-vs-dagu.md](docs/elish-pmos-vs-dagu.md)。设备：**小米平板 5 Pro 12.4**（`dagu` / SM8250）。
+对照 `~/Projects/xiaomi-ginkgo-mainline`（ginkgo / Linux 7.0），以及 11" Pad 5 Pro（**elish**）的 postmarketOS 主线：[docs/elish-pmos-vs-dagu.md](docs/elish-pmos-vs-dagu.md)。他们在原厂 v3 上刷的自造 boot 格式：[docs/elish-pmos-boot-format.md](docs/elish-pmos-boot-format.md)。ABL 为何收这份镜像：[docs/elish-abl-legacy-boot-path.md](docs/elish-abl-legacy-boot-path.md)。设备：**小米平板 5 Pro 12.4**（`dagu` / SM8250）。
 
 内核源码和 `out/` **不入库**。blob 用 `./scripts/stage-firmware.sh` 从 `dumps/` 解开。
 

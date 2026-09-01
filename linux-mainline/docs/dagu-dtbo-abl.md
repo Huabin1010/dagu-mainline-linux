@@ -1,6 +1,6 @@
 # dagu：空 DTBO 为什么会弹回 fastboot
 
-对照 [elish pmOS wiki 摘录](note.md) 里的 `fastboot erase dtbo_b`，以及本机 HyperOS ABL 上已经打过的实验。ABL / LK 背景见 [abl-vs-lk.md](abl-vs-lk.md)。
+对照 [elish pmOS wiki 摘录](note.md) 里的 `fastboot erase dtbo_b`，以及本机 HyperOS ABL 上已经打过的实验。他们自造的 boot 格式（v0 + `append_dtb`，不是原厂 v2）：[elish-pmos-boot-format.md](elish-pmos-boot-format.md)。ABL / LK 背景见 [abl-vs-lk.md](abl-vs-lk.md)。
 
 ## 1. 先把两件不同的事分开
 

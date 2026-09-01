@@ -64,7 +64,7 @@ Redmi Note 8 同样是高通 + Xiaomi ABL。`xiaomi-ginkgo-mainline` 里还用 U
 |--|--|--|--|
 | 启动器 | `aboot`（Little Kernel） | 已是 **ABL**（较老、较松） | **HyperOS ABL**（严） |
 | 试内核 | 很多能 `fastboot boot` | 能 `fastboot boot`，不写分区 | 这台 **不收** 只 `fastboot boot`，必须双槽刷进去 |
-| boot 格式 | 多为 header v0/v1/v2，DTB 在 `boot.img` 里 | header **v2**，DTB 贴在镜像里 | header **v3**，DTB 在 **vendor_boot**，再强制叠 **dtbo** |
+| boot 格式 | 多为 header v0/v1/v2，DTB 在 `boot.img` 里 | header **v2**，DTB 贴在镜像里 | 原厂 header **v3**，DTB 在 **vendor_boot**，再强制叠 **dtbo**。elish pmOS 另走自造 **v0 + append_dtb**，见 [elish-pmos-boot-format.md](elish-pmos-boot-format.md) |
 | 空 DTBO | 常常直接跳过 | 刷 24 MiB 全 0，ABL **跳过** overlay | 刷合法空表（`count=0`）→ Load Error，约 6 秒回 fastboot |
 | 调试 | 看机子 | 板子上有 **1.8V UART**，能看 ABL 和内核 printk | **没有**可用串口文档，只能靠 USB RNDIS |
 | 开机图 | 核起来后通常能抢屏 | 主线面板通了，能看到 Linux | ABL 把 Logo 画在 MDSS 上就不管了；主线暂时 modeset 不了，**Logo 一直冻着** |

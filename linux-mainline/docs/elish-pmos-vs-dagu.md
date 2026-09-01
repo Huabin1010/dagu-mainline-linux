@@ -47,9 +47,13 @@ pmOS 7.2 另外开了 **`usb_2` host**（键盘仓）。dagu dump 里那路是�
 
 ## 启动协议差（不能抄 pmOS 打包方式）
 
+**原厂 elish 也是 boot header v3**，不是 v2。线刷包 `elish_images_OS1.0.2.0.TKYCNXM`（Android 13 / HyperOS 1）拆过：`boot.img` `header_version=3` / `header_size=1580`，有 `VNDRBOOT` v3，`dtb_size≈1.5MiB`，dtbo magic `D7B7AB1E`、**29** 条。和 dagu 原厂同一套布局。记录：[devices/elish-stock-OS1.0.2.0.TKYCNXM](../../devices/elish-stock-OS1.0.2.0.TKYCNXM/)。
+
+教程能 `erase dtbo` + `append_dtb`，是 **pmOS 自造 boot**（`deviceinfo` 没写 `header_version`，mkbootimg 默认 **v0** + kernel 后 concat DTB），不是因为 11" 出厂是 v2。格式：[elish-pmos-boot-format.md](elish-pmos-boot-format.md)。为何这套能跳核（ABL gzip 路径、不读 vendor_boot）：[elish-abl-legacy-boot-path.md](elish-abl-legacy-boot-path.md)。
+
 elish `deviceinfo`：
 
-- `generate_bootimg=true`，**没有** `header_version=3`
+- `generate_bootimg=true`，**没有** `header_version`（不是 v2，也不是 v3）
 - `append_dtb=true`（DTB 粘在 `vmlinuz` 后面）
 - 内核包是 **Image.gz / EFI ZBOOT**（`CONFIG_EFI_ZBOOT=y`，`VA_BITS_48`）
 - cmdline 设备包里只有 `quiet`

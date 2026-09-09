@@ -159,12 +159,12 @@ class Fastboot:
 			print(f"\r  {off + 1}/{n}", end="", flush=True)
 		self.usb.bulk(EP_OUT, last, 120000)
 		print(f"\r  {n}/{n}")
-		ok = self.usb.bulk(EP_IN, bytes(64), 15000)
+		ok = self.usb.bulk(EP_IN, bytes(64), 60000)
 		tag = ok[:4].decode("ascii", "replace")
 		if tag != "OKAY":
 			raise SystemExit(f"download {ok!r}")
 		print(f"Writing '{part}'")
-		r = self.cmd("flash:" + part, timeout=120000)
+		r = self.cmd("flash:" + part, timeout=300000)
 		if not r.startswith("OKAY"):
 			raise SystemExit(r)
 		print("OKAY")

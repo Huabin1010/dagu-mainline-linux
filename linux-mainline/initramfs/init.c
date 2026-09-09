@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <linux/reboot.h>
 #include <linux/watchdog.h>
@@ -91,6 +92,170 @@ static int write_str(const char *path, const char *val)
 	}
 	close(fd);
 	return 0;
+}
+
+static int path_ok(const char *p)
+{
+	return !access(p, F_OK);
+}
+
+static int dir_count(const char *path)
+{
+	DIR *d = opendir(path);
+	struct dirent *e;
+	int n = 0;
+
+	if (!d)
+		return -1;
+	while ((e = readdir(d))) {
+		if (e->d_name[0] != '.')
+			n++;
+	}
+	closedir(d);
+	return n;
+}
+
+static int dir_has_substr(const char *path, const char *sub)
+{
+	DIR *d = opendir(path);
+	struct dirent *e;
+	int hit = 0;
+
+	if (!d)
+		return 0;
+	while ((e = readdir(d))) {
+		if (e->d_name[0] == '.')
+			continue;
+		if (strstr(e->d_name, sub)) {
+			hit = 1;
+			break;
+		}
+	}
+	closedir(d);
+	return hit;
+}
+
+static int file_has_substr(const char *path, const char *sub)
+{
+	char buf[2048];
+	int fd = open(path, O_RDONLY);
+	ssize_t n;
+	int hit = 0;
+
+	if (fd < 0)
+		return -1;
+	while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
+		buf[n] = '\0';
+		if (strstr(buf, sub)) {
+			hit = 1;
+			break;
+		}
+	}
+	close(fd);
+	return hit;
+}
+
+static long long dbg_now_ms(void)
+{
+	struct timeval tv;
+
+	gettimeofday(&tv, NULL);
+	return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+/* Compact USB iSerial: host watcher copies this into debug-5c27b9.log */
+static char g_dbg_serial[96];
+static char g_dbg_json[512];
+
+static void kmsg_scan(int *probe, int *en, int *gpiofail, int *ktz)
+{
+	char buf[1024];
+	int fd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
+	ssize_t n;
+
+	*probe = *en = *gpiofail = *ktz = 0;
+	if (fd < 0) {
+		*probe = -1;
+		return;
+	}
+	while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
+		buf[n] = '\0';
+		if (strstr(buf, "probe-enter"))
+			*probe = 1;
+		if (strstr(buf, "enable-blinks"))
+			*en = 1;
+		if (strstr(buf, "Failed to get GPIO"))
+			*gpiofail = 1;
+		if (strstr(buf, "ktz8866"))
+			*ktz = 1;
+	}
+	close(fd);
+}
+
+static void dbg_collect(void)
+{
+	int dt_led, leds, hwen, bl, drm, plat, gpio139, udc;
+	int kmsg_probe, kmsg_en, kmsg_gpiofail, kmsg_ktz;
+
+	mkpath("/sys/kernel/debug");
+	mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
+
+	dt_led = path_ok("/proc/device-tree/ktz_hwen_led");
+	leds = dir_count("/sys/class/leds");
+	hwen = dir_has_substr("/sys/class/leds", "hwen") ||
+	       dir_has_substr("/sys/class/leds", "ktz");
+	bl = dir_count("/sys/class/backlight");
+	drm = path_ok("/sys/class/drm/card0");
+	plat = dir_has_substr("/sys/bus/platform/devices", "ktz_hwen");
+	gpio139 = file_has_substr("/sys/kernel/debug/gpio", "gpio-139");
+	udc = dir_count("/sys/class/udc");
+	kmsg_scan(&kmsg_probe, &kmsg_en, &kmsg_gpiofail, &kmsg_ktz);
+
+	snprintf(g_dbg_serial, sizeof(g_dbg_serial),
+		 "dt%dled%dhw%dbl%ddrm%dpl%dgp%dpe%den%dudc%d",
+		 dt_led, leds < 0 ? 9 : leds, hwen, bl < 0 ? 9 : bl, drm, plat,
+		 gpio139 < 0 ? 9 : gpio139, kmsg_probe < 0 ? 9 : kmsg_probe,
+		 kmsg_en < 0 ? 9 : kmsg_en, udc < 0 ? 9 : udc);
+	snprintf(g_dbg_json, sizeof(g_dbg_json),
+		 "{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"A\",\"location\":\"init.c:dbg_collect\",\"message\":\"pid1-scan\",\"data\":{\"dt_led\":%d,\"leds\":%d,\"hwen\":%d,\"bl\":%d,\"drm\":%d,\"plat\":%d,\"gpio139\":%d,\"probe\":%d,\"enable\":%d,\"gpiofail\":%d,\"ktz\":%d,\"udc\":%d},\"timestamp\":%lld}",
+		 dt_led, leds, hwen, bl, drm, plat, gpio139, kmsg_probe,
+		 kmsg_en, kmsg_gpiofail, kmsg_ktz, udc, dbg_now_ms());
+	kmsg(g_dbg_serial);
+	kmsg(g_dbg_json);
+}
+
+static void dbg_post_host(void)
+{
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in sa;
+	struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+	char hdr[768];
+	int blen, n;
+
+	if (fd < 0)
+		return;
+	memset(&sa, 0, sizeof(sa));
+	sa.sin_family = AF_INET;
+	sa.sin_port = htons(7303);
+	inet_pton(AF_INET, "192.168.7.1", &sa.sin_addr);
+	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		close(fd);
+		return;
+	}
+	blen = (int)strlen(g_dbg_json);
+	n = snprintf(hdr, sizeof(hdr),
+		     "POST /ingest/f312a966-1073-4ed2-b639-6c4c77bc891d HTTP/1.1\r\n"
+		     "Host: 192.168.7.1\r\n"
+		     "Content-Type: application/json\r\n"
+		     "X-Debug-Session-Id: 5c27b9\r\n"
+		     "Content-Length: %d\r\n\r\n%s",
+		     blen, g_dbg_json);
+	if (n > 0 && n < (int)sizeof(hdr))
+		write(fd, hdr, (size_t)n);
+	close(fd);
+	kmsg("dbg post tried");
 }
 
 static int set_ip(const char *iface, const char *ip, const char *mask)
@@ -207,7 +372,7 @@ static int setup_rndis(void)
 	char udc[64];
 	const char *g = "/sys/kernel/config/usb_gadget/dagu";
 	int attempt;
-	const int udc_wait_max = 80; /* 80 * 250ms ≈ 20s */
+	const int udc_wait_max = 160; /* 160 * 250ms = 40s */
 
 	/* Stock 4.19 panics if we poke configfs gadget; ABL then returns to fastboot. */
 	if (kernel_is_4_19()) {
@@ -218,12 +383,6 @@ static int setup_rndis(void)
 	mkpath("/sys/kernel/config");
 	mount("none", "/sys/kernel/config", "configfs", 0, NULL);
 
-	/*
-	 * Wait ~20s for DWC3 UDC. Do not wdt_takeover(15s) here: that races
-	 * the diagnostic reboot and used to look like "kernel never started".
-	 * If PID1 is alive and UDC never appears, reboot_bootloader() is the
-	 * host-visible signal (~20–25s back to 18d1:d00d).
-	 */
 	for (attempt = 0; attempt < udc_wait_max; attempt++) {
 		wdt_pet();
 		force_usb_device_role();
@@ -236,13 +395,16 @@ static int setup_rndis(void)
 		break;
 	}
 	if (attempt >= udc_wait_max) {
-		kmsg("no UDC after 20s");
+		kmsg("no UDC after 40s");
+		dbg_collect();
+		sleep(3);
 		reboot_bootloader();
 		return -1;
 	}
 
 	wdt_stretch(60);
 	wdt_pet();
+	dbg_collect();
 
 	if (mkdir(g, 0755) && errno != EEXIST)
 		return -1;
@@ -250,15 +412,15 @@ static int setup_rndis(void)
 	write_str("/sys/kernel/config/usb_gadget/dagu/idProduct", "0x0104");
 	mkdir("/sys/kernel/config/usb_gadget/dagu/strings/0x409", 0755);
 	write_str("/sys/kernel/config/usb_gadget/dagu/strings/0x409/serialnumber",
-		  "dagu-mainline");
+		  g_dbg_serial[0] ? g_dbg_serial : "dagu-mainline");
 	write_str("/sys/kernel/config/usb_gadget/dagu/strings/0x409/manufacturer",
 		  "xiaomi-pad870-win11-arm");
 	write_str("/sys/kernel/config/usb_gadget/dagu/strings/0x409/product",
-		  "dagu USB RNDIS");
+		  "dagu USB RNDIS+ACM");
 	mkdir("/sys/kernel/config/usb_gadget/dagu/configs/c.1", 0755);
 	mkdir("/sys/kernel/config/usb_gadget/dagu/configs/c.1/strings/0x409", 0755);
 	write_str("/sys/kernel/config/usb_gadget/dagu/configs/c.1/strings/0x409/configuration",
-		  "RNDIS");
+		  "RNDIS+ACM");
 	mkdir("/sys/kernel/config/usb_gadget/dagu/functions/rndis.usb0", 0755);
 	write_str("/sys/kernel/config/usb_gadget/dagu/functions/rndis.usb0/host_addr",
 		  "02:00:00:00:07:01");
@@ -268,6 +430,11 @@ static int setup_rndis(void)
 		    "/sys/kernel/config/usb_gadget/dagu/configs/c.1/rndis.usb0") &&
 	    errno != EEXIST)
 		kmsg("rndis symlink failed");
+	mkdir("/sys/kernel/config/usb_gadget/dagu/functions/acm.usb0", 0755);
+	if (symlink("/sys/kernel/config/usb_gadget/dagu/functions/acm.usb0",
+		    "/sys/kernel/config/usb_gadget/dagu/configs/c.1/acm.usb0") &&
+	    errno != EEXIST)
+		kmsg("acm symlink failed");
 
 	write_str("/sys/kernel/config/usb_gadget/dagu/UDC", udc);
 	kmsg(udc);
@@ -275,6 +442,7 @@ static int setup_rndis(void)
 		wdt_pet();
 		if (!set_ip("usb0", "192.168.7.2", "255.255.255.0")) {
 			kmsg("RNDIS 192.168.7.2");
+			dbg_post_host();
 			return 0;
 		}
 		usleep(250000);

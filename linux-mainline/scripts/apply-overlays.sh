@@ -18,6 +18,7 @@ install_src() {
 }
 
 install_src drivers/gpu/drm/panel/panel-xiaomi-dagu-l81a.c
+install_src drivers/video/backlight/ktz8866.c
 install_src drivers/input/touchscreen/himax-dagu.c
 install_src drivers/usb/misc/ps5169-dagu.c
 install_src drivers/input/keyboard/nanosic-dagu.c
@@ -148,6 +149,235 @@ config CHARGER_P9418_DAGU
 
 # Do not poke KPSS WDT from primary_entry: MMU is off and that
 # physical store SErrors on this ABL map. Pet from early_initcall instead.
+PY
+
+# L81A: CAF lp11-init + bllp HS. Re-applied every build (linux/ is a checkout).
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+host = root / "drivers/gpu/drm/msm/dsi/dsi_host.c"
+text = host.read_text()
+old = """\t\t/* Always set low power stop mode for BLLP
+		 * to let command engine send packets
+		 */
+		data |= DSI_VID_CFG0_EOF_BLLP_POWER_STOP |
+			DSI_VID_CFG0_BLLP_POWER_STOP;
+"""
+new = """\t\t/* dagu L81A: CAF qcom,mdss-dsi-bllp-power-mode keeps BLLP HS.
+		 * Upstream always forces LP BLLP so the cmd engine can TX;
+		 * Himax video+DSC stays black if blanking drops to LP.
+		 * CLOCK_NON_CONTINUOUS panels keep the old LP BLLP.
+		 */
+		if (flags & MIPI_DSI_CLOCK_NON_CONTINUOUS) {
+			data |= DSI_VID_CFG0_EOF_BLLP_POWER_STOP |
+				DSI_VID_CFG0_BLLP_POWER_STOP;
+		}
+"""
+if "dagu L81A: CAF qcom,mdss-dsi-bllp-power-mode" not in text:
+    if old not in text:
+        raise SystemExit("dsi_host.c BLLP block not found")
+    host.write_text(text.replace(old, new, 1))
+
+mgr = root / "drivers/gpu/drm/msm/dsi/dsi_manager.c"
+text = mgr.read_text()
+old = """	ret = dsi_mgr_bridge_power_on(bridge);
+	if (ret) {
+		dev_err(&msm_dsi->pdev->dev, "Power on failed: %d\\n", ret);
+		return;
+	}
+
+	ret = msm_dsi_host_enable(host);
+	if (ret) {
+		pr_err("%s: enable host %d failed, %d\\n", __func__, id, ret);
+		goto host_en_fail;
+	}
+
+	if (is_bonded_dsi && msm_dsi1) {
+		ret = msm_dsi_host_enable(msm_dsi1->host);
+		if (ret) {
+			pr_err("%s: enable host1 failed, %d\\n", __func__, ret);
+			goto host1_en_fail;
+		}
+	}
+
+	return;
+
+host1_en_fail:
+	msm_dsi_host_disable(host);
+host_en_fail:
+	dsi_mgr_bridge_power_off(bridge);
+}
+"""
+new = """	/* dagu L81A: CAF lp11-init. Power/LP11 in pre_enable, start video
+	 * in enable() after the panel has sent on-command (0x11/0x29).
+	 */
+	ret = dsi_mgr_bridge_power_on(bridge);
+	if (ret) {
+		dev_err(&msm_dsi->pdev->dev, "Power on failed: %d\\n", ret);
+		return;
+	}
+}
+
+static void dsi_mgr_bridge_enable(struct drm_bridge *bridge)
+{
+	int id = dsi_mgr_bridge_get_id(bridge);
+	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
+	struct msm_dsi *msm_dsi1 = dsi_mgr_get_dsi(DSI_1);
+	struct mipi_dsi_host *host = msm_dsi->host;
+	bool is_bonded_dsi = IS_BONDED_DSI();
+	int ret;
+
+	if (is_bonded_dsi && !IS_MASTER_DSI_LINK(id))
+		return;
+
+	ret = msm_dsi_host_enable(host);
+	if (ret) {
+		pr_err("%s: enable host %d failed, %d\\n", __func__, id, ret);
+		return;
+	}
+
+	if (is_bonded_dsi && msm_dsi1) {
+		ret = msm_dsi_host_enable(msm_dsi1->host);
+		if (ret)
+			pr_err("%s: enable host1 failed, %d\\n", __func__, ret);
+	}
+}
+"""
+if "dagu L81A: CAF lp11-init" not in text:
+    if old not in text:
+        raise SystemExit("dsi_manager.c pre_enable host_enable block not found")
+    text = text.replace(old, new, 1)
+    old2 = """static const struct drm_bridge_funcs dsi_mgr_bridge_funcs = {
+	.attach = dsi_mgr_bridge_attach,
+	.pre_enable = dsi_mgr_bridge_pre_enable,
+	.post_disable = dsi_mgr_bridge_post_disable,
+"""
+    new2 = """static const struct drm_bridge_funcs dsi_mgr_bridge_funcs = {
+	.attach = dsi_mgr_bridge_attach,
+	.pre_enable = dsi_mgr_bridge_pre_enable,
+	.enable = dsi_mgr_bridge_enable,
+	.post_disable = dsi_mgr_bridge_post_disable,
+"""
+    if old2 not in text:
+        raise SystemExit("dsi_manager.c bridge funcs not found")
+    mgr.write_text(text.replace(old2, new2, 1))
+
+# Drop diagnostic TPG from a previous build.
+text = mgr.read_text()
+tpg = """
+	/* dagu L81A: uncompressed TPG. Checkerboard means video+panel lock. */
+	msm_dsi_host_test_pattern_en(host);
+	if (is_bonded_dsi && msm_dsi1)
+		msm_dsi_host_test_pattern_en(msm_dsi1->host);
+"""
+if tpg in text:
+    mgr.write_text(text.replace(tpg, "", 1))
+
+# Explicit DPHY: leftover CPHY bits from ABL black the L81A video stream.
+host = root / "drivers/gpu/drm/msm/dsi/dsi_host.c"
+text = host.read_text()
+old = """	if (msm_host->cphy_mode)
+		dsi_write(msm_host, REG_DSI_CPHY_MODE_CTRL, BIT(0));
+}
+"""
+new = """	if (msm_host->cphy_mode)
+		dsi_write(msm_host, REG_DSI_CPHY_MODE_CTRL, BIT(0));
+	else
+		/* dagu L81A: force DPHY (do not leave CPHY_MODE_CTRL set). */
+		dsi_write(msm_host, REG_DSI_CPHY_MODE_CTRL, 0);
+}
+"""
+if "dagu L81A: force DPHY" not in text:
+    if old not in text:
+        raise SystemExit("dsi_host.c CPHY_MODE_CTRL block not found")
+    host.write_text(text.replace(old, new, 1))
+
+phy = root / "drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c"
+text = phy.read_text()
+old = """	if (phy->cphy_mode)
+		writel(BIT(6), base + REG_DSI_7nm_PHY_CMN_GLBL_CTRL);
+"""
+new = """	if (phy->cphy_mode)
+		writel(BIT(6), base + REG_DSI_7nm_PHY_CMN_GLBL_CTRL);
+	else
+		/* dagu L81A: clear leftover CPHY bit on DPHY. */
+		writel(0, base + REG_DSI_7nm_PHY_CMN_GLBL_CTRL);
+"""
+if "dagu L81A: clear leftover CPHY bit" not in text:
+    if old not in text:
+        raise SystemExit("dsi_phy_7nm.c GLBL_CTRL block not found")
+    text = text.replace(old, new, 1)
+    phy.write_text(text)
+
+text = phy.read_text()
+old = """	} else {
+		writel(0x00, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_0);
+		writel(timing->clk_zero, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_1);
+		writel(timing->clk_prepare, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_2);
+		writel(timing->clk_trail, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_3);
+		writel(timing->hs_exit, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_4);
+		writel(timing->hs_zero, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_5);
+		writel(timing->hs_prepare, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_6);
+		writel(timing->hs_trail, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_7);
+		writel(timing->hs_rqst, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_8);
+		writel(0x02, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_9);
+		writel(0x04, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_10);
+		writel(0x00, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_11);
+		writel(timing->shared_timings.clk_pre,
+		       base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_12);
+		writel(timing->shared_timings.clk_post,
+		       base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_13);
+	}
+"""
+new = """	} else {
+		/* dagu L81A: CAF qcom,mdss-dsi-panel-phy-timings
+		 * [00 1C 08 07 17 16 07 07 08 02 04 00 19 0C]
+		 */
+		writel(0x00, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_0);
+		writel(0x1c, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_1);
+		writel(0x08, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_2);
+		writel(0x07, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_3);
+		writel(0x17, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_4);
+		writel(0x16, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_5);
+		writel(0x07, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_6);
+		writel(0x07, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_7);
+		writel(0x08, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_8);
+		writel(0x02, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_9);
+		writel(0x04, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_10);
+		writel(0x00, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_11);
+		writel(0x19, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_12);
+		writel(0x0c, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_13);
+	}
+"""
+if "dagu L81A: CAF qcom,mdss-dsi-panel-phy-timings" not in text:
+    if old not in text:
+        raise SystemExit("dsi_phy_7nm.c DPHY timing block not found")
+    phy.write_text(text.replace(old, new, 1))
+
+# DPU INTF DSC active width must match DSI (DIV_ROUND_UP). Upstream
+# truncates 800*8/24=266; CAF and dsi_timing_setup both use 267.
+vid = root / "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c"
+text = vid.read_text()
+old = """		timing->width = timing->width * drm_dsc_get_bpp_int(dsc) /
+				(dsc->bits_per_component * 3);
+		timing->xres = timing->width;
+"""
+new = """		/* dagu L81A: CAF DIV_ROUND_UP(hdisplay, 3) for 8bpp DSC.
+		 * Truncation yields 266 vs DSI 267 → video never locks.
+		 */
+		timing->width = DIV_ROUND_UP(timing->width *
+					     drm_dsc_get_bpp_int(dsc),
+					     dsc->bits_per_component * 3);
+		timing->xres = timing->width;
+"""
+if "dagu L81A: CAF DIV_ROUND_UP" not in text:
+    if old not in text:
+        raise SystemExit("dpu_encoder_phys_vid.c DSC width block not found")
+    vid.write_text(text.replace(old, new, 1))
+
 PY
 
 echo "==> overlays installed"

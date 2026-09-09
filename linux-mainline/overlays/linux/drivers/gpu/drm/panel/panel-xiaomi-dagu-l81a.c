@@ -5,12 +5,18 @@
  * Init sequence and 800+800 timings from CAF
  * dsi-panel-l81a-42-04-0a-video.dtsi. Dual DSI, 4-lane DPHY.
  * 120 Hz + DSC is the CAF default; 60 Hz is the same porch with E2=0x10.
- * Do not use the elish NT36523 CPHY sequence on this panel.
+ *
+ * Command TX follows elish nt36523 (mipi_dsi_dual_* helpers). DSC follows
+ * CAF dsi_panel_update_pps(): panel-count==2 halves pic_width to 800 for
+ * the PPS, sent after ON (0x11/0x29), not before. Do not copy elish
+ * NT36523 CPHY / CLOCK_NON_CONTINUOUS onto this Himax panel.
  */
 
 #include <linux/backlight.h>
 #include <linux/delay.h>
+#include <linux/err.h>
 #include <linux/gpio/consumer.h>
+#include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
@@ -35,11 +41,17 @@ struct dagu_l81a {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi[2];
 	struct gpio_desc *reset_gpio;
+	struct gpio_desc *tp_reset_gpio;
+	struct gpio_desc *hwen_gpio;
 	struct regulator *vddio;
+	struct regulator *enp;
+	struct regulator *enn;
 	struct backlight_device *backlight_aux;
 	struct drm_dsc_config dsc;
 	bool prepared;
 	bool dsc_enabled;
+	int power_mode_rc;
+	u8 power_mode;
 };
 
 #define L81A_CMD(_wait, ...) \
@@ -48,9 +60,15 @@ struct dagu_l81a {
 
 #define L81A_HACT		1600
 #define L81A_VACT		2560
-#define L81A_HFP		60
-#define L81A_HSYNC		40
-#define L81A_HBP		60
+/*
+ * CAF timings are per DSI link (800 + 60/40/60). msm bonded-DSI and DPU
+ * split both halve hdisplay/htotal/hsync, so the DRM mode must carry
+ * 2× those porches. Using CAF numbers verbatim yields 30/20/30 per
+ * link and a black DSC stream.
+ */
+#define L81A_HFP		120
+#define L81A_HSYNC		80
+#define L81A_HBP		120
 #define L81A_VFP		160
 #define L81A_VSYNC		4
 #define L81A_VBP		18
@@ -72,6 +90,13 @@ static const struct l81a_cmd l81a_on_cmds[] = {
 	L81A_CMD(0, 0xba, 0x70, 0x03, 0xa8, 0x92, 0x01, 0x10, 0x00, 0x00,
 		 0x08, 0x3d, 0x02, 0x77, 0x84),
 	L81A_CMD(0, 0xd9, 0x0c, 0x0c),
+	/*
+	 * CAF XML has "03 02 BD 00" (DCS 0x02). Bank is already BD=0 from
+	 * the line above. Sending 0x02 before B2 left Himax without DSC
+	 * enable; HyperOS's GCDB parser may not emit this as DCS 0x02.
+	 */
+	L81A_CMD(0, 0xbd, 0x00),
+	/* 3rd byte 0x40 is CAF DSC enable. Himax stays black without it. */
 	L81A_CMD(0, 0xb2, 0x00, 0x6a, 0x40, 0x00, 0x00, 0x14, 0x9e, 0x60,
 		 0x3c, 0x02, 0x80, 0x21, 0x21, 0x00, 0x00, 0x10, 0x27),
 	L81A_CMD(0, 0xb9, 0x83, 0x12, 0x1a, 0x55, 0x00),
@@ -115,43 +140,16 @@ static inline struct dagu_l81a *to_dagu_l81a(struct drm_panel *panel)
 	return container_of(panel, struct dagu_l81a, panel);
 }
 
-static int l81a_tx_one(struct mipi_dsi_device *dsi, const struct l81a_cmd *cmd)
-{
-	const struct mipi_dsi_host_ops *ops;
-	struct mipi_dsi_msg msg = {
-		.channel = dsi->channel,
-		.type = MIPI_DSI_DCS_LONG_WRITE,
-		.tx_buf = cmd->data,
-		.tx_len = cmd->len,
-	};
-	ssize_t ret;
-
-	if (cmd->len == 1)
-		msg.type = MIPI_DSI_DCS_SHORT_WRITE;
-	else if (cmd->len == 2)
-		msg.type = MIPI_DSI_DCS_SHORT_WRITE_PARAM;
-
-	ops = dsi->host->ops;
-	if (!ops || !ops->transfer)
-		return -ENOSYS;
-	ret = ops->transfer(dsi->host, &msg);
-	return ret < 0 ? ret : 0;
-}
-
 static int l81a_tx(struct dagu_l81a *ctx, const struct l81a_cmd *cmd)
 {
-	int ret, i;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = NULL };
 
-	for (i = 0; i < 2; i++) {
-		if (!ctx->dsi[i])
-			continue;
-		ret = l81a_tx_one(ctx->dsi[i], cmd);
-		if (ret)
-			return ret;
-	}
+	/* Same helper elish nt36523 uses: LPM flag → MIPI_DSI_MSG_USE_LPM. */
+	mipi_dsi_dual_dcs_write_buffer_multi(&dsi_ctx, ctx->dsi[0], ctx->dsi[1],
+					     cmd->data, cmd->len);
 	if (cmd->wait_ms)
-		msleep(cmd->wait_ms);
-	return 0;
+		mipi_dsi_msleep(&dsi_ctx, cmd->wait_ms);
+	return dsi_ctx.accum_err;
 }
 
 static int l81a_tx_table(struct dagu_l81a *ctx, const struct l81a_cmd *cmds,
@@ -168,17 +166,29 @@ static int l81a_tx_table(struct dagu_l81a *ctx, const struct l81a_cmd *cmds,
 	return 0;
 }
 
-static void l81a_sync_aux_bl(struct dagu_l81a *ctx)
+static void l81a_bl_force(struct backlight_device *bl, int brightness)
 {
-	struct backlight_device *pri = ctx->panel.backlight;
-
-	if (!ctx->backlight_aux || !pri)
+	if (!bl || IS_ERR(bl))
 		return;
+	bl->props.power = BACKLIGHT_POWER_ON;
+	bl->props.state &= ~(BL_CORE_FBBLANK | BL_CORE_SUSPENDED);
+	bl->props.brightness = brightness;
+	backlight_update_status(bl);
+}
 
-	ctx->backlight_aux->props.brightness = pri->props.brightness;
-	ctx->backlight_aux->props.power = pri->props.power;
-	ctx->backlight_aux->props.state = pri->props.state;
-	backlight_update_status(ctx->backlight_aux);
+static void l81a_bl_set(struct dagu_l81a *ctx, int brightness)
+{
+	/*
+	 * Dual KTZ share HWEN GPIO 139. Drive it from the panel so blinks
+	 * work even if the KTZ I2C devices never registered.
+	 */
+	if (ctx->hwen_gpio) {
+		gpiod_set_value_cansleep(ctx->hwen_gpio, brightness > 0);
+		if (brightness > 0)
+			usleep_range(2000, 3000);
+	}
+	l81a_bl_force(ctx->panel.backlight, brightness);
+	l81a_bl_force(ctx->backlight_aux, brightness);
 }
 
 static void l81a_reset(struct dagu_l81a *ctx)
@@ -194,96 +204,245 @@ static void l81a_reset(struct dagu_l81a *ctx)
 	msleep(55);
 }
 
+static int l81a_dsc_compute(struct drm_dsc_config *dsc, u16 pic_width)
+{
+	int ret;
+
+	dsc->pic_width = pic_width;
+	dsc->pic_height = L81A_VACT;
+	dsc->simple_422 = 0;
+	dsc->convert_rgb = 1;
+	dsc->vbr_enable = 0;
+	drm_dsc_set_const_params(dsc);
+	drm_dsc_set_rc_buf_thresh(dsc);
+	ret = drm_dsc_setup_rc_params(dsc, DRM_DSC_1_1_PRE_SCR);
+	if (ret)
+		return ret;
+	dsc->initial_scale_value = drm_dsc_initial_scale_value(dsc);
+	dsc->line_buf_depth = dsc->bits_per_component + 1;
+	return drm_dsc_compute_rc_parameters(dsc);
+}
+
 static int l81a_dsc_enable(struct dagu_l81a *ctx)
 {
+	struct drm_dsc_config *dsc = &ctx->dsc;
 	struct drm_dsc_picture_parameter_set pps;
 	int i, ret;
 
 	if (!ctx->dsc_enabled)
 		return 0;
 
-	drm_dsc_pps_payload_pack(&pps, &ctx->dsc);
+	/*
+	 * CAF dsi_panel_update_pps(): qcom,mdss-dsi-panel-count==2 does
+	 * pic_width >>= 1 before packing. Each DSI link is 800 px / 1 slice.
+	 * DPU still needs the full 1600 picture (2 INTF + 2 DSC).
+	 *
+	 * CAF DSI_CMD_SET_PPS is DSI_CMD_SET_STATE_LP. Do not drop MODE_LPM:
+	 * mipi_dsi_device_transfer copies it to MSG_USE_LPM. Himax DSC is
+	 * already armed by B2; CAF never sends MIPI_DSI_COMPRESSION_MODE.
+	 */
+	ret = l81a_dsc_compute(dsc, L81A_HACT / 2);
+	if (ret)
+		return ret;
+	drm_dsc_pps_payload_pack(&pps, dsc);
+	ret = l81a_dsc_compute(dsc, L81A_HACT);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < 2; i++) {
-		if (!ctx->dsi[i])
-			continue;
 		ret = mipi_dsi_picture_parameter_set(ctx->dsi[i], &pps);
 		if (ret)
 			return ret;
-		ret = mipi_dsi_compression_mode(ctx->dsi[i], true);
-		if (ret)
-			return ret;
 	}
 	return 0;
 }
 
-static int l81a_prepare(struct drm_panel *panel)
+static int l81a_enable_one(struct regulator *reg, const char *name,
+			   struct device *dev)
 {
-	struct dagu_l81a *ctx = to_dagu_l81a(panel);
 	int ret;
 
-	if (ctx->prepared)
+	if (!reg)
 		return 0;
-
-	if (ctx->vddio) {
-		ret = regulator_enable(ctx->vddio);
-		if (ret)
-			return ret;
-	}
-
-	l81a_reset(ctx);
-
-	ret = l81a_tx_table(ctx, l81a_on_cmds, ARRAY_SIZE(l81a_on_cmds));
-	if (ret) {
-		dev_err(panel->dev, "L81A init failed: %d\n", ret);
-		if (ctx->vddio)
-			regulator_disable(ctx->vddio);
-		return ret;
-	}
-
-	ctx->prepared = true;
-	return 0;
+	ret = regulator_enable(reg);
+	if (ret)
+		dev_err(dev, "enable %s: %d\n", name, ret);
+	else
+		/* CAF dsi_panel_pwr_supply_l81a post-on-sleep is 10 ms. */
+		msleep(10);
+	return ret;
 }
 
-static const struct l81a_cmd l81a_enable_cmds[] = {
-	L81A_CMD(120, 0x11),
-	L81A_CMD(20, 0x29),
-};
+static void l81a_disable_one(struct regulator *reg)
+{
+	if (reg)
+		regulator_disable(reg);
+}
 
 static const struct l81a_cmd l81a_off_cmds[] = {
 	L81A_CMD(0, 0x28),
 	L81A_CMD(70, 0x10),
 };
 
-static int l81a_set_fps(struct dagu_l81a *ctx, unsigned int fps)
+static int l81a_prepare(struct drm_panel *panel)
+{
+	struct dagu_l81a *ctx = to_dagu_l81a(panel);
+	struct device *dev = panel->dev;
+	int ret;
+
+	if (ctx->prepared)
+		return 0;
+
+	/* CAF supply order: vddio, enp, enn. TDDI then raises TP RST. */
+	ret = l81a_enable_one(ctx->vddio, "vddio", dev);
+	if (ret)
+		return ret;
+	ret = l81a_enable_one(ctx->enp, "enp", dev);
+	if (ret)
+		goto err_vddio;
+	ret = l81a_enable_one(ctx->enn, "enn", dev);
+	if (ret)
+		goto err_enp;
+
+	/*
+	 * CAF dsi_panel_power_on() for panel_id 0x4C38314100420400:
+	 * gpio_direction_output(tp_reset_gpio, 1) before LCD reset.
+	 * GPIO 100 is the same Himax rst-gpio; leaving it floating keeps
+	 * the TDDI in reset → backlight (KTZ) on, pixels black.
+	 */
+	if (ctx->tp_reset_gpio)
+		gpiod_set_value_cansleep(ctx->tp_reset_gpio, 1);
+
+	l81a_reset(ctx);
+
+	ret = l81a_tx_table(ctx, l81a_on_cmds, ARRAY_SIZE(l81a_on_cmds));
+	if (ret) {
+		dev_err(dev, "L81A init failed: %d\n", ret);
+		goto err_enn;
+	}
+
+	/*
+	 * elish nt36523: 0x11/0x29 via dual helpers in prepare.
+	 * CAF on-command waits 120 ms then 20 ms (not elish 70/0).
+	 */
+	{
+		struct mipi_dsi_multi_context dsi_ctx = { .dsi = NULL };
+
+		mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, ctx->dsi[0],
+						  ctx->dsi[1], 0x11);
+		mipi_dsi_msleep(&dsi_ctx, 120);
+		mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, ctx->dsi[0],
+						  ctx->dsi[1], 0x29);
+		mipi_dsi_msleep(&dsi_ctx, 20);
+		ret = dsi_ctx.accum_err;
+		if (ret) {
+			dev_err(dev, "L81A sleep-out failed: %d\n", ret);
+			goto err_enn;
+		}
+	}
+
+	/*
+	 * Read DCS 0x0A after 0x11/0x29, still in LP11, before PPS/video.
+	 * Sync-dual-dsi skips DSI_0 writes but not reads — try both hosts.
+	 */
+	ctx->power_mode = 0;
+	ctx->power_mode_rc = mipi_dsi_dcs_get_power_mode(ctx->dsi[0],
+							 &ctx->power_mode);
+	if (ctx->power_mode_rc < 0 && ctx->dsi[1])
+		ctx->power_mode_rc = mipi_dsi_dcs_get_power_mode(ctx->dsi[1],
+								 &ctx->power_mode);
+
+	/* CAF: dsi_panel_enable (ON) then dsi_panel_update_pps, then video. */
+	ret = l81a_dsc_enable(ctx);
+	if (ret) {
+		dev_err(dev, "L81A DSC PPS: %d\n", ret);
+		goto err_enn;
+	}
+
+	ctx->prepared = true;
+	return 0;
+
+err_enn:
+	if (ctx->tp_reset_gpio)
+		gpiod_set_value_cansleep(ctx->tp_reset_gpio, 0);
+	l81a_disable_one(ctx->enn);
+err_enp:
+	l81a_disable_one(ctx->enp);
+err_vddio:
+	l81a_disable_one(ctx->vddio);
+	return ret;
+}
+
+static int __maybe_unused l81a_set_fps(struct dagu_l81a *ctx, unsigned int fps)
 {
 	if (fps <= 60)
 		return l81a_tx_table(ctx, l81a_fps_60, ARRAY_SIZE(l81a_fps_60));
 	return l81a_tx_table(ctx, l81a_fps_120, ARRAY_SIZE(l81a_fps_120));
 }
 
+static void l81a_bl_blink(struct dagu_l81a *ctx, int times)
+{
+	int i;
+
+	/*
+	 * HWEN (GPIO 139) drops the WLED even when KTZ is still in ABL
+	 * I2C×PWM. Short edges: ktz overlay uses 1µs ramp.
+	 */
+	/* Start from off so ABL leftover brightness dips once for sure. */
+	l81a_bl_set(ctx, 0);
+	msleep(800);
+	for (i = 0; i < times; i++) {
+		l81a_bl_set(ctx, 1500);
+		msleep(400);
+		l81a_bl_set(ctx, 0);
+		msleep(400);
+	}
+	l81a_bl_set(ctx, 1500);
+}
+
+static int l81a_hs_display_on(struct dagu_l81a *ctx)
+{
+	unsigned long flags0 = ctx->dsi[0]->mode_flags;
+	unsigned long flags1 = ctx->dsi[1]->mode_flags;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = NULL };
+
+	/* CAF qcom,mdss-dsi-displayon-command is HS 0x29 after video. */
+	ctx->dsi[0]->mode_flags &= ~MIPI_DSI_MODE_LPM;
+	ctx->dsi[1]->mode_flags &= ~MIPI_DSI_MODE_LPM;
+	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, ctx->dsi[0], ctx->dsi[1],
+					  0x29);
+	mipi_dsi_msleep(&dsi_ctx, 20);
+	ctx->dsi[0]->mode_flags = flags0;
+	ctx->dsi[1]->mode_flags = flags1;
+	return dsi_ctx.accum_err;
+}
+
 static int l81a_enable(struct drm_panel *panel)
 {
 	struct dagu_l81a *ctx = to_dagu_l81a(panel);
-	int ret;
+	int blinks;
 
-	/* CAF default timing@0 is 120 Hz. 60 Hz is DFPS via E2=0x10. */
-	/* 60 Hz uncompressed first: 120 Hz + DSC never even modeset (Logo frozen). */
-	ret = l81a_set_fps(ctx, 60);
-	if (ret)
-		return ret;
+	/*
+	 * No UART: encode DCS 0x0A (CAF ESD expects 0x9D) as BL blinks.
+	 * Blink BEFORE HS 0x29 — video-mode DMA can stall that write.
+	 * 1 = read failed before video (commands may not reach Himax)
+	 * 2 = read ok, display-on bit clear
+	 * 3 = display-on (if still black, video/DSC)
+	 */
+	if (ctx->power_mode_rc < 0)
+		blinks = 1;
+	else if (!(ctx->power_mode & 0x04))
+		blinks = 2;
+	else
+		blinks = 3;
 
-	ret = l81a_tx_table(ctx, l81a_enable_cmds, ARRAY_SIZE(l81a_enable_cmds));
-	if (ret)
-		return ret;
-
-	if (ctx->dsc_enabled) {
-		ret = l81a_dsc_enable(ctx);
-		if (ret)
-			dev_warn(panel->dev, "DSC enable failed: %d\n", ret);
-	}
-
-	l81a_sync_aux_bl(ctx);
+	// #region agent log
+	pr_emerg("{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"C\",\"location\":\"panel-xiaomi-dagu-l81a.c:l81a_enable\",\"message\":\"enable-blinks\",\"data\":{\"blinks\":%d,\"pwr_rc\":%d,\"pwr\":%u},\"timestamp\":%lu}\n",
+		 blinks, ctx->power_mode_rc, ctx->power_mode,
+		 (unsigned long)jiffies);
+	// #endregion
+	l81a_bl_blink(ctx, blinks);
+	l81a_hs_display_on(ctx);
 	return 0;
 }
 
@@ -300,13 +459,16 @@ static int l81a_unprepare(struct drm_panel *panel)
 	struct dagu_l81a *ctx = to_dagu_l81a(panel);
 
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-	if (ctx->vddio)
-		regulator_disable(ctx->vddio);
+	if (ctx->tp_reset_gpio)
+		gpiod_set_value_cansleep(ctx->tp_reset_gpio, 0);
+	l81a_disable_one(ctx->enn);
+	l81a_disable_one(ctx->enp);
+	l81a_disable_one(ctx->vddio);
 	ctx->prepared = false;
 	return 0;
 }
 
-/* Same porches as CAF; do not double them when merging dual-DSI 800+800. */
+/* Full 1600 mode; H porches are 2× CAF per-link so split restores 60/40/60. */
 static const struct drm_display_mode l81a_mode_120 = {
 	.clock = L81A_HTOTAL * L81A_VTOTAL * 120 / 1000,
 	.hdisplay = L81A_HACT,
@@ -319,7 +481,7 @@ static const struct drm_display_mode l81a_mode_120 = {
 	.vtotal = L81A_VTOTAL,
 	.width_mm = 166,
 	.height_mm = 266,
-	.type = DRM_MODE_TYPE_DRIVER,
+	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
 };
 
 static const struct drm_display_mode l81a_mode_60 = {
@@ -334,15 +496,15 @@ static const struct drm_display_mode l81a_mode_60 = {
 	.vtotal = L81A_VTOTAL,
 	.width_mm = 166,
 	.height_mm = 266,
-	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
+	.type = DRM_MODE_TYPE_DRIVER,
 };
 
 static int l81a_get_modes(struct drm_panel *panel,
 			  struct drm_connector *connector)
 {
 	static const struct drm_display_mode *modes[] = {
-		&l81a_mode_60,
 		&l81a_mode_120,
+		&l81a_mode_60,
 	};
 	unsigned int i;
 
@@ -374,17 +536,22 @@ static void l81a_init_dsc(struct dagu_l81a *ctx)
 {
 	struct drm_dsc_config *dsc = &ctx->dsc;
 
-	/* CAF: dsc 1.1, slice 800x20, 8bpc/8bpp, block prediction. */
+	/*
+	 * CAF: dsc 1.1, slice 800x20, slice-per-pkt 1, 8bpc/8bpp.
+	 * Dual-DSI bonded: each INTF / DSC encoder is 800 px, so
+	 * slice_count is 1 per interface (msm dsi_update_dsc_timing
+	 * treats slice_count as slice_per_intf). PPS pic_width is 800;
+	 * DPU pic_width is restored to 1600 in l81a_dsc_enable().
+	 */
 	dsc->dsc_version_major = 1;
 	dsc->dsc_version_minor = 1;
 	dsc->slice_height = 20;
 	dsc->slice_width = 800;
-	dsc->slice_count = 2;
+	dsc->slice_count = 1;
 	dsc->bits_per_component = 8;
 	dsc->bits_per_pixel = 8 << 4;
 	dsc->block_pred_enable = true;
-	/* Off until 60 Hz uncompressed actually modesets. */
-	ctx->dsc_enabled = false;
+	ctx->dsc_enabled = true;
 }
 
 static int l81a_probe(struct mipi_dsi_device *dsi)
@@ -401,29 +568,57 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 	};
 	int ret, i;
 
+	// #region agent log
+	pr_emerg("{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"D\",\"location\":\"panel-xiaomi-dagu-l81a.c:l81a_probe\",\"message\":\"probe-enter\",\"data\":{},\"timestamp\":%lu}\n",
+		 (unsigned long)jiffies);
+	// #endregion
+
 	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
 
-	ctx->vddio = devm_regulator_get_optional(dev, "vddio");
-	if (IS_ERR(ctx->vddio)) {
-		dev_info(dev, "vddio %ld (ABL already powered the panel)\n",
-			 PTR_ERR(ctx->vddio));
-		ctx->vddio = NULL;
-	}
+	ctx->vddio = devm_regulator_get(dev, "vddio");
+	if (IS_ERR(ctx->vddio))
+		return dev_err_probe(dev, PTR_ERR(ctx->vddio), "vddio\n");
+	ctx->enp = devm_regulator_get(dev, "enp");
+	if (IS_ERR(ctx->enp))
+		return dev_err_probe(dev, PTR_ERR(ctx->enp), "enp\n");
+	ctx->enn = devm_regulator_get(dev, "enn");
+	if (IS_ERR(ctx->enn))
+		return dev_err_probe(dev, PTR_ERR(ctx->enn), "enn\n");
 
 	/* Logical 0 = deasserted (ACTIVE_LOW pin high). Do not hold reset. */
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(ctx->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio), "reset GPIO\n");
 
+	/* CAF gpio_direction_output(tp_reset, 1) at panel power_on. */
+	ctx->tp_reset_gpio = devm_gpiod_get_optional(dev, "tp-reset",
+						     GPIOD_OUT_HIGH);
+	if (IS_ERR(ctx->tp_reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(ctx->tp_reset_gpio),
+				     "tp-reset GPIO\n");
+
+	/* HWEN is owned by gpio-leds (heartbeat) for this bring-up. */
+	ctx->hwen_gpio = devm_gpiod_get_optional(dev, "hwen", GPIOD_OUT_HIGH);
+	if (IS_ERR(ctx->hwen_gpio)) {
+		dev_warn(dev, "hwen GPIO %ld (leds may own it)\n",
+			 PTR_ERR(ctx->hwen_gpio));
+		ctx->hwen_gpio = NULL;
+	}
+
 	dsi1_node = of_graph_get_remote_node(dev->of_node, 1, -1);
 	if (!dsi1_node)
 		return dev_err_probe(dev, -ENODEV, "no secondary DSI node\n");
 	dsi1_host = of_find_mipi_dsi_host_by_node(dsi1_node);
 	of_node_put(dsi1_node);
-	if (!dsi1_host)
+	if (!dsi1_host) {
+		// #region agent log
+		pr_emerg("{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"D\",\"location\":\"panel-xiaomi-dagu-l81a.c:l81a_probe\",\"message\":\"no-dsi1-host\",\"data\":{},\"timestamp\":%lu}\n",
+			 (unsigned long)jiffies);
+		// #endregion
 		return dev_err_probe(dev, -EPROBE_DEFER, "secondary DSI host\n");
+	}
 
 	ctx->dsi[1] = devm_mipi_dsi_device_register_full(dev, dsi1_host, &info);
 	if (IS_ERR(ctx->dsi[1]))
@@ -436,17 +631,27 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 
 	drm_panel_init(&ctx->panel, dev, &l81a_funcs, DRM_MODE_CONNECTOR_DSI);
 	ctx->panel.prepare_prev_first = true;
-	/* Optional: missing KTZ8866 must not defer MDSS forever. ABL left BL on. */
 	ret = drm_panel_of_backlight(&ctx->panel);
-	if (ret && ret != -EPROBE_DEFER)
-		dev_warn(dev, "backlight: %d (continuing)\n", ret);
-	else if (ret == -EPROBE_DEFER)
-		dev_info(dev, "no backlight yet, continuing without it\n");
+	if (ret == -EPROBE_DEFER) {
+		/*
+		 * Dual KTZ used to register the same backlight name, so the
+		 * primary chip never appeared and this deferred forever —
+		 * GPIO 139 stayed with ABL, constant light, no blinks.
+		 * HWEN is on the panel now; attach anyway so enable() can
+		 * blink even if I2C is late or missing.
+		 */
+		dev_warn(dev, "primary backlight not ready, GPIO blinks still run\n");
+		ret = 0;
+	} else if (ret) {
+		return dev_err_probe(dev, ret, "backlight\n");
+	}
 
 	bl_np = of_parse_phandle(dev->of_node, "backlight-aux", 0);
 	if (bl_np) {
 		ctx->backlight_aux = of_find_backlight_by_node(bl_np);
 		of_node_put(bl_np);
+		if (IS_ERR_OR_NULL(ctx->backlight_aux))
+			ctx->backlight_aux = NULL;
 	}
 
 	drm_panel_add(&ctx->panel);
@@ -456,15 +661,20 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 		ctx->dsi[i]->format = MIPI_DSI_FMT_RGB888;
 		if (ctx->dsc_enabled)
 			ctx->dsi[i]->dsc = &ctx->dsc;
-		/* CAF: non_burst_sync_event. NON_CONTINUOUS matches elish NT36523. */
-		ctx->dsi[i]->mode_flags = MIPI_DSI_MODE_VIDEO |
-					  MIPI_DSI_CLOCK_NON_CONTINUOUS |
-					  MIPI_DSI_MODE_LPM;
+		/* CAF: non_burst_sync_event + bllp HS clock, not elish NON_CONTINUOUS. */
+		ctx->dsi[i]->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_LPM;
 		ret = devm_mipi_dsi_attach(dev, ctx->dsi[i]);
 		if (ret)
 			return dev_err_probe(dev, ret, "attach DSI%d\n", i);
 	}
 
+	/* KTZ lights at probe; zero until drm_panel_enable. */
+	l81a_bl_set(ctx, 0);
+	// #region agent log
+	pr_emerg("{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"D\",\"location\":\"panel-xiaomi-dagu-l81a.c:l81a_probe\",\"message\":\"probe-ok\",\"data\":{\"hwen_gpio\":%d,\"aux\":%d},\"timestamp\":%lu}\n",
+		 ctx->hwen_gpio ? 1 : 0, ctx->backlight_aux ? 1 : 0,
+		 (unsigned long)jiffies);
+	// #endregion
 	return 0;
 }
 

@@ -14,8 +14,11 @@
 /dts-v1/;
 
 #include "sm8250-xiaomi-elish-common.dtsi"
+#include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/linux-event-codes.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/phy/phy.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 
 / {
 	model = "Xiaomi Pad 5 Pro 12.4";
@@ -35,13 +38,56 @@
 	};
 };
 
+/*
+ * CAF dagu: GPIO 130/131 = LCD bias ENP/ENN (±5.5 V), not WLED HWEN.
+ * elish-common names them bl_vddpos/bl_vddneg with regulator-boot-on.
+ */
+&bl_vddpos_5p5 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&display_enp_default>;
+	regulator-always-on;
+};
+
+&bl_vddneg_5p5 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&display_enn_default>;
+	regulator-always-on;
+};
+
+&tlmm {
+	display_enp_default: display-enp-default-state {
+		pins = "gpio130";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+		output-high;
+	};
+
+	display_enn_default: display-enn-default-state {
+		pins = "gpio131";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+		output-high;
+	};
+
+	/* CAF qcom,platform-tp-reset-gpio = GPIO 100, driven high in power_on. */
+	tp_reset_default: tp-reset-default-state {
+		pins = "gpio100";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+		output-high;
+	};
+};
+
 /delete-node/ &framebuffer;
 
 &{/soc@0/watchdog@17c10000} {
 	timeout-sec = <40>;
 };
 
-/* HS gadget only. Do not wait for TCPM / role-switch. */
+/* HS gadget: elish otg + PM8150B Type-C role-switch (default peripheral). */
 &usb_1 {
 	qcom,select-utmi-as-pipe-clk;
 	status = "okay";
@@ -56,33 +102,119 @@
 };
 
 &usb_1_dwc3 {
-	dr_mode = "peripheral";
-	maximum-speed = "high-speed";
-	phys = <&usb_1_hsphy>;
-	phy-names = "usb2-phy";
-	/delete-property/ usb-role-switch;
-	/delete-property/ iommus;
-};
-
-&pm8150b_typec {
-	status = "disabled";
+	role-switch-default-mode = "peripheral";
 };
 
 &usb_1_dwc3_hs_out {
-	/delete-property/ remote-endpoint;
+	remote-endpoint = <&pm8150b_hs_in>;
 };
 
-/* Logo / MDSS / GPU / storage / Wi-Fi / DSP: off until RNDIS lives. */
-&mdss { status = "disabled"; };
-&mdss_dsi0 { status = "disabled"; };
-&mdss_dsi1 { status = "disabled"; };
-&mdss_dsi0_phy { status = "disabled"; };
-&mdss_dsi1_phy { status = "disabled"; };
-&display_panel { status = "disabled"; };
-&backlight { status = "disabled"; };
+/* PS5169 USB/DP redriver: CAF qupv3_se17 @28, EN GPIO69 */
+&i2c17 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	redriver@28 {
+		compatible = "parade,ps5169";
+		reg = <0x28>;
+		enable-gpios = <&tlmm 69 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/*
+ * L81A dual-DPHY 4-lane (not elish NT36523 CPHY — that SErrors).
+ * simple-framebuffer @ 0x9c000000 never scanned; keep it deleted.
+ */
+&apps_rsc {
+	regulators-0 {
+		vreg_l7a_1p83: ldo7 {
+			regulator-name = "vreg_l7a_1p83";
+			regulator-min-microvolt = <1832000>;
+			regulator-max-microvolt = <1832000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+};
+
+&mdss { status = "okay"; };
+&apps_smmu { status = "okay"; };
+
+/*
+ * elish-common sets qcom,sync-dual-dsi. Mainline then skips DSI_0 TX and
+ * only broadcasts from DSI_1. Dual write already talks to both hosts.
+ */
+&mdss_dsi0 {
+	/delete-property/ qcom,sync-dual-dsi;
+	status = "okay";
+};
+
+&mdss_dsi1 {
+	/delete-property/ qcom,sync-dual-dsi;
+	status = "okay";
+};
+
+&mdss_dsi0_phy {
+	phy-type = <PHY_TYPE_DPHY>;
+	status = "okay";
+};
+
+&mdss_dsi1_phy {
+	phy-type = <PHY_TYPE_DPHY>;
+	status = "okay";
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi1_out {
+	data-lanes = <0 1 2 3>;
+};
+
+&display_panel {
+	compatible = "xiaomi,dagu-l81a";
+	pinctrl-names = "default";
+	pinctrl-0 = <&tp_reset_default>;
+	vddio-supply = <&vreg_l7a_1p83>;
+	enp-supply = <&bl_vddpos_5p5>;
+	enn-supply = <&bl_vddneg_5p5>;
+	reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
+	tp-reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+	backlight = <&backlight>;
+	backlight-aux = <&backlight_b>;
+	/delete-property/ rotation;
+	status = "okay";
+};
+
+/*
+ * CAF dual KTZ8866: HWEN GPIO 139 high-active, shared by A+B.
+ * Only i2c11 (KTZ A / SE11) requests the GPIO — see dualktz8866.c.
+ * Second chip must NOT use enable-gpios or unique backlight names.
+ */
+&backlight {
+	enable-gpios = <&tlmm 139 GPIO_ACTIVE_HIGH>;
+	/delete-property/ kinetic,enable-lcd-bias;
+	status = "okay";
+};
+
+&i2c9 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	backlight_b: backlight@11 {
+		compatible = "kinetic,ktz8866";
+		reg = <0x11>;
+		vddpos-supply = <&bl_vddpos_5p5>;
+		vddneg-supply = <&bl_vddneg_5p5>;
+		current-num-sinks = <5>;
+		kinetic,current-ramp-delay-ms = <128>;
+		kinetic,led-enable-ramp-delay-ms = <1>;
+		status = "okay";
+	};
+};
+
 &gpu { status = "disabled"; };
 &gmu { status = "disabled"; };
-&apps_smmu { status = "disabled"; };
 &ufs_mem_hc { status = "disabled"; };
 &ufs_mem_phy { status = "disabled"; };
 &pcie0 { status = "disabled"; };
@@ -116,14 +248,14 @@
 &gpio_keys { status = "disabled"; };
 
 &i2c0 { status = "disabled"; };
-&i2c11 { status = "disabled"; };
+&i2c11 { status = "okay"; };
 &i2c13 { status = "disabled"; };
-&gpi_dma0 { status = "disabled"; };
-&gpi_dma1 { status = "disabled"; };
-&gpi_dma2 { status = "disabled"; };
-&qupv3_id_0 { status = "disabled"; };
-&qupv3_id_1 { status = "disabled"; };
-&qupv3_id_2 { status = "disabled"; };
+&gpi_dma0 { status = "okay"; };
+&gpi_dma1 { status = "okay"; };
+&gpi_dma2 { status = "okay"; };
+&qupv3_id_0 { status = "okay"; };
+&qupv3_id_1 { status = "okay"; };
+&qupv3_id_2 { status = "okay"; };
 
 &{/qca6390-pmu} {
 	status = "disabled";

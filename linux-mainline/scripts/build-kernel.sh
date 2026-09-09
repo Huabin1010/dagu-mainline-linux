@@ -49,6 +49,8 @@ grep -q '^CONFIG_KVM=y' "$cfg" && die "KVM still on — dump 4.19 has no hypervi
 grep -q '^CONFIG_POWER_RESET_MSM=y' "$cfg" && die "POWER_RESET_MSM still on — would bounce to fastboot on panic"
 if [[ "${DAGU_MINIMAL:-}" != 1 ]]; then
 	need_y CONFIG_USB_CONFIGFS
+	need_y CONFIG_USB_CONFIGFS_ACM
+	need_y CONFIG_USB_U_SERIAL
 	need_y CONFIG_SCSI_UFS_QCOM
 	need_y CONFIG_PHY_QCOM_QUSB2
 	need_y CONFIG_PHY_QCOM_USB_SNPS_FEMTO_V2

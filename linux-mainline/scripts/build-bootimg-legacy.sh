@@ -15,7 +15,7 @@ BOOTIMG="${BOOTIMG:-$OUT/boot-dagu-legacy.img}"
 PADDED="$OUT/Image-text-offset"
 GZ="$OUT/Image-text-offset.gz"
 GZDTB="$OUT/Image.gz-dtb"
-CMDLINE="${CMDLINE:-clk_ignore_unused pd_ignore_unused fw_devlink=off fw_devlink.sync_state=disabled kpti=off console=tty0}"
+CMDLINE="${CMDLINE:-clk_ignore_unused pd_ignore_unused fw_devlink=off fw_devlink.sync_state=disabled kpti=off console=tty0 androidboot.usbcontroller=a600000.dwc3}"
 
 [[ -f "$KERNEL_IMG" ]] || { echo "missing $KERNEL_IMG — build-kernel.sh" >&2; exit 1; }
 [[ -f "$DTB" ]] || { echo "missing $DTB — build-kernel.sh" >&2; exit 1; }

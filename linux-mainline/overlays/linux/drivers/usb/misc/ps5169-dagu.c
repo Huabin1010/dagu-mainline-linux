@@ -119,6 +119,10 @@ static int ps5169_probe(struct i2c_client *client)
 		return dev_err_probe(&client->dev, ret, "configure\n");
 
 	i2c_set_clientdata(client, chip);
+	// #region agent log
+	pr_emerg("{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"B\",\"location\":\"ps5169-dagu.c:ps5169_probe\",\"message\":\"ps5169-probe-ok\",\"data\":{\"dev\":\"%s\"},\"timestamp\":0}\n",
+		 dev_name(&client->dev));
+	// #endregion
 	return 0;
 }
 

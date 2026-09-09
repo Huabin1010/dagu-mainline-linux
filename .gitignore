@@ -33,6 +33,9 @@ linux-mainline/*.cpio.gz
 /boot-dagu-latest.img
 boot-dagu-latest.img
 
+# Local scratch: screenshots, photos, debug captures (not versioned)
+tmp/
+
 # OS / editor
 .DS_Store
 Thumbs.db

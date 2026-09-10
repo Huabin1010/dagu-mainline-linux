@@ -457,6 +457,140 @@ fi
 
 echo "==> overlays installed"
 
+python3 - "$KERNEL_SRC/drivers/cpufreq/qcom-cpufreq-hw.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: skip CPU ICC paths"
+old = """\tret = dev_pm_opp_of_find_icc_paths(cpu_dev, NULL);
+\tif (ret)
+\t\treturn dev_err_probe(dev, ret, "Failed to find icc paths\\n");
+"""
+new = """\tret = dev_pm_opp_of_find_icc_paths(cpu_dev, NULL);
+\tif (ret) {
+\t\t/* dagu: skip CPU ICC paths — SM8250 ICC is off; BCM voter hangs */
+\t\tdev_info(dev, "dagu: skip CPU ICC paths (%d), scale without BCM\\n",
+\t\t\t ret);
+\t}
+"""
+if marker not in text:
+    if old not in text:
+        raise SystemExit(f"{path}: cpufreq icc-path block not found")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+# A previous overlay forced icc_scaling_enabled=false, which makes
+# dev_pm_opp_add() fail against the DT OPP table and LUT probe abort.
+old_bad = """\t\t/* Disable all opps and cross-validate against LUT later */
+\t\t/* dagu: skip CPU ICC paths — scale EPSS LUT without BCM votes */
+\t\ticc_scaling_enabled = false;
+"""
+new_good = """\t\t/* Disable all opps and cross-validate against LUT later */
+\t\ticc_scaling_enabled = true;
+"""
+text = path.read_text()
+if old_bad in text:
+    text = text.replace(old_bad, new_good, 1)
+    path.write_text(text)
+    print(f"restored {path}: icc_scaling_enabled=true")
+# Don't vote CPU/L3 interconnects on freq change (no SM8250 ICC).
+bw_old = """\tif (icc_scaling_enabled)
+\t\tqcom_cpufreq_set_bw(policy, freq);
+"""
+bw_new = """\t/* dagu: skip CPU ICC paths — EPSS freq scale only, no BCM vote */
+"""
+text = path.read_text()
+if "EPSS freq scale only" not in text:
+    if bw_old not in text:
+        raise SystemExit(f"{path}: cpufreq set_bw call not found")
+    text = text.replace(bw_old, bw_new, 1)
+    path.write_text(text)
+    print(f"patched {path}: skip set_bw ICC")
+# DT CPU OPP tables pull ICC; treat -EPROBE_DEFER as "no OPP table"
+# so the EPSS LUT path can still register frequencies.
+lut_old = """\t} else if (ret != -ENODEV) {
+\t\tdev_err(cpu_dev, "Invalid opp table in device tree\\n");
+\t\tkfree(table);
+\t\treturn ret;
+\t} else {
+\t\tpolicy->fast_switch_possible = true;
+\t\ticc_scaling_enabled = false;
+\t}
+"""
+lut_new = """\t} else if (ret == -EPROBE_DEFER) {
+\t\t/* dagu: skip CPU ICC paths — DT OPPs need ICC; use EPSS LUT */
+\t\tdev_pm_opp_of_remove_table(cpu_dev);
+\t\tdev_info(cpu_dev, "dagu: skip DT OPP ICC (%d), use EPSS LUT\\n",
+\t\t\t ret);
+\t\tpolicy->fast_switch_possible = true;
+\t\ticc_scaling_enabled = false;
+\t} else if (ret != -ENODEV) {
+\t\tdev_err(cpu_dev, "Invalid opp table in device tree\\n");
+\t\tkfree(table);
+\t\treturn ret;
+\t} else {
+\t\tpolicy->fast_switch_possible = true;
+\t\ticc_scaling_enabled = false;
+\t}
+"""
+text = path.read_text()
+if "dev_pm_opp_of_remove_table(cpu_dev)" not in text:
+    if "use EPSS LUT" in text:
+        old_defer = """\t} else if (ret == -EPROBE_DEFER) {
+\t\t/* dagu: skip CPU ICC paths — DT OPPs need ICC; use EPSS LUT */
+\t\tdev_info(cpu_dev, "dagu: skip DT OPP ICC (%d), use EPSS LUT\\n",
+\t\t\t ret);
+"""
+        new_defer = """\t} else if (ret == -EPROBE_DEFER) {
+\t\t/* dagu: skip CPU ICC paths — DT OPPs need ICC; use EPSS LUT */
+\t\tdev_pm_opp_of_remove_table(cpu_dev);
+\t\tdev_info(cpu_dev, "dagu: skip DT OPP ICC (%d), use EPSS LUT\\n",
+\t\t\t ret);
+"""
+        if old_defer not in text:
+            raise SystemExit(f"{path}: EPROBE_DEFER LUT block not found")
+        text = text.replace(old_defer, new_defer, 1)
+        path.write_text(text)
+        print(f"patched {path}: remove DT OPP table before LUT")
+    else:
+        if lut_old not in text:
+            raise SystemExit(f"{path}: cpufreq Invalid opp table block not found")
+        path.write_text(text.replace(lut_old, lut_new, 1))
+        print(f"patched {path}: EPSS LUT on OPP EPROBE_DEFER")
+PY
+
+python3 - "$KERNEL_SRC/drivers/tty/serial/qcom_geni_serial.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: UART proto invalid, not loading QUPFW"
+if marker in text:
+    raise SystemExit(0)
+old = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\tret = geni_load_se_firmware(&port->se, GENI_SE_UART);
+\t\tif (ret) {
+\t\t\tdev_err(uport->dev, "UART firmware load failed ret: %d\\n", ret);
+\t\t\treturn ret;
+\t\t}
+\t} else if (proto != GENI_SE_UART) {
+"""
+new = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\t/* dagu: UART proto invalid, not loading QUPFW on this QHEE */
+\t\tdev_err(uport->dev,
+\t\t\t"UART proto invalid, not loading QUPFW on this QHEE\\n");
+\t\treturn -EOPNOTSUPP;
+\t} else if (proto != GENI_SE_UART) {
+"""
+if old not in text:
+    raise SystemExit(f"{path}: UART firmware-load block not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
 python3 - "$KERNEL_SRC/drivers/gpu/drm/drm_fb_helper.c" <<'PY'
 from pathlib import Path
 import sys

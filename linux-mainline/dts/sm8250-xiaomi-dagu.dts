@@ -257,9 +257,9 @@
 	status = "disabled";
 };
 
-/* &gpu/&gmu are off and SM_GPUCC_8250 is not built — probe just times out. */
+/* &gpu/&gmu need SM_GPUCC_8250; zap is dump a650_zap.mbn. */
 &adreno_smmu {
-	status = "disabled";
+	status = "okay";
 };
 
 /*
@@ -342,8 +342,17 @@
 	status = "disabled";
 };
 
-&gpu { status = "disabled"; };
-&gmu { status = "disabled"; };
+&gpu {
+	status = "okay";
+};
+
+&gmu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8250/xiaomi/dagu/a650_zap.mbn";
+};
 
 /*
  * elish-common already sets vcc/vccq and status=okay. Drop interconnects so
@@ -356,10 +365,18 @@
 	status = "okay";
 };
 &ufs_mem_phy { status = "okay"; };
-&pcie0 { status = "disabled"; };
-&pcie0_phy { status = "disabled"; };
+&pcie0 { status = "okay"; };
+&pcie0_phy { status = "okay"; };
 &pcie1 { status = "disabled"; };
 &pcie2 { status = "disabled"; };
+
+&pcieport0 {
+	wifi@0 {
+		/* board.bin = dump bd_l81a.elf; do not use board-2.bin */
+		/delete-property/ qcom,calibration-variant;
+		local-mac-address = [f0 6c 5d 71 3a 2b];
+	};
+};
 
 &adsp {
 	firmware-name = "qcom/sm8250/xiaomi/dagu/adsp.mbn";
@@ -383,8 +400,16 @@
 &cci1 { status = "disabled"; };
 &camss { status = "disabled"; };
 &sound { status = "disabled"; };
-&uart6 { status = "disabled"; };
 &gpio_keys { status = "disabled"; };
+
+&uart6 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	status = "okay";
+	bluetooth {
+		firmware-name = "qca/htbtfw20.tlv";
+	};
+};
 
 &i2c0 { status = "disabled"; };
 &i2c11 { status = "disabled"; };
@@ -397,13 +422,14 @@
 /*
  * GENI QUP0 SE4 stays off: geni_load_se_fw / geni_se_init hang this QHEE.
  * Himax is on the spi-gpio node in / { himax_spi }.
+ * Wrapper is on for uart6 (QCA6390 BT, SE6). SERIAL skips QUPFW load.
  */
 &gpi_dma0 { status = "disabled"; };
-&qupv3_id_0 { status = "disabled"; };
+&qupv3_id_0 { status = "okay"; };
 &spi4 { status = "disabled"; };
 
 &{/qca6390-pmu} {
-	status = "disabled";
+	status = "okay";
 };
 
 /*

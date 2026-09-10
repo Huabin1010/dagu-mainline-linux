@@ -82,6 +82,14 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 		die "SPI_QCOM_GENI still on — GENI SPI hangs this QHEE"
 	need_y CONFIG_SPI_GPIO
 	need_y CONFIG_TOUCHSCREEN_HIMAX_DAGU
+	need_y CONFIG_SM_GPUCC_8250
+	need_y CONFIG_ARM_QCOM_CPUFREQ_HW
+	need_y CONFIG_PCIE_QCOM
+	need_y CONFIG_PHY_QCOM_QMP_PCIE
+	need_y CONFIG_ATH11K_PCI
+	need_y CONFIG_POWER_SEQUENCING_QCOM_WCN
+	need_y CONFIG_SERIAL_QCOM_GENI
+	need_y CONFIG_BT_HCIUART_QCA
 	grep -q '^CONFIG_FB_SIMPLE=y' "$cfg" && \
 		die "FB_SIMPLE still on — it would fight DRM fbdev over fbcon"
 fi

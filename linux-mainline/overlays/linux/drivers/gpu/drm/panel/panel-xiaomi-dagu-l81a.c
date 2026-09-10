@@ -140,6 +140,8 @@ static inline struct dagu_l81a *to_dagu_l81a(struct drm_panel *panel)
 	return container_of(panel, struct dagu_l81a, panel);
 }
 
+static int l81a_set_fps(struct dagu_l81a *ctx, unsigned int fps);
+
 static int l81a_tx(struct dagu_l81a *ctx, const struct l81a_cmd *cmd)
 {
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = NULL };
@@ -321,6 +323,11 @@ static int l81a_prepare(struct drm_panel *panel)
 		goto err_enn;
 	}
 
+	/* CAF dispparam-pen-120hz: E2=0x00. Pixel clock alone does not DFPS. */
+	ret = l81a_set_fps(ctx, 120);
+	if (ret)
+		dev_warn(dev, "L81A 120 Hz E2 failed: %d\n", ret);
+
 	/*
 	 * elish nt36523: 0x11/0x29 via dual helpers in prepare.
 	 * CAF on-command waits 120 ms then 20 ms (not elish 70/0).
@@ -373,7 +380,7 @@ err_vddio:
 	return ret;
 }
 
-static int __maybe_unused l81a_set_fps(struct dagu_l81a *ctx, unsigned int fps)
+static int l81a_set_fps(struct dagu_l81a *ctx, unsigned int fps)
 {
 	if (fps <= 60)
 		return l81a_tx_table(ctx, l81a_fps_60, ARRAY_SIZE(l81a_fps_60));
@@ -484,7 +491,7 @@ static const struct drm_display_mode l81a_mode_120 = {
 	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
 };
 
-static const struct drm_display_mode l81a_mode_60 = {
+static const struct drm_display_mode l81a_mode_60 __maybe_unused = {
 	.clock = L81A_HTOTAL * L81A_VTOTAL * 60 / 1000,
 	.hdisplay = L81A_HACT,
 	.hsync_start = L81A_HACT + L81A_HFP,
@@ -502,26 +509,19 @@ static const struct drm_display_mode l81a_mode_60 = {
 static int l81a_get_modes(struct drm_panel *panel,
 			  struct drm_connector *connector)
 {
-	static const struct drm_display_mode *modes[] = {
-		&l81a_mode_120,
-		&l81a_mode_60,
-	};
-	unsigned int i;
+	struct drm_display_mode *mode;
 
-	for (i = 0; i < ARRAY_SIZE(modes); i++) {
-		struct drm_display_mode *mode;
-
-		mode = drm_mode_duplicate(connector->dev, modes[i]);
-		if (!mode)
-			return -ENOMEM;
-		drm_mode_set_name(mode);
-		drm_mode_probed_add(connector, mode);
-	}
+	/* Only 120 Hz: GNOME picked the same 1600x2560 60 Hz name otherwise. */
+	mode = drm_mode_duplicate(connector->dev, &l81a_mode_120);
+	if (!mode)
+		return -ENOMEM;
+	drm_mode_set_name(mode);
+	drm_mode_probed_add(connector, mode);
 
 	connector->display_info.width_mm = l81a_mode_120.width_mm;
 	connector->display_info.height_mm = l81a_mode_120.height_mm;
 	connector->display_info.bpc = 8;
-	return ARRAY_SIZE(modes);
+	return 1;
 }
 
 static const struct drm_panel_funcs l81a_funcs = {

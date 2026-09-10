@@ -59,3 +59,30 @@ CONFIG_ARM_PSCI_CPUIDLE=y
 # voter's rpmh_write_batch() times out on this QHEE chain. sm8250-xiaomi-dagu.dts
 # deletes mdss's "interconnects" so of_icc_get() returns NULL and msm_mdss skips
 # the vote — ABL already trained MASTER_MDP_PORT0/1 to run the splash over it.
+
+# GPU + OSM: without these GNOME is llvmpipe at boot freq and feels 60 Hz.
+CONFIG_SM_GPUCC_8250=y
+CONFIG_ARM_QCOM_CPUFREQ_HW=y
+
+# QCA6390 Wi-Fi (pcie0 / ath11k). PHY was =m and ramdisk never loaded it.
+CONFIG_PCI=y
+CONFIG_PCIE_QCOM=y
+CONFIG_PHY_QCOM_QMP=y
+CONFIG_PHY_QCOM_QMP_PCIE=y
+CONFIG_WLAN=y
+CONFIG_CFG80211=y
+CONFIG_MAC80211=y
+CONFIG_ATH11K=y
+CONFIG_ATH11K_PCI=y
+CONFIG_POWER_SEQUENCING=y
+CONFIG_POWER_SEQUENCING_QCOM_WCN=y
+CONFIG_RFKILL=y
+
+# QCA6390 BT on uart6 (QUP0 SE6). SERIAL skips geni_load_se_firmware.
+CONFIG_BT=y
+CONFIG_BT_HCIUART=y
+CONFIG_BT_HCIUART_SERDEV=y
+CONFIG_BT_HCIUART_QCA=y
+CONFIG_SERIAL_QCOM_GENI=y
+CONFIG_SERIAL_DEV_BUS=y
+CONFIG_SERIAL_DEV_CTRL_TTYPORT=y

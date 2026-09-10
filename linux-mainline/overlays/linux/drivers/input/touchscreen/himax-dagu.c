@@ -85,7 +85,7 @@ static irqreturn_t himax_irq(int irq, void *data)
 	n &= 0x0f;
 
 	if (n)
-		dev_info_ratelimited(&ts->spi->dev,
+		dev_dbg_ratelimited(&ts->spi->dev,
 				     "event30 n=%u raw=%u,%u xy=%u,%u\n", n,
 				     (buf[0] << 8) | buf[1],
 				     (buf[2] << 8) | buf[3],

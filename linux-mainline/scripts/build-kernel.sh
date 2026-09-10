@@ -14,8 +14,14 @@ die() { echo "error: $*" >&2; exit 1; }
 [[ -d "$KERNEL_SRC" ]] || die "run scripts/setup-kernel.sh"
 command -v "${CROSS_COMPILE}gcc" >/dev/null || die "run scripts/setup-deps.sh"
 
+# Never inject PSCI SYSTEM_RESET into primary_entry (instant fastboot).
+export DAGU_PRIMARY_ENTRY_PROBE="${DAGU_PRIMARY_ENTRY_PROBE:-0}"
+
 "$ROOT/scripts/apply-dts.sh"
 "$ROOT/scripts/apply-overlays.sh"
+if grep -q 'dagu bringup: SMC-first primary_entry probe' "$KERNEL_SRC/arch/arm64/kernel/head.S"; then
+	die "primary_entry still has the SYSTEM_RESET probe — kernel would bounce to fastboot"
+fi
 
 mkdir -p "$KBUILD_OUTPUT" "$OUT"
 cd "$KERNEL_SRC"
@@ -46,6 +52,10 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 fi
 make O="$KBUILD_OUTPUT" olddefconfig
 
+# Do not embed QUP firmware: geni_load_se_fw() hangs this QHEE, and
+# firmware-name is intentionally absent so probe fails closed (-EINVAL).
+# QUPFW_REL="qcom/sm8250/xiaomi/dagu/qupv3fw.elf"
+
 cfg="$KBUILD_OUTPUT/.config"
 need_y() {
 	grep -q "^$1=y" "$cfg" || die "$1 is not =y after olddefconfig (fragment lost?)"
@@ -66,6 +76,12 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	need_y CONFIG_SM_DISPCC_8250
 	need_y CONFIG_PINCTRL_SM8250
 	need_y CONFIG_REGULATOR_QCOM_REFGEN
+	need_y CONFIG_SCSI_UFS_QCOM
+	need_y CONFIG_PHY_QCOM_QMP_UFS
+	grep -q '^CONFIG_SPI_QCOM_GENI=y' "$cfg" && \
+		die "SPI_QCOM_GENI still on — GENI SPI hangs this QHEE"
+	grep -q '^CONFIG_TOUCHSCREEN_HIMAX_DAGU=y' "$cfg" && \
+		die "TOUCHSCREEN_HIMAX_DAGU still on — leave touch off until SPI is safe"
 	grep -q '^CONFIG_FB_SIMPLE=y' "$cfg" && \
 		die "FB_SIMPLE still on — it would fight DRM fbdev over fbcon"
 fi

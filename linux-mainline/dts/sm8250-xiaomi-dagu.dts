@@ -282,8 +282,18 @@
 
 &gpu { status = "disabled"; };
 &gmu { status = "disabled"; };
-&ufs_mem_hc { status = "disabled"; };
-&ufs_mem_phy { status = "disabled"; };
+
+/*
+ * elish-common already sets vcc/vccq and status=okay. Drop interconnects so
+ * ufshcd's of_icc_get() skips the BCM voter (same QHEE AMC timeout as USB/MDSS).
+ * PID1 stays on ramdisk forever without a block device.
+ */
+&ufs_mem_hc {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	status = "okay";
+};
+&ufs_mem_phy { status = "okay"; };
 &pcie0 { status = "disabled"; };
 &pcie0_phy { status = "disabled"; };
 &pcie1 { status = "disabled"; };
@@ -317,12 +327,18 @@
 &i2c0 { status = "disabled"; };
 &i2c11 { status = "disabled"; };
 &i2c13 { status = "disabled"; };
-&gpi_dma0 { status = "disabled"; };
 &gpi_dma1 { status = "disabled"; };
 &gpi_dma2 { status = "disabled"; };
-&qupv3_id_0 { status = "disabled"; };
 &qupv3_id_1 { status = "disabled"; };
 &qupv3_id_2 { status = "disabled"; };
+
+/*
+ * Touch off: GENI SPI probe hangs this QHEE (black panel + backlight,
+ * then WDT → fastboot). Restore display first; Himax comes back later.
+ */
+&gpi_dma0 { status = "disabled"; };
+&qupv3_id_0 { status = "disabled"; };
+&spi4 { status = "disabled"; };
 
 &{/qca6390-pmu} {
 	status = "disabled";

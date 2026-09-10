@@ -48,9 +48,9 @@ static void wdt_takeover(int t)
 {
 	if (wdt_fd >= 0)
 		return;
-	wdt_fd = open("/dev/watchdog", O_WRONLY);
+	wdt_fd = open("/dev/watchdog", O_WRONLY | O_CLOEXEC);
 	if (wdt_fd < 0)
-		wdt_fd = open("/dev/watchdog0", O_WRONLY);
+		wdt_fd = open("/dev/watchdog0", O_WRONLY | O_CLOEXEC);
 	if (wdt_fd < 0) {
 		kmsg("watchdog open failed");
 		return;
@@ -72,6 +72,21 @@ static void wdt_pet(void)
 {
 	if (wdt_fd >= 0 && write(wdt_fd, "\0", 1) < 0)
 		kmsg("watchdog pet failed");
+}
+
+/* Closing /dev/watchdog without 'V' leaves the KPSS WDT armed and stops the
+ * kernel from pinging it. switch_root's execl did that, then ABL bounced us
+ * ~30s into Ubuntu. Magic-close so Ubuntu isn't sitting on a ticking bomb.
+ */
+static void wdt_magic_close(void)
+{
+	if (wdt_fd < 0)
+		return;
+	if (write(wdt_fd, "V", 1) < 0)
+		kmsg("watchdog magic close write failed");
+	close(wdt_fd);
+	wdt_fd = -1;
+	kmsg("watchdog magic close");
 }
 
 static void die(const char *s)
@@ -415,6 +430,12 @@ static int setup_usb_console(void)
 	if (pid != 0)
 		return 0;
 
+	/* Don't hold the watchdog fd in the kmsg-relay child. */
+	if (wdt_fd >= 0) {
+		close(wdt_fd);
+		wdt_fd = -1;
+	}
+
 	for (;;) {
 		int gs = open("/dev/ttyGS0", O_RDWR | O_NOCTTY);
 		int kfd;
@@ -499,6 +520,9 @@ static const char *find_userdata(void)
 	int i;
 
 	for (i = 0; i < 240; i++) {
+		wdt_pet();
+		if (i == 0 || i % 20 == 0)
+			kmsg("waiting userdata");
 		trigger_block_uevents();
 		d = opendir("/sys/class/block");
 		if (d) {
@@ -533,8 +557,16 @@ static int try_switch_root(void)
 	kmsg(rootdev);
 	mkpath("/newroot");
 	if (mount(rootdev, "/newroot", "ext4", 0, NULL)) {
-		kmsg("userdata not ext4 (flash Ubuntu first)");
-		return -1;
+		/*
+		 * fastboot -S turns host file holes into don't-care. The ext4
+		 * journal often sits past the copied files, so ABL leaves old
+		 * userdata there and jbd2 rejects it. noload skips replay.
+		 */
+		kmsg("ext4 journal bad, retry noload");
+		if (mount(rootdev, "/newroot", "ext4", 0, "noload")) {
+			kmsg("userdata not ext4 (flash Ubuntu first)");
+			return -1;
+		}
 	}
 	if (access("/newroot/sbin/init", X_OK)) {
 		kmsg("no /sbin/init on userdata");
@@ -560,6 +592,7 @@ static int try_switch_root(void)
 		die("chroot failed");
 	if (chdir("/"))
 		die("chdir / failed");
+	wdt_magic_close();
 	execl("/sbin/init", "init", NULL);
 	die("exec /sbin/init failed");
 	return -1;
@@ -592,8 +625,12 @@ int main(void)
 	if (setup_usb_console())
 		kmsg("USB console setup failed");
 
+	if (try_switch_root())
+		kmsg("stay on ramdisk");
+
 	for (;;) {
 		wdt_pet();
+		kmsg("ramdisk idle");
 		sleep(5);
 	}
 }

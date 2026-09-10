@@ -3,10 +3,11 @@
  * Himax HX83121 SPI touch for Xiaomi Pad 5 Pro 12.4 (dagu).
  *
  * Pins from live FDT / CAF: SPI @ 0x990000 (spi4), CPHA, 4 MHz,
- * IRQ GPIO39, RST GPIO100, 1600×2560.
+ * IRQ GPIO39, RST GPIO100 (owned by the panel), 1600×2560.
  *
- * CAF hxchipset is 19k lines of Android 4.19 code; this is the mainline
- * overlay driver. Firmware (optional) from dumps via stage-firmware.sh.
+ * Protocol from CAF hxchipset himax_platform.c / himax_ic_HX83121.c:
+ *   read  cmd 0x30 via [0xF3, cmd, 0x00] + payload
+ *   10 fingers × 4 bytes (x_hi x_lo y_hi y_lo), count at offset 40.
  */
 
 #include <linux/delay.h>
@@ -14,19 +15,54 @@
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/interrupt.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/spi/spi.h>
+#include <linux/workqueue.h>
 
 #define HIMAX_MAX_FINGERS	10
+#define HIMAX_EVENT_LEN		56
+#define HIMAX_POINT_CNT		40	/* HX_MAX_PT * 4 */
+#define HIMAX_BUS_R_HLEN	3
+#define HIMAX_EVENT_CMD		0x30
 
 struct himax_dagu {
 	struct spi_device *spi;
 	struct input_dev *input;
 	struct gpio_desc *reset_gpio;
+	struct delayed_work irq_work;
+	struct mutex lock;
 	u32 max_x;
 	u32 max_y;
+	u8 xfer[HIMAX_BUS_R_HLEN + HIMAX_EVENT_LEN];
 };
+
+static int himax_bus_read(struct himax_dagu *ts, u8 cmd, u8 *buf, u32 len)
+{
+	struct spi_transfer t = { };
+	struct spi_message m;
+	int ret;
+
+	if (len > HIMAX_EVENT_LEN)
+		return -EINVAL;
+
+	mutex_lock(&ts->lock);
+	memset(ts->xfer, 0, HIMAX_BUS_R_HLEN + len);
+	ts->xfer[0] = 0xF3;
+	ts->xfer[1] = cmd;
+	ts->xfer[2] = 0x00;
+	t.tx_buf = ts->xfer;
+	t.rx_buf = ts->xfer;
+	t.len = HIMAX_BUS_R_HLEN + len;
+	spi_message_init(&m);
+	spi_message_add_tail(&t, &m);
+	ret = spi_sync(ts->spi, &m);
+	if (!ret)
+		memcpy(buf, ts->xfer + HIMAX_BUS_R_HLEN, len);
+	mutex_unlock(&ts->lock);
+	return ret;
+}
 
 static void himax_reset(struct himax_dagu *ts)
 {
@@ -43,34 +79,43 @@ static void himax_reset(struct himax_dagu *ts)
 static irqreturn_t himax_irq(int irq, void *data)
 {
 	struct himax_dagu *ts = data;
-	u8 buf[56];
-	int ret, i;
+	u8 buf[HIMAX_EVENT_LEN];
+	int ret, i, n;
 
-	ret = spi_read(ts->spi, buf, sizeof(buf));
+	ret = himax_bus_read(ts, HIMAX_EVENT_CMD, buf, sizeof(buf));
 	if (ret)
 		return IRQ_HANDLED;
 
-	for (i = 0; i < HIMAX_MAX_FINGERS; i++) {
-		u8 *p = &buf[i * 4];
-		u8 event = p[0] >> 6;
-		u16 x, y;
-		bool down;
+	n = buf[HIMAX_POINT_CNT];
+	if (n == 0xff)
+		n = 0;
+	n &= 0x0f;
 
-		if (event == 0x3)
-			continue;
-		x = ((p[0] & 0x3f) << 8) | p[1];
-		y = (p[2] << 8) | p[3];
-		down = x <= ts->max_x && y <= ts->max_y;
+	for (i = 0; i < HIMAX_MAX_FINGERS; i++) {
+		u16 x = (buf[i * 4] << 8) | buf[i * 4 + 1];
+		u16 y = (buf[i * 4 + 2] << 8) | buf[i * 4 + 3];
+		bool down = n && x <= ts->max_x && y <= ts->max_y;
+
 		input_mt_slot(ts->input, i);
 		input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, down);
 		if (!down)
 			continue;
 		input_report_abs(ts->input, ABS_MT_POSITION_X, x);
 		input_report_abs(ts->input, ABS_MT_POSITION_Y, y);
+		n--;
 	}
 	input_mt_sync_frame(ts->input);
 	input_sync(ts->input);
 	return IRQ_HANDLED;
+}
+
+static void himax_enable_irq(struct work_struct *work)
+{
+	struct himax_dagu *ts = container_of(to_delayed_work(work),
+					     struct himax_dagu, irq_work);
+
+	enable_irq(ts->spi->irq);
+	dev_info(&ts->spi->dev, "HX83121 IRQ enabled\n");
 }
 
 static int himax_probe(struct spi_device *spi)
@@ -84,6 +129,8 @@ static int himax_probe(struct spi_device *spi)
 	if (!ts)
 		return -ENOMEM;
 	ts->spi = spi;
+	mutex_init(&ts->lock);
+	INIT_DELAYED_WORK(&ts->irq_work, himax_enable_irq);
 	spi->mode |= SPI_CPHA;
 	spi->bits_per_word = 8;
 	ret = spi_setup(spi);
@@ -118,19 +165,33 @@ static int himax_probe(struct spi_device *spi)
 	if (irq <= 0)
 		return dev_err_probe(&spi->dev, -EINVAL, "no IRQ\n");
 
-	ret = devm_request_threaded_irq(&spi->dev, irq, NULL, himax_irq,
-					IRQF_ONESHOT | IRQF_TRIGGER_FALLING,
-					"himax-dagu", ts);
-	if (ret)
-		return ret;
-
 	ret = input_register_device(input);
 	if (ret)
 		return ret;
 
+	/*
+	 * Delay IRQ until USB serial is up. A stuck SPI xfer on a falling
+	 * line held by the in-cell FW must not bite the watchdog first.
+	 */
+	ret = devm_request_threaded_irq(&spi->dev, irq, NULL, himax_irq,
+					IRQF_ONESHOT | IRQF_TRIGGER_FALLING |
+					IRQF_NO_AUTOEN,
+					"himax-dagu", ts);
+	if (ret)
+		return ret;
+
 	spi_set_drvdata(spi, ts);
+	schedule_delayed_work(&ts->irq_work, HZ * 3);
 	dev_info(&spi->dev, "HX83121 %ux%u irq %d\n", ts->max_x, ts->max_y, irq);
 	return 0;
+}
+
+static void himax_remove(struct spi_device *spi)
+{
+	struct himax_dagu *ts = spi_get_drvdata(spi);
+
+	if (ts)
+		cancel_delayed_work_sync(&ts->irq_work);
 }
 
 static const struct of_device_id himax_of_match[] = {
@@ -142,12 +203,14 @@ MODULE_DEVICE_TABLE(of, himax_of_match);
 
 static const struct spi_device_id himax_id[] = {
 	{ "hx83121-dagu", 0 },
+	{ "hxcommon", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, himax_id);
 
 static struct spi_driver himax_driver = {
 	.probe = himax_probe,
+	.remove = himax_remove,
 	.id_table = himax_id,
 	.driver = {
 		.name = "himax-dagu",

@@ -31,6 +31,26 @@ CONFIG_REGULATOR_QCOM_REFGEN=y
 # Keep TER16x32 from dagu-bringup.fragment: 8x16 is 160 rows on this panel.
 # CONFIG_FB_SIMPLE is not set
 
+# UFS so PID1 can find userdata and switch_root. bringup.fragment turns this
+# off; without it init sits forever in the ramdisk idle loop.
+CONFIG_SCSI=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_SCSI_UFSHCD=y
+CONFIG_SCSI_UFSHCD_PLATFORM=y
+CONFIG_SCSI_UFS_QCOM=y
+CONFIG_PHY_QCOM_QMP_UFS=y
+CONFIG_EXT4_FS=y
+
+# Touch/SPI off until GENI SPI can probe without hanging this QHEE.
+# CONFIG_SPI_QCOM_GENI is not set
+# CONFIG_QCOM_GPI_DMA is not set
+# CONFIG_TOUCHSCREEN_HIMAX_DAGU is not set
+
+# Keep menu/PSCI idle compiled in; runtime off is vendor_boot `cpuidle.off=1`.
+# Compiling CPU_IDLE out made ABL bounce in ~4s on this board.
+CONFIG_CPU_IDLE=y
+CONFIG_ARM_PSCI_CPUIDLE=y
+
 # No INTERCONNECT_QCOM_SM8250 here, same reason as dagu-usb.fragment: the BCM
 # voter's rpmh_write_batch() times out on this QHEE chain. sm8250-xiaomi-dagu.dts
 # deletes mdss's "interconnects" so of_icc_get() returns NULL and msm_mdss skips

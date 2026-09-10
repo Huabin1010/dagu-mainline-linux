@@ -110,5 +110,16 @@ stage_dsp adsp || true
 stage_dsp slpi || true
 stage_dsp venus || true
 
+# GENI SPI (Himax) needs QUPv3 SE firmware. Stock partition is already ELF.
+QUPFW_SRC="$REPO/dumps/dagu-20260826-210700-root/images/qupfw_a.img"
+QUPFW_DST="$DSP/qupv3fw.elf"
+if [[ -f "$QUPFW_SRC" ]]; then
+	mkdir -p "$DSP"
+	cp -f "$QUPFW_SRC" "$QUPFW_DST"
+	echo "  qupv3fw.elf <- $QUPFW_SRC"
+else
+	echo "  skip qupv3fw: missing $QUPFW_SRC"
+fi
+
 echo "==> $LIB"
 find "$LIB" -type f | head -50

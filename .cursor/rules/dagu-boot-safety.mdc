@@ -1,0 +1,38 @@
+---
+description: dagu 主线内核禁止 primary_entry 复位探针，以及会把平板打回兔子的操作
+alwaysApply: true
+---
+
+# dagu 启动安全（禁止闪退 fastboot）
+
+## 绝对禁止
+
+- **禁止**把 `DAGU_PRIMARY_ENTRY_PROBE` 设为 `1` 或改回默认开启。
+- **禁止**在 `linux-mainline/linux/arch/arm64/kernel/head.S` 的 `primary_entry` 插入 PSCI `SYSTEM_RESET` / 死循环。那会让内核第一条指令就复位，主机约 25s 只看到兔子 `18d1:d00d`，关 SPI/DRM/UFS 都无效。
+- `linux-mainline/scripts/apply-overlays.sh` 必须默认 `DAGU_PRIMARY_ENTRY_PROBE=0`；`linux-mainline/scripts/build-kernel.sh` 若仍匹配 `dagu bringup: SMC-first primary_entry probe` 必须 `die`。
+- **禁止**对 `apply-overlays.sh` 做 `head|mv` 一类截断（会丢掉可执行位或卸探针逻辑）。
+
+## 编完 / 刷完必须查
+
+```text
+# head.S 必须直接 bl record_mmu_state，不能有 SYSTEM_RESET
+# 刷 B 槽后 g_serial 0525:a4a7 须保持 >30s，不能在 ~25s 变回 18d1:d00d
+```
+
+只刷 B 槽；用 `linux-mainline/scripts/fb-usb.py`，**不要**用 Google `fastboot reboot`。救砖：`linux-mainline/scripts/flash-boot-legacy.sh restore-a`。
+
+## 触控 / QUP（这套 QHEE）
+
+- **禁止** `geni_load_se_fw()`、给 `&qupv3_id_0` 加 `firmware-name`、skip-firmware 后仍 `geni_se_init()` 写 SE MMIO。
+- 桌面未稳定前保持 `&spi4` / `&qupv3_id_0` disabled，且 `# CONFIG_SPI_QCOM_GENI is not set`。
+
+## 错误示例
+
+```bash
+# ❌ 开机即兔子
+DAGU_PRIMARY_ENTRY_PROBE=1 ./scripts/build-kernel.sh
+
+# ✅
+DAGU_MINIMAL=1 DAGU_DISPLAY=1 ./scripts/build-kernel.sh
+# 确认 head.S 无 probe 后再 ./scripts/flash-boot.sh flash-b
+```

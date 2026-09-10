@@ -25,6 +25,7 @@ install_src drivers/input/keyboard/nanosic-dagu.c
 install_src drivers/power/supply/bq2597x-dagu.c
 install_src drivers/power/supply/p9418-dagu.c
 install_src drivers/watchdog/qcom-wdt-early-dagu.c
+install_src drivers/gpu/drm/msm/msm_fbdev.c
 
 append_once() {
 	local file=$1
@@ -380,8 +381,9 @@ if "dagu L81A: CAF DIV_ROUND_UP" not in text:
 
 PY
 
-# primary_entry probe: SMC32/SMC64 first (no MMU-off store), then dual DBGC fallback.
-if [[ "${DAGU_PRIMARY_ENTRY_PROBE:-1}" == 1 ]]; then
+# primary_entry probe: OFF. Default used to be 1, which injected PSCI
+# SYSTEM_RESET at the first kernel instruction — instant bounce to fastboot.
+if [[ "${DAGU_PRIMARY_ENTRY_PROBE:-0}" == 1 ]]; then
 	python3 - "$KERNEL_SRC/arch/arm64/kernel/head.S" <<'PY'
 import re
 from pathlib import Path
@@ -432,7 +434,6 @@ else:
 PY
 else
 	python3 - "$KERNEL_SRC/arch/arm64/kernel/head.S" <<'PY'
-import re
 from pathlib import Path
 import sys
 
@@ -440,23 +441,40 @@ path = Path(sys.argv[1])
 text = path.read_text()
 marker = "dagu bringup: SMC-first primary_entry probe"
 if marker not in text:
-    pass
-else:
-    text, n = re.subn(
-        r"SYM_CODE_START\(primary_entry\)\n"
-        r"\t/\* dagu bringup: SMC-first primary_entry probe.*?\n"
-        r"(?:\t.*\n)*?"
-        r"\tb\t9b\n\n",
-        "SYM_CODE_START(primary_entry)\n",
-        text,
-        count=1,
-        flags=re.DOTALL,
-    )
-    if n != 1:
-        raise SystemExit(f"{path}: could not remove primary_entry probe")
-    path.write_text(text)
-    print(f"restored {path}: native primary_entry (probe off)")
+    raise SystemExit(0)
+start = text.find("SYM_CODE_START(primary_entry)\n")
+if start < 0:
+    raise SystemExit(f"{path}: primary_entry missing")
+needle_end = "\tbl\trecord_mmu_state\n"
+end = text.find(needle_end, start)
+if end < 0:
+    raise SystemExit(f"{path}: record_mmu_state missing after primary_entry")
+text = text[:start] + "SYM_CODE_START(primary_entry)\n" + text[end:]
+path.write_text(text)
+print(f"restored {path}: native primary_entry (probe off)")
 PY
 fi
 
 echo "==> overlays installed"
+
+python3 - "$KERNEL_SRC/drivers/gpu/drm/drm_fb_helper.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: skip fbdev vblank wait"
+if marker in text:
+    raise SystemExit(0)
+needle = "\tdrm_client_modeset_wait_for_vblank(&helper->client, 0);\n"
+repl = (
+    "\t/* dagu: skip fbdev vblank wait — DPU INTF vsync is not raising "
+    "drm vblank, so this 1s wait WARNs into fbcon and retriggers damage. */\n"
+)
+if needle not in text:
+    raise SystemExit(f"{path}: vblank wait needle missing")
+# DPU INTF vsync never raises drm vblank; skip every helper wait.
+text = text.replace(needle, repl)
+path.write_text(text)
+print(f"patched {path}: {marker}")
+PY

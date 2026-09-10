@@ -2,16 +2,19 @@
 /*
  * Himax HX83121 SPI touch for Xiaomi Pad 5 Pro 12.4 (dagu).
  *
- * Pins from live FDT / CAF: SPI @ 0x990000 (spi4), CPHA, 4 MHz,
+ * Pins from CAF &qupv3_se4_spi: gpio8–11 = QUP L0–L3
+ *   L0/gpio8=MISO L1/gpio9=MOSI L2/gpio10=SCLK L3/gpio11=CS,
  * IRQ GPIO39, RST GPIO100 (owned by the panel), 1600×2560.
  *
+ * Bus is spi-gpio on those pads: GENI SE MMIO hangs this QHEE.
+ *
  * Protocol from CAF hxchipset himax_platform.c / himax_ic_HX83121.c:
+ *   spi->mode = SPI_MODE_3 (DT spi-cpha is overridden in the factory probe)
  *   read  cmd 0x30 via [0xF3, cmd, 0x00] + payload
- *   10 fingers × 4 bytes (x_hi x_lo y_hi y_lo), count at offset 40.
+ *   10 fingers × 4 bytes; HX_TOUCH_INFO_POINT_CNT = 52 for HX_MAX_PT=10.
  */
 
 #include <linux/delay.h>
-#include <linux/gpio/consumer.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/interrupt.h>
@@ -23,14 +26,16 @@
 
 #define HIMAX_MAX_FINGERS	10
 #define HIMAX_EVENT_LEN		56
-#define HIMAX_POINT_CNT		40	/* HX_MAX_PT * 4 */
+/* CAF himax_mcu_calcTouchDataSize: HX_MAX_PT=10 → 10*4 + 3*4 = 52 */
+#define HIMAX_POINT_CNT		52
 #define HIMAX_BUS_R_HLEN	3
 #define HIMAX_EVENT_CMD		0x30
+/* CAF FIX_HX_TOUCHSCREEN_RATIO: FW reports 8× display coords. */
+#define HIMAX_TOUCHSCREEN_RATIO	8
 
 struct himax_dagu {
 	struct spi_device *spi;
 	struct input_dev *input;
-	struct gpio_desc *reset_gpio;
 	struct delayed_work irq_work;
 	struct mutex lock;
 	u32 max_x;
@@ -64,18 +69,6 @@ static int himax_bus_read(struct himax_dagu *ts, u8 cmd, u8 *buf, u32 len)
 	return ret;
 }
 
-static void himax_reset(struct himax_dagu *ts)
-{
-	if (!ts->reset_gpio)
-		return;
-	gpiod_set_value_cansleep(ts->reset_gpio, 1);
-	msleep(20);
-	gpiod_set_value_cansleep(ts->reset_gpio, 0);
-	msleep(50);
-	gpiod_set_value_cansleep(ts->reset_gpio, 1);
-	msleep(50);
-}
-
 static irqreturn_t himax_irq(int irq, void *data)
 {
 	struct himax_dagu *ts = data;
@@ -91,17 +84,31 @@ static irqreturn_t himax_irq(int irq, void *data)
 		n = 0;
 	n &= 0x0f;
 
+	if (n)
+		dev_info_ratelimited(&ts->spi->dev,
+				     "event30 n=%u raw=%u,%u xy=%u,%u\n", n,
+				     (buf[0] << 8) | buf[1],
+				     (buf[2] << 8) | buf[3],
+				     ((buf[0] << 8) | buf[1]) /
+					     HIMAX_TOUCHSCREEN_RATIO,
+				     ((buf[2] << 8) | buf[3]) /
+					     HIMAX_TOUCHSCREEN_RATIO);
+
 	for (i = 0; i < HIMAX_MAX_FINGERS; i++) {
 		u16 x = (buf[i * 4] << 8) | buf[i * 4 + 1];
 		u16 y = (buf[i * 4 + 2] << 8) | buf[i * 4 + 3];
-		bool down = n && x <= ts->max_x && y <= ts->max_y;
+		bool down = n &&
+			    x <= (ts->max_x + 1) * HIMAX_TOUCHSCREEN_RATIO - 1 &&
+			    y <= (ts->max_y + 1) * HIMAX_TOUCHSCREEN_RATIO - 1;
 
 		input_mt_slot(ts->input, i);
 		input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, down);
 		if (!down)
 			continue;
-		input_report_abs(ts->input, ABS_MT_POSITION_X, x);
-		input_report_abs(ts->input, ABS_MT_POSITION_Y, y);
+		input_report_abs(ts->input, ABS_MT_POSITION_X,
+				 x / HIMAX_TOUCHSCREEN_RATIO);
+		input_report_abs(ts->input, ABS_MT_POSITION_Y,
+				 y / HIMAX_TOUCHSCREEN_RATIO);
 		n--;
 	}
 	input_mt_sync_frame(ts->input);
@@ -131,7 +138,8 @@ static int himax_probe(struct spi_device *spi)
 	ts->spi = spi;
 	mutex_init(&ts->lock);
 	INIT_DELAYED_WORK(&ts->irq_work, himax_enable_irq);
-	spi->mode |= SPI_CPHA;
+	/* CAF himax_chip_common_probe: spi->mode = SPI_MODE_3, not DT CPHA. */
+	spi->mode = SPI_MODE_3;
 	spi->bits_per_word = 8;
 	ret = spi_setup(spi);
 	if (ret)
@@ -142,12 +150,6 @@ static int himax_probe(struct spi_device *spi)
 	device_property_read_u32_array(&spi->dev, "himax,display-coords", coords, 4);
 	ts->max_x = coords[1];
 	ts->max_y = coords[3];
-
-	ts->reset_gpio = devm_gpiod_get_optional(&spi->dev, "reset", GPIOD_OUT_HIGH);
-	if (IS_ERR(ts->reset_gpio))
-		return PTR_ERR(ts->reset_gpio);
-
-	himax_reset(ts);
 
 	input = devm_input_allocate_device(&spi->dev);
 	if (!input)
@@ -181,7 +183,31 @@ static int himax_probe(struct spi_device *spi)
 		return ret;
 
 	spi_set_drvdata(spi, ts);
-	schedule_delayed_work(&ts->irq_work, HZ * 3);
+
+	{
+		u8 dump[HIMAX_EVENT_LEN];
+		int i, dump_ret;
+
+		msleep(20);
+		dump_ret = himax_bus_read(ts, HIMAX_EVENT_CMD, dump, sizeof(dump));
+		if (dump_ret) {
+			dev_err(&spi->dev, "HX83121 event30 probe read failed: %d\n",
+				dump_ret);
+		} else {
+			dev_info(&spi->dev,
+				 "HX83121 hdr %02x %02x %02x  n52=%02x xy=%02x%02x %02x%02x\n",
+				 ts->xfer[0], ts->xfer[1], ts->xfer[2],
+				 dump[HIMAX_POINT_CNT], dump[0], dump[1],
+				 dump[2], dump[3]);
+			for (i = 0; i < HIMAX_EVENT_LEN && dump[i] == 0xff; i++)
+				;
+			if (i == HIMAX_EVENT_LEN)
+				dev_err(&spi->dev,
+					"HX83121 all 0xff — MOSI/MISO/CLK/CS order or CS polarity\n");
+		}
+	}
+
+	schedule_delayed_work(&ts->irq_work, HZ * 2);
 	dev_info(&spi->dev, "HX83121 %ux%u irq %d\n", ts->max_x, ts->max_y, irq);
 	return 0;
 }

@@ -24,7 +24,8 @@ alwaysApply: true
 ## 触控 / QUP（这套 QHEE）
 
 - **禁止** `geni_load_se_fw()`、给 `&qupv3_id_0` 加 `firmware-name`、skip-firmware 后仍 `geni_se_init()` 写 SE MMIO。
-- 桌面未稳定前保持 `&spi4` / `&qupv3_id_0` disabled，且 `# CONFIG_SPI_QCOM_GENI is not set`。
+- 保持 `&spi4` / `&qupv3_id_0` / `&gpi_dma0` disabled，且 `# CONFIG_SPI_QCOM_GENI is not set`。
+- Himax 走 `spi-gpio`（CAF gpio8–11 + IRQ39），不要绑 GPIO100 `reset-gpios`（面板 `tp-reset`）。
 
 ## 错误示例
 

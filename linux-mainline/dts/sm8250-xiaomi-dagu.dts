@@ -60,6 +60,45 @@
 			no-map;
 		};
 	};
+
+	/*
+	 * CAF &qupv3_se4_spi @ 0x990000, pins gpio8–11 function qup4.
+	 * Mainline GENI SPI (firmware load / geni_se_init) writes QUP
+	 * registers this QHEE rejects and the board watchdogs to fastboot.
+	 * Bit-bang the same pads: protocol/IRQ/coords stay CAF.
+	 *
+	 * QUP v3 SPI lanes (Qualcomm): L0=MISO L1=MOSI L2=SCLK L3=CS.
+	 * gpio8–11 are QUP0 SE4 L0–L3, so MOSI is gpio9, not pingroup order.
+	 */
+	himax_spi: spi {
+		compatible = "spi-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&himax_spi_gpio_default>;
+		miso-gpios = <&tlmm 8 GPIO_ACTIVE_HIGH>;
+		mosi-gpios = <&tlmm 9 GPIO_ACTIVE_HIGH>;
+		sck-gpios = <&tlmm 10 GPIO_ACTIVE_HIGH>;
+		cs-gpios = <&tlmm 11 GPIO_ACTIVE_LOW>;
+		num-chipselects = <1>;
+
+		himax_ts: touchscreen@0 {
+			compatible = "himax,hx83121-dagu", "himax,hxcommon";
+			reg = <0>;
+			spi-max-frequency = <1000000>;
+			/* CAF probe forces SPI_MODE_3 (CPOL|CPHA), not DT CPHA. */
+			spi-cpol;
+			spi-cpha;
+			pinctrl-names = "default";
+			pinctrl-0 = <&himax_irq_default>;
+			interrupt-parent = <&tlmm>;
+			interrupts = <39 IRQ_TYPE_EDGE_FALLING>;
+			touchscreen-size-x = <1600>;
+			touchscreen-size-y = <2560>;
+			himax,display-coords = <0 1600 0 2560>;
+			/* GPIO100 is panel tp-reset; do not bind it here. */
+		};
+	};
 };
 
 /*
@@ -102,6 +141,29 @@
 		drive-strength = <8>;
 		bias-disable;
 		output-high;
+	};
+
+	/*
+	 * CAF himax,irq-gpio = GPIO 39 (0x2008 = input / pull-up).
+	 * Falling edge; in-cell HX83121 shares the panel, not a second reset.
+	 */
+	himax_irq_default: himax-irq-default-state {
+		pins = "gpio39";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-up;
+		input-enable;
+	};
+
+	/*
+	 * QUP0 SE4 SPI pads as GPIO. GENI MMIO hangs this QHEE, so Himax
+	 * rides spi-gpio on the same CAF pins (MOSI/MISO/CLK/CS).
+	 */
+	himax_spi_gpio_default: himax-spi-gpio-default-state {
+		pins = "gpio8", "gpio9", "gpio10", "gpio11";
+		function = "gpio";
+		drive-strength = <6>;
+		bias-disable;
 	};
 };
 
@@ -333,8 +395,8 @@
 &qupv3_id_2 { status = "disabled"; };
 
 /*
- * Touch off: GENI SPI probe hangs this QHEE (black panel + backlight,
- * then WDT → fastboot). Restore display first; Himax comes back later.
+ * GENI QUP0 SE4 stays off: geni_load_se_fw / geni_se_init hang this QHEE.
+ * Himax is on the spi-gpio node in / { himax_spi }.
  */
 &gpi_dma0 { status = "disabled"; };
 &qupv3_id_0 { status = "disabled"; };

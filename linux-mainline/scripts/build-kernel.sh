@@ -80,8 +80,8 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	need_y CONFIG_PHY_QCOM_QMP_UFS
 	grep -q '^CONFIG_SPI_QCOM_GENI=y' "$cfg" && \
 		die "SPI_QCOM_GENI still on — GENI SPI hangs this QHEE"
-	grep -q '^CONFIG_TOUCHSCREEN_HIMAX_DAGU=y' "$cfg" && \
-		die "TOUCHSCREEN_HIMAX_DAGU still on — leave touch off until SPI is safe"
+	need_y CONFIG_SPI_GPIO
+	need_y CONFIG_TOUCHSCREEN_HIMAX_DAGU
 	grep -q '^CONFIG_FB_SIMPLE=y' "$cfg" && \
 		die "FB_SIMPLE still on — it would fight DRM fbdev over fbcon"
 fi

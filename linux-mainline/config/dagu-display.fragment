@@ -41,10 +41,14 @@ CONFIG_SCSI_UFS_QCOM=y
 CONFIG_PHY_QCOM_QMP_UFS=y
 CONFIG_EXT4_FS=y
 
-# Touch/SPI off until GENI SPI can probe without hanging this QHEE.
+# Himax on spi-gpio (CAF gpio8–11). GENI QUP still off — load/se_init hangs QHEE.
+CONFIG_SPI=y
+CONFIG_SPI_MASTER=y
+CONFIG_SPI_BITBANG=y
+CONFIG_SPI_GPIO=y
+CONFIG_TOUCHSCREEN_HIMAX_DAGU=y
 # CONFIG_SPI_QCOM_GENI is not set
 # CONFIG_QCOM_GPI_DMA is not set
-# CONFIG_TOUCHSCREEN_HIMAX_DAGU is not set
 
 # Keep menu/PSCI idle compiled in; runtime off is vendor_boot `cpuidle.off=1`.
 # Compiling CPU_IDLE out made ABL bounce in ~4s on this board.

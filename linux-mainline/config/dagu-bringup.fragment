@@ -1,6 +1,21 @@
 # Diagnostic overlay on dagu.fragment. Drivers that can hang before PID1.
 # Keep GCC + RPMH + WDT + pstore. Restore by building without DAGU_MINIMAL=1.
 
+# DRM_MSM is off here, so dagu.fragment's fbdev console never appears and
+# console=tty0 goes nowhere. Draw into the splash buffer ABL is still
+# scanning out (chosen/framebuffer@9c000000) — the panel is the only log
+# channel on this board (no UART pads, no UDC yet).
+CONFIG_FB_SIMPLE=y
+# 8x16 on a 1600x2560 panel is 160 unreadable rows; Terminus 16x32 halves it.
+CONFIG_FONTS=y
+CONFIG_FONT_TER16x32=y
+
+# Overrides dagu.fragment: with a screen log, a hang is worth more readable
+# on the panel than bounced to fastboot. Kernel pings the ABL-armed KPSS WDT
+# until PID1 opens /dev/watchdog, and a panic stays up instead of rebooting.
+CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED=y
+CONFIG_PANIC_TIMEOUT=0
+
 # CONFIG_ARM_SMMU is not set
 # CONFIG_DRM_MSM is not set
 # CONFIG_DRM is not set

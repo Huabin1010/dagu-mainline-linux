@@ -21,7 +21,22 @@ MAGISKBOOT="${MAGISKBOOT:-$ROOT/../tools/downloads/dagu-android/magisk-patch/mag
 # Dump live FDT bootargs use kpti=off. Do not pass nokaslr: 7.0 takes the
 # 0x80000 physical misalignment as the low KASLR bits (map_kernel.c) so
 # ABL's 0xa0080000 load still 2MB-block-maps.
-CMDLINE_EXTRA="${CMDLINE_EXTRA:-clk_ignore_unused pd_ignore_unused fw_devlink=off fw_devlink.sync_state=disabled kpti=off console=tty0}"
+# regulator_ignore_unused joins clk/pd: regulator_init_complete() otherwise
+# drops the panel rails at late_initcall_sync and blanks the splash buffer
+# fbcon is drawing into. TER16x32 keeps 1600x2560 down to 80 readable rows.
+#
+# cpuidle.off=1: CPU6 took a PSCI power-collapse idle state and never came
+# back (hard LOCKUP at ~24s, no NMI response, "failed to stop secondary
+# CPUs"). QHEE on this HyperOS chain wants downstream lpm-levels to program
+# the RPMh sleep/wake sets first, so plain WFI until that path is ported.
+#
+# arm-smmu.disable_bypass=0 belongs with the ignore_unused trio: apps_smmu
+# probes 26ms after fbcon takes over and resets every S2CR. QHEE hands the
+# display stream over as TRANS, so nothing gets pinned ("preserved 0 boot
+# mappings") and the default FAULT policy aborts MDP's scanout of
+# cont_splash_region — panel black, backlight still on. Belt to the
+# ARM_SMMU_DISABLE_BYPASS_BY_DEFAULT=n suspenders in dagu-usb.fragment.
+CMDLINE_EXTRA="${CMDLINE_EXTRA:-clk_ignore_unused pd_ignore_unused regulator_ignore_unused cpuidle.off=1 arm-smmu.disable_bypass=0 fw_devlink=off fw_devlink.sync_state=disabled kpti=off console=ttyGS0,115200 console=tty0 fbcon=font:TER16x32 ignore_loglevel loglevel=8}"
 
 [[ -x "$MAGISKBOOT" ]] || { echo "missing magiskboot: $MAGISKBOOT" >&2; exit 1; }
 [[ -f "$STOCK_BOOT" && -f "$STOCK_VBOOT" ]] || { echo "missing stock images in $DUMP" >&2; exit 1; }
@@ -33,15 +48,22 @@ CMDLINE_EXTRA="${CMDLINE_EXTRA:-clk_ignore_unused pd_ignore_unused fw_devlink=of
 
 repack_boot() {
 	local work=$OUT/repack-boot
-	local padded=$OUT/Image-text-offset
 	rm -rf "$work"
 	mkdir -p "$work"
-	# Qualcomm ABL (dump iomem Kernel code @ 0xa0080000) loads Image at
-	# 2MB-aligned 0xa0000000 + 0x80000. Linux 7.0 needs Image[0] 2MB-aligned.
-	# Lore workaround: pad (2MiB - 0x80000) so the real Image sits at
-	# 0xa0200000. Trampolines at file+0 and file+0x80000 cover both
-	# "jump to Image[0]" and "jump to load+text_offset" ABL variants.
-	python3 - "$KERNEL_IMG" "$padded" <<'PY'
+	# Stock HyperOS v3 boot_a: raw Image with text_offset=0x80000, no embedded
+	# FDT. Plain 7.0 Image is text_offset=0 with a d00dfeed blob — mismatch.
+	# BOOTIMG_RAW=1: verbatim Image. BOOTIMG_STUB_PAD=1: old 2MiB−0x80000 pad.
+	(
+		cd "$work"
+		"$MAGISKBOOT" unpack -h "$STOCK_BOOT"
+		rm -f kernel_dtb dtb extra
+		local prepared=$OUT/Image-v3-prepared
+		if [[ "${BOOTIMG_RAW:-}" == 1 ]]; then
+			cp -f "$KERNEL_IMG" kernel
+			echo "verbatim Image kernel $(stat -c%s kernel) bytes (BOOTIMG_RAW=1)"
+		elif [[ "${BOOTIMG_STUB_PAD:-}" == 1 ]]; then
+			prepared=$OUT/Image-text-offset
+			python3 - "$KERNEL_IMG" "$prepared" <<'PY'
 import struct, sys
 from pathlib import Path
 src, dst = Path(sys.argv[1]), Path(sys.argv[2])
@@ -54,7 +76,6 @@ if (branch & 0xFC000000) != 0x14000000:
     raise SystemExit(f"no B primary_entry in header code0={code0:#x} code1={code1:#x}")
 struct.pack_into("<I", inner, 0, branch)
 struct.pack_into("<I", inner, 4, 0)
-# Stock 4.19 Image has no d00dfeed. ABL may pass the first FDT magic as x0.
 n = 0
 off = 0
 while True:
@@ -65,11 +86,10 @@ while True:
     n += 1
     off = i + 4
 print(f"scrambled {n} embedded FDT magic(s)")
-# inner kernel is placed on a 2MB boundary; keep its own text_offset=0
 struct.pack_into("<Q", inner, 8, 0)
 inner_size = struct.unpack_from("<Q", inner, 16)[0]
 text_off = 0x80000
-pad = 0x200000 - text_off  # 0x180000
+pad = 0x200000 - text_off
 hdr = bytearray(pad)
 def b_imm(delta):
     return 0x14000000 | ((delta >> 2) & 0x3FFFFFF)
@@ -86,11 +106,52 @@ print(
     f"outer_text_off={text_off:#x} image_size={pad + inner_size:#x}"
 )
 PY
-	(
-		cd "$work"
-		"$MAGISKBOOT" unpack -h "$STOCK_BOOT"
-		rm -f kernel_dtb dtb extra
-		cp -f "$padded" kernel
+			cp -f "$prepared" kernel
+		else
+			python3 - "$KERNEL_IMG" "$prepared" <<'PY'
+import struct, sys
+from pathlib import Path
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+inner = bytearray(src.read_bytes())
+if inner[56:60] != b"ARM\x64":
+    raise SystemExit(f"{src} is not an ARM64 Image")
+text_off = struct.unpack_from("<Q", inner, 8)[0]
+n = 0
+off = 0
+while True:
+    i = inner.find(b"\xd0\x0d\xfe\xed", off)
+    if i < 0:
+        break
+    inner[i : i + 4] = b"\x00\x00\x00\x00"
+    n += 1
+    off = i + 4
+if n:
+    print(f"scrambled {n} embedded FDT magic(s)")
+pad = 0x80000
+if text_off == pad:
+    dst.write_bytes(inner)
+    print(f"already text_offset={pad:#x}, size {len(inner)}")
+else:
+    inner_size = len(inner)
+    hdr = bytearray(pad)
+
+    def b_imm(delta):
+        return 0x14000000 | ((delta >> 2) & 0x3FFFFFF)
+
+    struct.pack_into("<I", hdr, 0, b_imm(pad))
+    struct.pack_into("<I", hdr, 4, 0)
+    struct.pack_into("<Q", hdr, 8, pad)
+    struct.pack_into("<Q", hdr, 16, pad + inner_size)
+    hdr[24:56] = inner[24:56]
+    hdr[56:60] = b"ARM\x64"
+    dst.write_bytes(bytes(hdr) + bytes(inner))
+    print(
+        f"stock text_offset={pad:#x}: {inner_size} -> {pad + inner_size} "
+        f"(was text_offset={text_off:#x})"
+    )
+PY
+			cp -f "$prepared" kernel
+		fi
 		gzip -dc "$RAMDISK_GZ" >ramdisk.cpio
 		# Keep stock os_version / patch level in header.
 		PATCHVBMETAFLAG=true "$MAGISKBOOT" repack "$STOCK_BOOT" "$BOOTIMG"
@@ -131,8 +192,38 @@ PY
 	)
 }
 
-echo "==> magiskboot repack stock v3 boot (raw Image, not Image.gz)"
+echo "==> magiskboot repack stock v3 boot (stock text_offset=0x80000; BOOTIMG_RAW=1 / BOOTIMG_STUB_PAD=1 for A/B)"
 repack_boot
+work_verify=$OUT/verify-boot-kernel
+rm -rf "$work_verify"
+mkdir -p "$work_verify"
+(
+	cd "$work_verify"
+	"$MAGISKBOOT" unpack -h "$BOOTIMG" >/dev/null
+	k_sz=$(stat -c%s kernel)
+	dtb_sz=0
+	[[ -f kernel_dtb ]] && dtb_sz=$(stat -c%s kernel_dtb)
+	payload=$((k_sz + dtb_sz))
+	ref_sz=$(stat -c%s "$KERNEL_IMG")
+	echo "boot kernel+kernel_dtb=${payload} bytes (build Image: ${ref_sz})"
+	if [[ "${BOOTIMG_RAW:-}" == 1 ]]; then
+		[[ "$payload" -eq "$ref_sz" ]] || {
+			echo "ERROR: BOOTIMG_RAW=1 but boot payload != source Image" >&2
+			exit 1
+		}
+	elif [[ "${BOOTIMG_STUB_PAD:-}" == 1 ]]; then
+		[[ "$payload" -gt "$ref_sz" ]] || {
+			echo "ERROR: BOOTIMG_STUB_PAD=1 but boot payload not larger than Image" >&2
+			exit 1
+		}
+	else
+		# stock layout: 0x80000 header + verbatim inner Image
+		[[ "$payload" -eq "$((ref_sz + 0x80000))" ]] || {
+			echo "ERROR: expected stock 0x80000 layout (payload != Image+0x80000)" >&2
+			exit 1
+		}
+	fi
+)
 echo "==> magiskboot repack stock vendor_boot (mainline DTB)"
 repack_vendor_boot
 

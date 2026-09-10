@@ -61,7 +61,7 @@ def classify(dev: dict) -> str:
     vp = f"{dev['vid']}:{dev['pid']}".lower()
     if vp == "18d1:d00d":
         return "D"
-    if vp == "1d6b:0104":
+    if vp in ("1d6b:0104", "0525:a4a7"):
         return "A"
     return "D"
 
@@ -77,7 +77,7 @@ def main() -> None:
             interesting = [
                 x
                 for x in cur
-                if x["vid"] in ("18d1", "1d6b", "2717", "05c6")
+                if x["vid"] in ("18d1", "1d6b", "2717", "05c6", "0525")
                 or "dagu" in (x["serial"] + x["product"] + x["manufacturer"]).lower()
                 or x["serial"].startswith("dt")
             ]
@@ -96,7 +96,7 @@ def main() -> None:
             tablet = [
                 x
                 for x in interesting
-                if x["vid"] in ("18d1", "1d6b", "2717", "05c6")
+                if x["vid"] in ("18d1", "1d6b", "2717", "05c6", "0525")
                 or x["serial"].startswith("dt")
             ]
             if tablet:
@@ -108,8 +108,12 @@ def main() -> None:
                     )
                 )
                 print(line, flush=True)
-                if any(x["vid"] == "1d6b" and x["pid"] == "0104" for x in tablet):
-                    print("      -> RNDIS+ACM up; try: ./scripts/usb-tty.sh or ./scripts/usb-connect.sh", flush=True)
+                if any(
+                    (x["vid"] == "0525" and x["pid"] == "a4a7")
+                    or (x["vid"] == "1d6b" and x["pid"] == "0104")
+                    for x in tablet
+                ):
+                    print("      -> USB serial up; try: ./scripts/usb-tty.sh", flush=True)
             elif any(x["vid"] == "18d1" for x in cur) is False and prev and any(
                 p[0] == "18d1" for p in prev
             ):

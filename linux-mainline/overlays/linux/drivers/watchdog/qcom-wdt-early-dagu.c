@@ -19,7 +19,8 @@
 #define WDT_BARK_TIME		0x10
 #define WDT_BITE_TIME		0x14
 #define SLEEP_HZ		32764
-#define BITE_SEC		40
+/* BITE_TIME is 20 bits (0xfffff), so anything past 32 s wraps to a short bite. */
+#define BITE_SEC		30
 
 static int __init dagu_kick_abl_wdt(void)
 {

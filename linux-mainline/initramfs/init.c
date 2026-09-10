@@ -1,7 +1,14 @@
 /*
  * Mount Ubuntu on userdata and switch_root. Android is not kept.
- * If userdata is missing or not ext4 Ubuntu, stay on ramdisk with RNDIS.
+ * Stay on ramdisk. USB debug is built-in g_serial (ttyGS0 / 0525:a4a7).
+ * Do not bind configfs RNDIS — it steals the UDC.
+ *
+ * DAGU_PID1_PING: 1 = sleep 3s then reboot bootloader (did we reach PID1?).
+ * Keep 0 while hung-task/pstore is the experiment.
  */
+#ifndef DAGU_PID1_PING
+#define DAGU_PID1_PING 0
+#endif
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -351,101 +358,84 @@ static void reboot_bootloader(void)
 {
 	int fd;
 
-	kmsg("RNDIS failed — sysrq reboot");
+	kmsg("reboot bootloader");
 	sync();
-	write_str("/proc/sys/kernel/sysrq", "1");
-	write_str("/proc/sysrq-trigger", "b");
+	/* RESTART2 first — sysrq-b is a warm reboot into the same slot. */
 	syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
 		LINUX_REBOOT_CMD_RESTART2, "bootloader");
+	write_str("/proc/sys/kernel/sysrq", "1");
+	write_str("/proc/sysrq-trigger", "b");
 	reboot(RB_AUTOBOOT);
 	fd = open("/dev/watchdog", O_WRONLY);
 	if (fd >= 0) {
-		write(fd, "b", 1);
+		write(fd, "V", 1);
 		close(fd);
 	}
 	for (;;)
 		pause();
 }
 
-static int setup_rndis(void)
+/*
+ * Built-in g_serial (0525:a4a7) owns the UDC. Do not bind configfs RNDIS/ACM
+ * — that steals UDC and ttyGS0 never carries printk (gemini lesson).
+ * Keep poking Type-C role so DWC3 actually enumerates as gadget.
+ */
+static int setup_usb_console(void)
 {
 	char udc[64];
-	const char *g = "/sys/kernel/config/usb_gadget/dagu";
 	int attempt;
 	const int udc_wait_max = 160; /* 160 * 250ms = 40s */
+	pid_t pid;
 
-	/* Stock 4.19 panics if we poke configfs gadget; ABL then returns to fastboot. */
 	if (kernel_is_4_19()) {
-		kmsg("skip RNDIS on 4.19");
+		kmsg("skip USB gadget on 4.19");
 		return 0;
 	}
-
-	mkpath("/sys/kernel/config");
-	mount("none", "/sys/kernel/config", "configfs", 0, NULL);
 
 	for (attempt = 0; attempt < udc_wait_max; attempt++) {
 		wdt_pet();
 		force_usb_device_role();
 		if (find_udc(udc, sizeof(udc))) {
 			if (attempt == 0 || attempt % 20 == 0)
-				kmsg("waiting UDC");
+				kmsg("waiting UDC for g_serial");
 			usleep(250000);
 			continue;
 		}
+		kmsg(udc);
 		break;
 	}
-	if (attempt >= udc_wait_max) {
-		kmsg("no UDC after 40s");
-		dbg_collect();
-		sleep(3);
-		reboot_bootloader();
-		return -1;
-	}
-
-	wdt_stretch(60);
+	/* kpss-wdt tops out at 0xfffff / 32764 Hz = 32 s; asking for more is -EINVAL. */
+	wdt_stretch(30);
 	wdt_pet();
 	dbg_collect();
+	if (attempt >= udc_wait_max)
+		kmsg("no UDC after 40s — still waiting ttyGS0");
 
-	if (mkdir(g, 0755) && errno != EEXIST)
-		return -1;
-	write_str("/sys/kernel/config/usb_gadget/dagu/idVendor", "0x1d6b");
-	write_str("/sys/kernel/config/usb_gadget/dagu/idProduct", "0x0104");
-	mkdir("/sys/kernel/config/usb_gadget/dagu/strings/0x409", 0755);
-	write_str("/sys/kernel/config/usb_gadget/dagu/strings/0x409/serialnumber",
-		  g_dbg_serial[0] ? g_dbg_serial : "dagu-mainline");
-	write_str("/sys/kernel/config/usb_gadget/dagu/strings/0x409/manufacturer",
-		  "xiaomi-pad870-win11-arm");
-	write_str("/sys/kernel/config/usb_gadget/dagu/strings/0x409/product",
-		  "dagu USB RNDIS+ACM");
-	mkdir("/sys/kernel/config/usb_gadget/dagu/configs/c.1", 0755);
-	mkdir("/sys/kernel/config/usb_gadget/dagu/configs/c.1/strings/0x409", 0755);
-	write_str("/sys/kernel/config/usb_gadget/dagu/configs/c.1/strings/0x409/configuration",
-		  "RNDIS+ACM");
-	mkdir("/sys/kernel/config/usb_gadget/dagu/functions/rndis.usb0", 0755);
-	write_str("/sys/kernel/config/usb_gadget/dagu/functions/rndis.usb0/host_addr",
-		  "02:00:00:00:07:01");
-	write_str("/sys/kernel/config/usb_gadget/dagu/functions/rndis.usb0/dev_addr",
-		  "02:00:00:00:07:02");
-	if (symlink("/sys/kernel/config/usb_gadget/dagu/functions/rndis.usb0",
-		    "/sys/kernel/config/usb_gadget/dagu/configs/c.1/rndis.usb0") &&
-	    errno != EEXIST)
-		kmsg("rndis symlink failed");
-	mkdir("/sys/kernel/config/usb_gadget/dagu/functions/acm.usb0", 0755);
-	if (symlink("/sys/kernel/config/usb_gadget/dagu/functions/acm.usb0",
-		    "/sys/kernel/config/usb_gadget/dagu/configs/c.1/acm.usb0") &&
-	    errno != EEXIST)
-		kmsg("acm symlink failed");
+	pid = fork();
+	if (pid != 0)
+		return 0;
 
-	write_str("/sys/kernel/config/usb_gadget/dagu/UDC", udc);
-	kmsg(udc);
 	for (;;) {
-		wdt_pet();
-		if (!set_ip("usb0", "192.168.7.2", "255.255.255.0")) {
-			kmsg("RNDIS 192.168.7.2");
-			dbg_post_host();
-			return 0;
+		int gs = open("/dev/ttyGS0", O_RDWR | O_NOCTTY);
+		int kfd;
+		char buf[512];
+		ssize_t n;
+
+		if (gs < 0) {
+			usleep(100000);
+			continue;
 		}
-		usleep(250000);
+		write(gs, "\r\ninitramfs: USB console on ttyGS0 (g_serial)\r\n",
+		      strlen("\r\ninitramfs: USB console on ttyGS0 (g_serial)\r\n"));
+		kfd = open("/dev/kmsg", O_RDONLY);
+		for (;;) {
+			if (kfd >= 0) {
+				n = read(kfd, buf, sizeof(buf));
+				if (n > 0)
+					write(gs, buf, (size_t)n);
+			}
+			usleep(50000);
+		}
 	}
 }
 
@@ -583,25 +573,24 @@ int main(void)
 	mount("proc", "/proc", "proc", 0, NULL);
 	mount("sysfs", "/sys", "sysfs", 0, NULL);
 	mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
+
+#if DAGU_PID1_PING
+	/* Zero-USB test: if PID1 runs, we bounce to ABL ~3s later. */
+	kmsg("PID1 ping — sleep 3 then reboot bootloader");
+	sleep(3);
+	reboot_bootloader();
+#endif
+
 	mkpath("/dev/pts");
 	mount("devpts", "/dev/pts", "devpts", 0, "mode=0620,ptmxmode=0666");
 	mkpath("/tmp");
 	mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777");
 
-	kmsg("P0 ramdisk — skip userdata, bring up RNDIS+SSH");
-	/* Early KPSS WDT is 40s; pet during UDC wait. No UDC → reboot. */
-	wdt_takeover(40);
-	if (setup_rndis())
-		kmsg("RNDIS failed");
-
-	if (!access("/bin/dropbear", X_OK)) {
-		kmsg("starting dropbear");
-		if (!fork()) {
-			char *argv[] = { "/bin/dropbear", "-R", "-F", "-E", "-p", "22", NULL };
-			execv(argv[0], argv);
-			_exit(1);
-		}
-	}
+	kmsg("P0 ramdisk — g_serial ttyGS0, skip configfs RNDIS");
+	/* Early KPSS WDT is 30s (20-bit BITE_TIME ceiling); pet during UDC wait. */
+	wdt_takeover(30);
+	if (setup_usb_console())
+		kmsg("USB console setup failed");
 
 	for (;;) {
 		wdt_pet();

@@ -10,8 +10,8 @@ SH_BIN="$OUT/initramfs-minish"
 CC="${CC:-aarch64-linux-gnu-gcc}"
 
 mkdir -p "$OUT"
-echo "==> static aarch64 init + minish"
-"$CC" -static -Os -Wall -Wextra -o "$INIT_BIN" "$ROOT/initramfs/init.c"
+echo "==> static aarch64 init + minish (DAGU_PID1_PING=${DAGU_PID1_PING:-0})"
+"$CC" -static -Os -Wall -Wextra -DDAGU_PID1_PING="${DAGU_PID1_PING:-0}" -o "$INIT_BIN" "$ROOT/initramfs/init.c"
 "$CC" -static -Os -Wall -Wextra -o "$SH_BIN" "$ROOT/initramfs/minish.c"
 
 "$ROOT/scripts/build-dropbear.sh" || true

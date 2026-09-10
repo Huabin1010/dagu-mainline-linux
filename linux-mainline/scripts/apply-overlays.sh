@@ -380,4 +380,83 @@ if "dagu L81A: CAF DIV_ROUND_UP" not in text:
 
 PY
 
+# primary_entry probe: SMC32/SMC64 first (no MMU-off store), then dual DBGC fallback.
+if [[ "${DAGU_PRIMARY_ENTRY_PROBE:-1}" == 1 ]]; then
+	python3 - "$KERNEL_SRC/arch/arm64/kernel/head.S" <<'PY'
+import re
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu bringup: SMC-first primary_entry probe"
+block = """SYM_CODE_START(primary_entry)
+	/* dagu bringup: SMC-first primary_entry probe (no MMU-off stores before SMC) */
+	ldr	x0, =0x84000009			// PSCI SMC32 SYSTEM_RESET
+	smc	#0
+	ldr	x0, =0xC4000009			// PSCI SMC64 SYSTEM_RESET
+	smc	#0
+	/* fallback: dual DBGC @0xb0000000 and 0xb0100000 (TWRP record_size=0) */
+	ldr	x2, =0xb0000000
+	ldr	w3, =0x43474244			// "DBGC"
+	str	w3, [x2]
+	str	wzr, [x2, #4]
+	mov	w3, #16
+	str	w3, [x2, #8]
+	ldr	x3, =0x21544948			// "HIT!"
+	str	x3, [x2, #12]
+	ldr	x2, =0xb0100000
+	ldr	w3, =0x43474244
+	str	w3, [x2]
+	str	wzr, [x2, #4]
+	mov	w3, #16
+	str	w3, [x2, #8]
+	str	x3, [x2, #12]
+9:
+	b	9b
+
+"""
+if marker in text:
+    pass
+else:
+    text, n = re.subn(
+        r"SYM_CODE_START\(primary_entry\)\n(?:.*?\n)*?(?=\tbl\trecord_mmu_state)",
+        block,
+        text,
+        count=1,
+    )
+    if n != 1:
+        raise SystemExit(f"{path}: could not patch primary_entry probe")
+    path.write_text(text)
+    print(f"patched {path}: SMC-first primary_entry probe")
+PY
+else
+	python3 - "$KERNEL_SRC/arch/arm64/kernel/head.S" <<'PY'
+import re
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu bringup: SMC-first primary_entry probe"
+if marker not in text:
+    pass
+else:
+    text, n = re.subn(
+        r"SYM_CODE_START\(primary_entry\)\n"
+        r"\t/\* dagu bringup: SMC-first primary_entry probe.*?\n"
+        r"(?:\t.*\n)*?"
+        r"\tb\t9b\n\n",
+        "SYM_CODE_START(primary_entry)\n",
+        text,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if n != 1:
+        raise SystemExit(f"{path}: could not remove primary_entry probe")
+    path.write_text(text)
+    print(f"restored {path}: native primary_entry (probe off)")
+PY
+fi
+
 echo "==> overlays installed"

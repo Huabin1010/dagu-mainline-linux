@@ -217,6 +217,7 @@ xiaomi-pad870-win11-arm/
 ### 核心
 
 - [Bootloader 解锁指南](docs/bootloader-unlock-guide.md) — 国行 HyperOS 流程 + 本仓库已下载工具
+- [Bootloader Fastboot 与 fastbootd](docs/fastboot-vs-fastbootd.md) — 物理分区 vs 动态分区、主线刷写该用哪种 fastboot
 - [硬件快速调试流程](docs/hardware-debug-workflow.md) — 分层验证、Golden Baseline、日常实验循环
 - [dagu EDL 救砖完整流程](docs/dagu-edl-recovery-full-playbook.md) — 9008 诊断、授权、线刷与恢复记录（2026-07-21）
 - [「魔改 boot」与假死/9008 原因分析](docs/why-boot-modification-caused-dead-device.md) — 链式引导 vs 写分区、LSMS 与 EDL 演化链

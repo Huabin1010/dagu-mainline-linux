@@ -1,0 +1,231 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Stock dagu reserved-memory from
+ * dumps/dagu-20260826-linux-bringup/dt-extract/reserved-memory.dts
+ * Labels match sm8250.dtsi for smem / remoteproc memory-region refs.
+ */
+
+hyp_mem: hyp_region@80000000 {
+	no-map;
+	reg = <0x0 0x80000000 0x0 0x600000>;
+};
+
+xbl_aop_mem: xbl_aop_region@80600000 {
+	no-map;
+	reg = <0x0 0x80600000 0x0 0x260000>;
+};
+
+cmd_db: reserved-memory@80860000 {
+	reg = <0x0 0x80860000 0x0 0x20000>;
+	compatible = "qcom,cmd-db";
+	no-map;
+};
+
+res_xbl_uefi_log_region@80880000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x80880000 0x0 0x14000>;
+};
+
+smem_mem: smem_region@80900000 {
+	no-map;
+	reg = <0x0 0x80900000 0x0 0x200000>;
+};
+
+removed_mem: removed_region@80b00000 {
+	no-map;
+	reg = <0x0 0x80b00000 0x0 0x5300000>;
+};
+
+camera_mem: pil_camera_region@86200000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x86200000 0x0 0x500000>;
+};
+
+wlan_mem: pil_wlan_fw_region@86700000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x86700000 0x0 0x100000>;
+};
+
+ipa_fw_mem: pil_ipa_fw_region@86800000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x86800000 0x0 0x10000>;
+};
+
+ipa_gsi_mem: pil_ipa_gsi_region@86810000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x86810000 0x0 0xa000>;
+};
+
+gpu_mem: pil_gpu_region@8681a000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x8681a000 0x0 0x2000>;
+};
+
+npu_mem: pil_npu_region@86900000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x86900000 0x0 0x500000>;
+};
+
+video_mem: pil_video_region@86e00000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x86e00000 0x0 0x500000>;
+};
+
+cvp_mem: pil_cvp_region@87300000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x87300000 0x0 0x500000>;
+};
+
+cdsp_mem: pil_cdsp_region@87800000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x87800000 0x0 0x1400000>;
+};
+
+slpi_mem: pil_slpi_region@88c00000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x88c00000 0x0 0x2f00000>;
+};
+
+adsp_mem: pil_adsp_region@8bb00000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x8bb00000 0x0 0x2500000>;
+};
+
+spss_mem: pil_spss_region@8e000000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x8e000000 0x0 0x100000>;
+};
+
+cdsp_secure_heap: cdsp_secure_heap@8e100000 {
+	compatible = "removed-dma-pool";
+	no-map;
+	reg = <0x0 0x8e100000 0x0 0x4600000>;
+};
+
+adsp_region {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0xc00000>;
+};
+
+sdsp_region {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0x800000>;
+};
+
+cdsp_region {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0x400000>;
+};
+
+/* no-map added: simplefb ioremap_wc()s this, arm64 rejects linear-map RAM. */
+cont_splash_region@9c000000 {
+	reg = <0x0 0x9c000000 0x0 0x2300000>;
+	label = "cont_splash_region";
+	no-map;
+};
+
+disp_rdump_region@b0400000 {
+	reg = <0x0 0xb0400000 0x0 0x1000000>;
+	label = "disp_rdump_region";
+	compatible = "removed-dma-pool";
+	no-map;
+};
+
+dfps_data_region@9e300000 {
+	reg = <0x0 0x9e300000 0x0 0x100000>;
+	label = "dfps_data_region";
+};
+
+mem_dump_region {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	size = <0x0 0x2800000>;
+};
+
+sp_region {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0x1000000>;
+};
+
+user_contig_region {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0x1000000>;
+};
+
+qseecom_region {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0x1400000>;
+};
+
+qseecom_ta_region {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0x1000000>;
+};
+
+secure_display_region {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0xa400000>;
+};
+
+cnss_wlan_region {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0x1400000>;
+};
+
+linux,cma {
+	compatible = "shared-dma-pool";
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	reusable;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0x2000000>;
+	linux,cma-default;
+};
+
+mailbox_region {
+	compatible = "shared-dma-pool";
+	no-map;
+	alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+	alignment = <0x0 0x400000>;
+	size = <0x0 0x20000>;
+};

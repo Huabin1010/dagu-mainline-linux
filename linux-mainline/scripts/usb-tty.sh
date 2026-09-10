@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
-# Attach to dagu USB ACM console (ttyACM*) after gadget enumerates.
+# Attach to dagu USB serial console after g_serial enumerates (gemini path).
+# Kernel CONFIG_USB_G_SERIAL → host 0525:a4a7 /dev/ttyACM*
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 dev=""
-for _ in $(seq 1 60); do
-	for d in /dev/ttyACM*; do
-		[[ -e "$d" ]] || continue
-		if lsusb | grep -q '1d6b:0104'; then
+for _ in $(seq 1 90); do
+	if lsusb | grep -qiE '0525:a4a7|1d6b:0104'; then
+		for d in /dev/ttyACM* /dev/ttyUSB*; do
+			[[ -e "$d" ]] || continue
 			dev="$d"
 			break 2
-		fi
-	done
+		done
+	fi
 	sleep 1
 done
 
 if [[ -z "$dev" ]]; then
-	echo "no ttyACM for 1d6b:0104 — is the tablet booted with USB gadget?" >&2
-	lsusb | grep -iE '1d6b|18d1|Google' || true
+	echo "no USB ACM (want 0525:a4a7 g_serial) — tablet USB gadget not up?" >&2
+	lsusb | grep -iE '0525|1d6b|18d1|Google|NetChip' || true
 	exit 1
 fi
 
 echo "==> $dev (115200 8N1, Ctrl+A then X to exit screen)"
+echo "    expect lsusb: 0525:a4a7 (g_serial), not 1d6b:0104 (configfs RNDIS)"
 exec screen "$dev" 115200

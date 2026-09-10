@@ -27,6 +27,8 @@
 	qcom,board-id = <0x33 0>;
 
 	/delete-node/ memory@80000000;
+	/delete-node/ reserved-memory;
+
 	memory {
 		device_type = "memory";
 		reg = <0x0 0x80000000 0x0 0x3bb00000>,
@@ -35,6 +37,28 @@
 
 	chosen {
 		stdout-path = "tty0";
+	};
+
+	/*
+	 * Replace sm8250.dtsi reserved-memory (wrong xbl_aop/adsp/slpi offsets on
+	 * dagu) with stock fdt from dumps/dagu-20260826-linux-bringup/dt-extract/.
+	 */
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+#include "dagu-reserved-memory-stock.dtsi"
+
+		ramoops@b0000000 {
+			compatible = "ramoops";
+			reg = <0x0 0xb0000000 0x0 0x400000>;
+			record-size = <0x100000>;
+			console-size = <0x100000>;
+			ftrace-size = <0x100000>;
+			pmsg-size = <0x100000>;
+			no-map;
+		};
 	};
 };
 
@@ -81,15 +105,39 @@
 	};
 };
 
+/*
+ * simplefb on ABL's splash buffer is a dead end now that apps_smmu is back for
+ * USB: arm_smmu_device_reset() disables every boot context bank, QHEE handed
+ * the display stream over as TRANS ("preserved 0 boot mappings"), and MDP's
+ * scanout stops resolving 26ms after fbcon takes over — black panel, backlight
+ * still on. DRM_MSM drives MDSS through its own iommus instead, and DRM fbdev
+ * gets fbcon. cont_splash_region keeps no-map so ABL can scan out until then.
+ */
 /delete-node/ &framebuffer;
 
+/*
+ * qcom,kpss-wdt caps BITE_TIME at 20 bits, so 0xfffff / 32764 Hz = 32 s is
+ * the ceiling; 40 was rejected as "out of range" and silently fell back.
+ */
 &{/soc@0/watchdog@17c10000} {
-	timeout-sec = <40>;
+	timeout-sec = <30>;
 };
 
-/* HS gadget: elish otg + PM8150B Type-C role-switch (default peripheral). */
+/*
+ * P0 USB: PID1 proven (PID1-ping bounced to fastboot ~6s).
+ * HS-only peripheral g_serial (0525:a4a7 / ttyGS0), no role-switch,
+ * Matches sm8250-xiaomi-dagu-full.dts recipe.
+ *
+ * icc paths deleted: the BCM voter's rpmh_write_batch() never gets its AMC
+ * completion on this QHEE chain (-ETIMEDOUT), and dwc3_qcom_probe() tears
+ * the core back down on that error, so no UDC ever appears. of_icc_get()
+ * returns NULL when "interconnects" is absent, so the driver just skips the
+ * vote — ABL already trained this NoC path to run fastboot over it.
+ */
 &usb_1 {
 	qcom,select-utmi-as-pipe-clk;
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
 	status = "okay";
 };
 
@@ -101,30 +149,24 @@
 	status = "disabled";
 };
 
+&pm8150b_typec {
+	status = "disabled";
+};
+
 &usb_1_dwc3 {
-	role-switch-default-mode = "peripheral";
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+	/delete-property/ usb-role-switch;
 };
 
-&usb_1_dwc3_hs_out {
-	remote-endpoint = <&pm8150b_hs_in>;
-};
-
-/* PS5169 USB/DP redriver: CAF qupv3_se17 @28, EN GPIO69 */
+/* P0 bisect: off until PID1 proven — I2C wait can block probe queue. */
 &i2c17 {
-	clock-frequency = <400000>;
-	status = "okay";
-
-	redriver@28 {
-		compatible = "parade,ps5169";
-		reg = <0x28>;
-		enable-gpios = <&tlmm 69 GPIO_ACTIVE_HIGH>;
-	};
+	status = "disabled";
 };
 
-/*
- * L81A dual-DPHY 4-lane (not elish NT36523 CPHY — that SErrors).
- * simple-framebuffer @ 0x9c000000 never scanned; keep it deleted.
- */
+/* L81A dual-DPHY 4-lane (not elish NT36523 CPHY — that SErrors). */
 &apps_rsc {
 	regulators-0 {
 		vreg_l7a_1p83: ldo7 {
@@ -134,10 +176,48 @@
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 	};
+
+	/*
+	 * dagu is not stuffed with pm8009 (elish's camera PMIC): RPMh has no
+	 * "smpf1" resource and SPMI reads to usid 0xa/0xb all time out. Cut the
+	 * rpmh-regulator node here and both spmi devices below.
+	 */
+	regulators-2 {
+		status = "disabled";
+	};
 };
 
-&mdss { status = "okay"; };
-&apps_smmu { status = "okay"; };
+&{/soc@0/spmi@c440000/pmic@a} {
+	status = "disabled";
+};
+
+&{/soc@0/spmi@c440000/pmic@b} {
+	status = "disabled";
+};
+
+/* &gpu/&gmu are off and SM_GPUCC_8250 is not built — probe just times out. */
+&adreno_smmu {
+	status = "disabled";
+};
+
+/*
+ * icc paths deleted for the same reason as usb_1: msm_mdss asks for mdp0-mem /
+ * mdp1-mem, the BCM voter turns that into rpmh_write_batch(), and it never gets
+ * its AMC completion here. ABL already trained MASTER_MDP_PORT0/1 for the
+ * splash, so skipping the vote is fine.
+ */
+&mdss {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	status = "okay";
+};
+/*
+ * apps_smmu back on for USB. With it off, QHEE's leftover stream config
+ * stays in charge of DWC3's DMA: the gadget pulls up (host logs a HS
+ * device) but never answers EP0 — "Device not responding to setup
+ * address", error -71 — and the unread event buffer storms the core IRQ
+ * until the KPSS WDT resets us. GPI-DMA / QUP stay off (Route-2 bisect).
+ */
 
 /*
  * elish-common sets qcom,sync-dual-dsi. Mainline then skips DSI_0 TX and
@@ -180,37 +260,24 @@
 	enn-supply = <&bl_vddneg_5p5>;
 	reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
 	tp-reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
-	backlight = <&backlight>;
-	backlight-aux = <&backlight_b>;
+	/*
+	 * backlight stays deleted: ABL already lit the WLED, and a "backlight"
+	 * phandle to the KTZ8866 on the still-disabled i2c9 would make
+	 * drm_panel_of_backlight() EPROBE_DEFER forever.
+	 */
+	/delete-property/ backlight;
+	/delete-property/ backlight-aux;
 	/delete-property/ rotation;
 	status = "okay";
 };
 
-/*
- * CAF dual KTZ8866: HWEN GPIO 139 high-active, shared by A+B.
- * Only i2c11 (KTZ A / SE11) requests the GPIO — see dualktz8866.c.
- * Second chip must NOT use enable-gpios or unique backlight names.
- */
+/* P0 bisect: KTZ8866 I2C can hang probe if bias rails are not ready. */
 &backlight {
-	enable-gpios = <&tlmm 139 GPIO_ACTIVE_HIGH>;
-	/delete-property/ kinetic,enable-lcd-bias;
-	status = "okay";
+	status = "disabled";
 };
 
 &i2c9 {
-	clock-frequency = <400000>;
-	status = "okay";
-
-	backlight_b: backlight@11 {
-		compatible = "kinetic,ktz8866";
-		reg = <0x11>;
-		vddpos-supply = <&bl_vddpos_5p5>;
-		vddneg-supply = <&bl_vddneg_5p5>;
-		current-num-sinks = <5>;
-		kinetic,current-ramp-delay-ms = <128>;
-		kinetic,led-enable-ramp-delay-ms = <1>;
-		status = "okay";
-	};
+	status = "disabled";
 };
 
 &gpu { status = "disabled"; };
@@ -248,15 +315,35 @@
 &gpio_keys { status = "disabled"; };
 
 &i2c0 { status = "disabled"; };
-&i2c11 { status = "okay"; };
+&i2c11 { status = "disabled"; };
 &i2c13 { status = "disabled"; };
-&gpi_dma0 { status = "okay"; };
-&gpi_dma1 { status = "okay"; };
-&gpi_dma2 { status = "okay"; };
-&qupv3_id_0 { status = "okay"; };
-&qupv3_id_1 { status = "okay"; };
-&qupv3_id_2 { status = "okay"; };
+&gpi_dma0 { status = "disabled"; };
+&gpi_dma1 { status = "disabled"; };
+&gpi_dma2 { status = "disabled"; };
+&qupv3_id_0 { status = "disabled"; };
+&qupv3_id_1 { status = "disabled"; };
+&qupv3_id_2 { status = "disabled"; };
 
 &{/qca6390-pmu} {
 	status = "disabled";
+};
+
+/*
+ * Must be last: elish-common ends with &usb_1_dwc3_hs_out → pm8150b_hs_in.
+ * With pm8150b_typec disabled, cut both ends of the graph (and SS to qmpphy).
+ */
+&usb_1_dwc3_hs_out {
+	/delete-property/ remote-endpoint;
+};
+
+&usb_1_dwc3_ss_out {
+	/delete-property/ remote-endpoint;
+};
+
+&pm8150b_hs_in {
+	/delete-property/ remote-endpoint;
+};
+
+&usb_1_qmpphy_usb_ss_in {
+	/delete-property/ remote-endpoint;
 };

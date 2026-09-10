@@ -17,6 +17,33 @@ WAIT="${WAIT:-60}"
 CMD="${1:-flash}"
 
 case "$CMD" in
+flash-b)
+	wait_fastboot
+	assert_unlocked
+	python3 "$ROOT/scripts/build-chain-extras.py"
+	[[ -f "$BOOTIMG" && -f "$VBOOT" && -f "$DTBO" ]] || {
+		echo "missing images — build-bootimg.sh" >&2
+		exit 1
+	}
+	print_ab_status
+	echo
+	echo "v3 path, SLOT B ONLY (A slot TWRP untouched):"
+	echo "  dtbo_b        <- $DTBO"
+	echo "  vbmeta_b      <- $VBMETA"
+	echo "  vendor_boot_b <- $VBOOT"
+	echo "  boot_b        <- $BOOTIMG"
+	echo "  set_active b"
+	echo
+	python3 "$FBUSB" flash dtbo_b "$DTBO"
+	python3 "$FBUSB" flash vbmeta_b "$VBMETA"
+	python3 "$FBUSB" flash vendor_boot_b "$VBOOT"
+	python3 "$FBUSB" flash boot_b "$BOOTIMG"
+	python3 "$FBUSB" set-active b
+	echo "==> reboot"
+	python3 "$FBUSB" reboot || echo "reboot cmd sent (no OKAY is ok)"
+	echo "Host: ./scripts/usb-connect.sh"
+	echo "Brick recovery: ../scripts/flash-boot-legacy.sh restore-a"
+	;;
 flash)
 	wait_fastboot
 	python3 "$ROOT/scripts/build-chain-extras.py"
@@ -61,7 +88,7 @@ restore)
 	python3 "$FBUSB" reboot
 	;;
 *)
-	echo "usage: $0 [flash|restore]" >&2
+	echo "usage: $0 [flash|flash-b|restore]" >&2
 	exit 1
 	;;
 esac

@@ -12,10 +12,9 @@ KERNEL_IMG="${KERNEL_IMG:-$KBUILD_OUTPUT/arch/arm64/boot/Image}"
 DTB="$OUT/$DTB_NAME"
 RAMDISK_GZ="$OUT/initramfs.cpio.gz"
 BOOTIMG="${BOOTIMG:-$OUT/boot-dagu-legacy.img}"
-PADDED="$OUT/Image-text-offset"
-GZ="$OUT/Image-text-offset.gz"
+GZ="$OUT/Image.gz"
 GZDTB="$OUT/Image.gz-dtb"
-CMDLINE="${CMDLINE:-clk_ignore_unused pd_ignore_unused fw_devlink=off fw_devlink.sync_state=disabled kpti=off console=tty0 androidboot.usbcontroller=a600000.dwc3}"
+CMDLINE="${CMDLINE:-clk_ignore_unused pd_ignore_unused fw_devlink=off fw_devlink.sync_state=disabled kpti=off console=tty0 ignore_loglevel loglevel=8 hung_task_panic=1 hung_task_timeout_secs=10 panic=5 reboot=panic_warm}"
 
 [[ -f "$KERNEL_IMG" ]] || { echo "missing $KERNEL_IMG — build-kernel.sh" >&2; exit 1; }
 [[ -f "$DTB" ]] || { echo "missing $DTB — build-kernel.sh" >&2; exit 1; }
@@ -23,50 +22,8 @@ CMDLINE="${CMDLINE:-clk_ignore_unused pd_ignore_unused fw_devlink=off fw_devlink
 "$ROOT/scripts/build-initramfs.sh"
 [[ -f "$RAMDISK_GZ" ]] || { echo "missing ramdisk" >&2; exit 1; }
 
-echo "==> 2MiB stub pad (same as magiskboot v3 path)"
-python3 - "$KERNEL_IMG" "$PADDED" <<'PY'
-import struct, sys
-from pathlib import Path
-src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-inner = bytearray(src.read_bytes())
-if inner[56:60] != b"ARM\x64":
-    raise SystemExit(f"{src} is not an ARM64 Image")
-code0, code1 = struct.unpack_from("<II", inner, 0)
-branch = code1 if (code1 & 0xFC000000) == 0x14000000 else code0
-if (branch & 0xFC000000) != 0x14000000:
-    raise SystemExit(f"no B primary_entry in header code0={code0:#x} code1={code1:#x}")
-struct.pack_into("<I", inner, 0, branch)
-struct.pack_into("<I", inner, 4, 0)
-n = 0
-off = 0
-while True:
-    i = inner.find(b"\xd0\x0d\xfe\xed", off)
-    if i < 0:
-        break
-    inner[i : i + 4] = b"\x00\x00\x00\x00"
-    n += 1
-    off = i + 4
-print(f"scrambled {n} embedded FDT magic(s) inside Image")
-struct.pack_into("<Q", inner, 8, 0)
-inner_size = struct.unpack_from("<Q", inner, 16)[0]
-text_off = 0x80000
-pad = 0x200000 - text_off
-hdr = bytearray(pad)
-def b_imm(delta):
-    return 0x14000000 | ((delta >> 2) & 0x3FFFFFF)
-struct.pack_into("<I", hdr, 0, b_imm(pad))
-struct.pack_into("<I", hdr, 4, 0)
-struct.pack_into("<Q", hdr, 8, text_off)
-struct.pack_into("<Q", hdr, 16, pad + inner_size)
-hdr[24:32] = inner[24:32]
-hdr[56:60] = b"ARM\x64"
-struct.pack_into("<I", hdr, text_off, b_imm(pad - text_off))
-dst.write_bytes(bytes(hdr) + bytes(inner))
-print(f"padded {src.stat().st_size} -> {dst.stat().st_size}")
-PY
-
-echo "==> gzip padded Image (ABL is_gzip_package + decompress → DtbOffset)"
-gzip -n -9 -c "$PADDED" >"$GZ"
+echo "==> gzip raw Image (pmOS / Armbian — no 2MiB stub pad)"
+gzip -n -9 -c "$KERNEL_IMG" >"$GZ"
 
 echo "==> fdtput msm-id/board-id, concat FDT after gzip"
 python3 - "$DTB" "$GZ" "$GZDTB" <<'PY'

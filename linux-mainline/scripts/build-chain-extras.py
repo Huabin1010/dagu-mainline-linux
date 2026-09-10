@@ -6,7 +6,8 @@ stock kernel + stock vendor_boot). Stock overlay #15 is the dagu CAF
 tree and must not be stacked on a mainline DTB.
 
 Build 29 no-op overlays with the stock board-ids so ABL still selects
-idx=15, then apply a harmless `/ { dagu,dtbo-stub; }` fragment.
+idx=15. Only stamp qcom,board-id — do not replace root compatible (UBWC
+and other of_machine_get_match_data() lookups need qcom,sm8250).
 """
 from __future__ import annotations
 
@@ -54,12 +55,14 @@ def _fdtget_u32s(blob: Path, prop: str) -> list[int]:
 def _compile_stub(board: list[int], dst: Path) -> None:
 	b0 = board[0] if len(board) > 0 else 0
 	b1 = board[1] if len(board) > 1 else 0
+	# Do not overwrite root compatible/model. ABL only needs board-id to
+	# pick idx=15; replacing compatible with kona-mtp made
+	# qcom_ubwc_config_get_data() miss "qcom,sm8250" and msm-mdss probe
+	# failed with -EINVAL ("Couldn't find UBWC config data").
 	dts = f"""/dts-v1/;
 /plugin/;
 
 / {{
-	model = "dagu dtbo stub";
-	compatible = "qcom,kona-mtp", "qcom,kona", "qcom,mtp";
 	qcom,board-id = <{b0:#x} {b1:#x}>;
 }};
 

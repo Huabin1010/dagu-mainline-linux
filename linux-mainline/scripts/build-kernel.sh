@@ -33,6 +33,17 @@ if [[ "${DAGU_MINIMAL:-}" == 1 ]]; then
 	"$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m -O "$KBUILD_OUTPUT" \
 		"$KBUILD_OUTPUT/.config" "$ROOT/config/dagu-bringup.fragment"
 fi
+if [[ "${DAGU_USB:-1}" == 1 ]]; then
+	echo "==> merge dagu-usb.fragment (HS g_serial UDC)"
+	"$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m -O "$KBUILD_OUTPUT" \
+		"$KBUILD_OUTPUT/.config" "$ROOT/config/dagu-usb.fragment"
+fi
+# Last, so it can turn FB_SIMPLE back off after dagu-bringup.fragment set it.
+if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
+	echo "==> merge dagu-display.fragment (DRM_MSM + L81A panel)"
+	"$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m -O "$KBUILD_OUTPUT" \
+		"$KBUILD_OUTPUT/.config" "$ROOT/config/dagu-display.fragment"
+fi
 make O="$KBUILD_OUTPUT" olddefconfig
 
 cfg="$KBUILD_OUTPUT/.config"
@@ -43,12 +54,25 @@ need_y CONFIG_SM_GCC_8250
 need_y CONFIG_ARM64_VA_BITS_39
 need_y CONFIG_QCOM_WDT
 need_y CONFIG_PSTORE_CONSOLE
+need_y CONFIG_DETECT_HUNG_TASK
 grep -q '^CONFIG_ARM64_VA_BITS_52=y' "$cfg" && die "VA_BITS_52 still on — Kryo 585 has no FEAT_LVA"
 grep -q '^CONFIG_ARM64_VA_BITS_48=y' "$cfg" && die "VA_BITS_48 still on — dump 4.19 is VA_BITS_39 / 3-level"
 grep -q '^CONFIG_KVM=y' "$cfg" && die "KVM still on — dump 4.19 has no hypervisor stub"
 grep -q '^CONFIG_POWER_RESET_MSM=y' "$cfg" && die "POWER_RESET_MSM still on — would bounce to fastboot on panic"
+if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
+	need_y CONFIG_DRM_MSM
+	need_y CONFIG_DRM_PANEL_XIAOMI_DAGU_L81A
+	need_y CONFIG_DRM_FBDEV_EMULATION
+	need_y CONFIG_SM_DISPCC_8250
+	need_y CONFIG_PINCTRL_SM8250
+	need_y CONFIG_REGULATOR_QCOM_REFGEN
+	grep -q '^CONFIG_FB_SIMPLE=y' "$cfg" && \
+		die "FB_SIMPLE still on — it would fight DRM fbdev over fbcon"
+fi
 if [[ "${DAGU_MINIMAL:-}" != 1 ]]; then
 	need_y CONFIG_USB_CONFIGFS
+	need_y CONFIG_USB_G_SERIAL
+	need_y CONFIG_U_SERIAL_CONSOLE
 	need_y CONFIG_USB_CONFIGFS_ACM
 	need_y CONFIG_USB_U_SERIAL
 	need_y CONFIG_SCSI_UFS_QCOM

@@ -9,11 +9,14 @@ source "$ROOT/scripts/env.sh"
 DTS_DIR="$KERNEL_SRC/arch/arm64/boot/dts/qcom"
 MAKEFILE="$DTS_DIR/Makefile"
 SRC="$ROOT/dts/sm8250-xiaomi-dagu.dts"
+STOCK_RM="$ROOT/dts/dagu-reserved-memory-stock.dtsi"
 
 [[ -f "$SRC" ]] || { echo "missing $SRC" >&2; exit 1; }
+[[ -f "$STOCK_RM" ]] || { echo "missing $STOCK_RM" >&2; exit 1; }
 [[ -d "$DTS_DIR" ]] || { echo "run setup-kernel.sh first" >&2; exit 1; }
 
 cp -f "$SRC" "$DTS_DIR/sm8250-xiaomi-dagu.dts"
+cp -f "$STOCK_RM" "$DTS_DIR/dagu-reserved-memory-stock.dtsi"
 
 if ! grep -q 'sm8250-xiaomi-dagu.dtb' "$MAKEFILE"; then
 	# Keep next to the other SM8250 Xiaomi tablets.

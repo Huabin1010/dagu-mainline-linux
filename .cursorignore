@@ -1,0 +1,6 @@
+# Cursor 默认沿用 .gitignore。内核树不入库，但 Agent 的 Glob / Grep 必须能搜。
+# 官方：在本文件用 ! 覆盖 gitignore。父目录被忽略时不会遍历，目录本身和内容都要反选。
+# 仍忽略：linux-mainline/out/、firmware blob、artifacts 等（保持 .gitignore）。
+
+!linux-mainline/linux/
+!linux-mainline/linux/**

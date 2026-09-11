@@ -37,6 +37,10 @@ if [[ -x "$OUT/dropbear" ]]; then
 	install -m 755 "$OUT/dropbear" "$STAGING/bin/dropbear"
 fi
 
+if [[ -x "$OUT/pd-mapper" ]]; then
+	install -m 755 "$OUT/pd-mapper" "$STAGING/bin/pd-mapper"
+fi
+
 FW="$ROOT/firmware/dagu/lib/firmware"
 if [[ -d "$FW" ]]; then
 	cp -a "$FW/." "$STAGING/lib/firmware/"

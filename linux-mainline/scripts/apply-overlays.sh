@@ -24,8 +24,10 @@ install_src drivers/usb/misc/ps5169-dagu.c
 install_src drivers/input/keyboard/nanosic-dagu.c
 install_src drivers/power/supply/bq2597x-dagu.c
 install_src drivers/power/supply/p9418-dagu.c
+install_src drivers/power/supply/xiaomi-dual-fg.c
 install_src drivers/watchdog/qcom-wdt-early-dagu.c
 install_src drivers/gpu/drm/msm/msm_fbdev.c
+install_src drivers/media/i2c/imx596-dagu.c
 
 append_once() {
 	local file=$1
@@ -58,9 +60,17 @@ append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
 	'p9418-dagu.o' \
 	'obj-$(CONFIG_CHARGER_P9418_DAGU) += p9418-dagu.o'
 
+append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
+	'xiaomi-dual-fg.o' \
+	'obj-$(CONFIG_BATTERY_XIAOMI_DUAL_FG) += xiaomi-dual-fg.o'
+
 append_once "$KERNEL_SRC/drivers/watchdog/Makefile" \
 	'qcom-wdt-early-dagu.o' \
 	'obj-$(CONFIG_QCOM_WDT) += qcom-wdt-early-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/media/i2c/Makefile" \
+	'imx596-dagu.o' \
+	'obj-$(CONFIG_VIDEO_IMX596_DAGU) += imx596-dagu.o'
 
 python3 - "$KERNEL_SRC" <<'PY'
 from pathlib import Path
@@ -144,6 +154,38 @@ config CHARGER_P9418_DAGU
 	select REGMAP_I2C
 	help
 	  P9418 wireless charger on Xiaomi Pad 5 Pro 12.4.
+
+config BATTERY_XIAOMI_DUAL_FG
+	tristate "Xiaomi dual BQ27Z561 combiner (dagu)"
+	depends on POWER_SUPPLY
+	help
+	  CAF xiaomi,dual-FuelGauge: one bms from master+slave BQ27Z561.
+
+""",
+)
+
+insert_kconfig(
+    root / "drivers/power/supply/Kconfig",
+    "config CHARGER_P9418_DAGU",
+    """config BATTERY_XIAOMI_DUAL_FG
+	tristate "Xiaomi dual BQ27Z561 combiner (dagu)"
+	depends on POWER_SUPPLY
+	help
+	  CAF xiaomi,dual-FuelGauge: one bms from master+slave BQ27Z561.
+
+""",
+)
+
+insert_kconfig(
+    root / "drivers/media/i2c/Kconfig",
+    "config VIDEO_IMX412",
+    """config VIDEO_IMX596_DAGU
+	tristate "Sony IMX596 sensor (Xiaomi dagu front camera)"
+	depends on I2C && GPIOLIB
+	select V4L2_CCI_I2C
+	help
+	  Front camera on Xiaomi Pad 5 Pro 12.4. CAF: CCI1@0x1a, csiphy4,
+	  reset GPIO109, MCLK GPIO97.
 
 """,
 )
@@ -536,7 +578,9 @@ lut_new = """\t} else if (ret == -EPROBE_DEFER) {
 \t}
 """
 text = path.read_text()
-if "dev_pm_opp_of_remove_table(cpu_dev)" not in text:
+if "dagu: skip DT CPU OPP table" in text:
+    pass  # of_add_table already removed; LUT EPROBE_DEFER patch does not apply
+elif "dev_pm_opp_of_remove_table(cpu_dev)" not in text:
     if "use EPSS LUT" in text:
         old_defer = """\t} else if (ret == -EPROBE_DEFER) {
 \t\t/* dagu: skip CPU ICC paths — DT OPPs need ICC; use EPSS LUT */
@@ -618,6 +662,37 @@ path.write_text(text.replace(old, new, 1))
 print(f"patched {path}: {marker}")
 PY
 
+python3 - "$KERNEL_SRC/drivers/i2c/busses/i2c-qcom-geni.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: I2C proto invalid, not loading QUPFW"
+if marker in text:
+    raise SystemExit(0)
+old = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\tret = geni_load_se_firmware(&gi2c->se, GENI_SE_I2C);
+\t\tif (ret) {
+\t\t\tdev_err_probe(dev, ret, "i2c firmware load failed ret: %d\\n", ret);
+\t\t\tgoto err_resources;
+\t\t}
+\t} else if (proto != GENI_SE_I2C) {
+"""
+new = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\t/* dagu: I2C proto invalid, not loading QUPFW on this QHEE */
+\t\tdev_err_probe(dev, -EOPNOTSUPP,
+\t\t\t      "I2C proto invalid, not loading QUPFW on this QHEE\\n");
+\t\tret = -EOPNOTSUPP;
+\t\tgoto err_resources;
+\t} else if (proto != GENI_SE_I2C) {
+"""
+if old not in text:
+    raise SystemExit(f"{path}: I2C firmware-load block not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
 python3 - "$KERNEL_SRC/drivers/gpu/drm/drm_fb_helper.c" <<'PY'
 from pathlib import Path
 import sys
@@ -638,4 +713,1194 @@ if needle not in text:
 text = text.replace(needle, repl)
 path.write_text(text)
 print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+# Linear-only scanout dropped SSPP multirect (800+800). Dual LM then
+# flickered. Keep UBWC so DPU splits the 1600-wide plane again.
+old_linear_only = """static const uint64_t supported_format_modifiers[] = {
+	/* dagu: skip UBWC scanout — 1600x2560 XR30 compressed plus
+	 * FB_DAMAGE_CLIPS leaves RGB noise in scrolled GTK regions
+	 * (no SM8250 ICC, dual-DSI SSPP multirect on one pipe). */
+	DRM_FORMAT_MOD_LINEAR,
+	DRM_FORMAT_MOD_INVALID
+};
+"""
+restored = """static const uint64_t supported_format_modifiers[] = {
+	DRM_FORMAT_MOD_QCOM_COMPRESSED,
+	DRM_FORMAT_MOD_LINEAR,
+	DRM_FORMAT_MOD_INVALID
+};
+"""
+if old_linear_only in text:
+    text = text.replace(old_linear_only, restored, 1)
+    print(f"restored UBWC modifiers on {path}")
+marker = "dagu: skip FB_DAMAGE_CLIPS"
+if marker not in text:
+    needle = "\tdrm_plane_enable_fb_damage_clips(plane);\n"
+    repl = (
+        "\t/* dagu: skip FB_DAMAGE_CLIPS — partial KMS updates of UBWC "
+        "XR30 leave RGB noise in scrolled GTK regions. Full frames OK. */\n"
+    )
+    if needle not in text:
+        raise SystemExit(f"{path}: FB_DAMAGE_CLIPS needle missing")
+    text = text.replace(needle, repl, 1)
+    print(f"patched {path}: {marker}")
+marker = "dagu: skip same-SSPP smart-DMA parallel"
+if marker not in text:
+    old_para = """	if (drm_rect_width(&r_pipe_cfg->src_rect) != 0) {
+		if (!dpu_plane_is_multirect_parallel_capable(pipe->sspp, pipe_cfg, fmt, max_linewidth) ||
+		    !dpu_plane_is_multirect_parallel_capable(pipe->sspp, r_pipe_cfg, fmt, max_linewidth))
+			return false;
+
+		r_pipe->sspp = pipe->sspp;
+
+		pipe->multirect_index = DPU_SSPP_RECT_0;
+		pipe->multirect_mode = DPU_SSPP_MULTIRECT_PARALLEL;
+
+		r_pipe->multirect_index = DPU_SSPP_RECT_1;
+		r_pipe->multirect_mode = DPU_SSPP_MULTIRECT_PARALLEL;
+	}
+"""
+    new_para = """	if (drm_rect_width(&r_pipe_cfg->src_rect) != 0) {
+		/* dagu: skip same-SSPP smart-DMA parallel — 1600x2560@120
+		 * needs 526 Mpix/s through one Xin; MDP max is 460 MHz.
+		 * Virtual RM will pick a second SSPP. */
+		return false;
+	}
+"""
+    if old_para not in text:
+        raise SystemExit(f"{path}: try_multirect_parallel body missing")
+    text = text.replace(old_para, new_para, 1)
+    print(f"patched {path}: {marker}")
+path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: two SSPPs for 1600@120 split"
+if marker not in text:
+    old = "bool dpu_use_virtual_planes;\nmodule_param(dpu_use_virtual_planes, bool, 0);\n"
+    new = (
+        "bool dpu_use_virtual_planes = true; "
+        "/* dagu: two SSPPs for 1600@120 split */\n"
+        "module_param(dpu_use_virtual_planes, bool, 0);\n"
+    )
+    if old not in text:
+        raise SystemExit(f"{path}: dpu_use_virtual_planes needle missing")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+# CS35L41 PUP_DONE waits for ASP clocks; Q6 AFE starts those at trigger,
+# after DAPM PRE_PMU, so the 100ms poll always times out on this board.
+path = root / "sound/soc/codecs/cs35l41-lib.c"
+text = path.read_text()
+marker = "dagu: CS35L41 PUP timeout is non-fatal"
+if marker not in text:
+    old = """		if (ret)
+			dev_err(dev, "Enable(%d) failed: %d\\n", enable, ret);
+"""
+    new = """		if (ret) {
+			/* dagu: CS35L41 PUP timeout is non-fatal */
+			dev_warn(dev, "Enable(%d) timed out (%d); clocks may arrive at trigger\\n",
+				 enable, ret);
+			if (enable)
+				ret = 0;
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: Enable timeout needle missing")
+    path.write_text(text.replace(old, new))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/qcom/sm8250.c"
+text = path.read_text()
+marker = "dagu: set I2S fmt on every CS35L41"
+if marker not in text:
+    old = """	case TERTIARY_MI2S_RX:
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+		snd_soc_dai_set_sysclk(cpu_dai,
+			Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT,
+			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+		snd_soc_dai_set_fmt(cpu_dai, fmt);
+		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+		break;
+"""
+    new = """	case TERTIARY_MI2S_RX:
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+		snd_soc_dai_set_sysclk(cpu_dai,
+			Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT,
+			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+		snd_soc_dai_set_fmt(cpu_dai, fmt);
+		{
+			int codec_i;
+			/* dagu: set I2S fmt on every CS35L41 */
+			for (codec_i = 0; codec_i < rtd->dai_link->num_codecs; codec_i++)
+				snd_soc_dai_set_fmt(snd_soc_rtd_to_codec(rtd, codec_i),
+						    codec_dai_fmt);
+		}
+		break;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: TERTIARY_MI2S_RX needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# CAF kona.c CONFIG_MACH_XIAOMI_DAGU: TDM_MAX_SLOTS=4, 32-bit @ 48 kHz = 6.144 MHz.
+# CS35L41 channels_max=2 so keep 2ch PCM; map all amps to ASPRX slots 0/1.
+# AFE channel map uses BYTE offsets {0,4} (CAF tert_tdm_dev_config).
+path = root / "sound/soc/qcom/sm8250.c"
+text = path.read_text()
+marker = "dagu: tertiary TDM for CS35L41"
+if marker not in text:
+    old = """#define MI2S_BCLK_RATE		1536000
+"""
+    new = """#define MI2S_BCLK_RATE		1536000
+#define TDM_BCLK_RATE		6144000
+#define TDM_SLOTS		4
+#define TDM_SLOT_WIDTH		32
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MI2S_BCLK_RATE needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	case QUINARY_MI2S_RX:
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+		snd_soc_dai_set_sysclk(cpu_dai,
+			Q6AFE_LPASS_CLK_ID_QUI_MI2S_IBIT,
+			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+		snd_soc_dai_set_fmt(cpu_dai, fmt);
+		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+		break;
+	default:
+		break;
+"""
+    new = """	case QUINARY_MI2S_RX:
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+		snd_soc_dai_set_sysclk(cpu_dai,
+			Q6AFE_LPASS_CLK_ID_QUI_MI2S_IBIT,
+			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+		snd_soc_dai_set_fmt(cpu_dai, fmt);
+		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+		break;
+	case TERTIARY_TDM_RX_0: {
+		/* dagu: tertiary TDM for CS35L41 */
+		static const unsigned int cpu_rx_slots[] = { 0, 4 };
+		static const unsigned int amp_rx_slots[][2] = {
+			{ 0, 1 }, { 0, 1 }, { 0, 1 }, { 0, 1 },
+		};
+		int codec_i;
+
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_DSP_A;
+		snd_soc_dai_set_tdm_slot(cpu_dai, 0, 0x03, TDM_SLOTS,
+					 TDM_SLOT_WIDTH);
+		snd_soc_dai_set_channel_map(cpu_dai, 0, NULL,
+					    ARRAY_SIZE(cpu_rx_slots),
+					    cpu_rx_slots);
+		snd_soc_dai_set_sysclk(cpu_dai,
+				       Q6AFE_LPASS_CLK_ID_TER_TDM_IBIT,
+				       TDM_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+		for (codec_i = 0; codec_i < rtd->dai_link->num_codecs; codec_i++) {
+			struct snd_soc_dai *amp = snd_soc_rtd_to_codec(rtd, codec_i);
+
+			snd_soc_dai_set_fmt(amp, codec_dai_fmt);
+			snd_soc_dai_set_channel_map(amp, 0, NULL, 2,
+						    amp_rx_slots[codec_i]);
+			snd_soc_dai_set_sysclk(amp, 0, TDM_BCLK_RATE,
+					       SNDRV_PCM_STREAM_PLAYBACK);
+			snd_soc_component_set_sysclk(amp->component, 0, 0,
+						     TDM_BCLK_RATE,
+						     SND_SOC_CLOCK_IN);
+		}
+		break;
+	}
+	default:
+		break;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: QUINARY_MI2S_RX needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Already-patched trees still have 8-slot / 12.288 MHz from the previous dagu
+# bring-up. CAF kona.c sets TDM_MAX_SLOTS=4 for DAGU (BCLK 6.144 MHz) and
+# tert RX_0 channel map byte offsets {0,4,8,12}.
+path = root / "sound/soc/qcom/sm8250.c"
+text = path.read_text()
+if "#define TDM_SLOTS		8" in text or "#define TDM_BCLK_RATE		12288000" in text:
+    text2 = text.replace("#define TDM_BCLK_RATE		12288000",
+                         "#define TDM_BCLK_RATE		6144000", 1)
+    text2 = text2.replace("#define TDM_SLOTS		8",
+                          "#define TDM_SLOTS		4", 1)
+    text2 = text2.replace("static const unsigned int cpu_rx_slots[] = { 0, 1 };",
+                          "static const unsigned int cpu_rx_slots[] = { 0, 4 };", 1)
+    if "#define TDM_SLOTS		4" not in text2:
+        raise SystemExit(f"{path}: TDM 4-slot rewrite failed")
+    path.write_text(text2)
+    print(f"patched {path}: dagu CAF TDM_MAX_SLOTS is 4")
+
+# Mainline q6afe_tdm_port_prepare drops DT invert-sync / data-delay.
+# CAF tert RX needs invert-sync=1 and 1-BCLK delay (DSP_A) or CS35L41 PLL
+# never locks and PUP_DONE times out.
+path = root / "sound/soc/qcom/qdsp6/q6afe.h"
+text = path.read_text()
+marker = "dagu: TDM invert-sync/data-delay in q6afe_tdm_cfg"
+if marker not in text:
+    old = """	u16	slot_mask;
+	u32	data_align_type;
+	u16	ch_mapping[AFE_MAX_CHAN_COUNT];
+"""
+    new = """	u16	slot_mask;
+	u32	data_align_type;
+	u16	data_out_enable; /* dagu: TDM invert-sync/data-delay in q6afe_tdm_cfg */
+	u16	invert_sync;
+	u16	data_delay;
+	u16	ch_mapping[AFE_MAX_CHAN_COUNT];
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: q6afe_tdm_cfg needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe-dai.c"
+text = path.read_text()
+marker = "dagu: copy TDM invert-sync into port cfg"
+if marker not in text:
+    old = """	tdm->data_align_type = dai_data->priv[dai->id].data_align;
+	tdm->sync_src = dai_data->priv[dai->id].sync_src;
+	tdm->sync_mode = dai_data->priv[dai->id].sync_mode;
+
+	return 0;
+"""
+    new = """	tdm->data_align_type = dai_data->priv[dai->id].data_align;
+	tdm->sync_src = dai_data->priv[dai->id].sync_src;
+	tdm->sync_mode = dai_data->priv[dai->id].sync_mode;
+	/* dagu: copy TDM invert-sync into port cfg */
+	tdm->data_out_enable = dai_data->priv[dai->id].data_out_enable;
+	tdm->invert_sync = dai_data->priv[dai->id].invert_sync;
+	tdm->data_delay = dai_data->priv[dai->id].data_delay;
+
+	return 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: q6tdm_hw_params needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+marker = "dagu: send TDM invert-sync to AFE"
+if marker not in text and "dagu TDM ch=" not in text:
+    old = """	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame;
+
+	pcfg->tdm_cfg.slot_width = cfg->slot_width;
+	pcfg->tdm_cfg.slot_mask = cfg->slot_mask;
+"""
+    new = """	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame;
+	/* dagu: send TDM invert-sync to AFE */
+	pcfg->tdm_cfg.ctrl_data_out_enable = cfg->data_out_enable;
+	pcfg->tdm_cfg.ctrl_invert_sync_pulse = cfg->invert_sync;
+	pcfg->tdm_cfg.ctrl_sync_data_delay = cfg->data_delay;
+
+	pcfg->tdm_cfg.slot_width = cfg->slot_width;
+	pcfg->tdm_cfg.slot_mask = cfg->slot_mask;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: q6afe_tdm_port_prepare needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+# This ADSP returns 0x16 / "Unknown cmd 0x100f4" for LPASS_CORE_HW_VOTE.
+# SWR/txmacro then never get iface/fsgen clocks and the whole sound card
+# defers on "WCD Capture: codec dai not found".
+marker = "dagu: AFE LPASS HW vote is optional"
+if marker not in text:
+    old = """	ret = afe_apr_send_pkt(afe, pkt, NULL,
+			       AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST);
+	if (ret)
+		dev_err(afe->dev, "AFE failed to vote (%d)\\n", hw_block_id);
+
+	return ret;
+"""
+    new = """	ret = afe_apr_send_pkt(afe, pkt, NULL,
+			       AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST);
+	if (ret) {
+		/* dagu: AFE LPASS HW vote is optional */
+		dev_warn(afe->dev, "AFE vote unsupported (%d, %d); continue without vote\\n",
+			 hw_block_id, ret);
+		ret = 0;
+	}
+
+	return ret;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: AFE vote needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Stock mixer_paths speaker: all four CS35L41 ASPRX1=0 ASPRX2=1 (not 0/4, 1/5).
+path = root / "sound/soc/qcom/sm8250.c"
+text = path.read_text()
+marker = "dagu: CS35L41 ASPRX slots 0/1"
+if marker not in text:
+    old = """		static const unsigned int amp_rx_slots[][2] = {
+			{ 0, 4 }, { 1, 5 }, { 0, 4 }, { 1, 5 },
+		};
+"""
+    new = """		static const unsigned int amp_rx_slots[][2] = {
+			/* dagu: CS35L41 ASPRX slots 0/1 */
+			{ 0, 1 }, { 0, 1 }, { 0, 1 }, { 0, 1 },
+		};
+"""
+    if old in text:
+        path.write_text(text.replace(old, new, 1))
+        print(f"patched {path}: {marker}")
+        text = path.read_text()
+
+# Stock TERT_TDM_RX_0 Format = S24_LE, 48 kHz, two channels.
+marker = "dagu: BE fixup S24_LE 48k stereo"
+if marker not in text:
+    old = """	rate->min = rate->max = 48000;
+	channels->min = channels->max = 2;
+	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S16_LE);
+"""
+    new = """	rate->min = rate->max = 48000;
+	channels->min = channels->max = 2;
+	/* dagu: BE fixup S24_LE 48k stereo */
+	snd_mask_none(fmt);
+	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S24_LE);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: BE fixup needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Xiaomi ADSP rejects oversized AFE_PARAM_ID_TDM_CONFIG (union vs tdm_cfg).
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+marker = "dagu: TDM SET_PARAM size is tdm_cfg"
+if marker not in text:
+    old = """	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
+				       AFE_MODULE_AUDIO_DEV_INTERFACE,
+				       sizeof(port->port_cfg));
+"""
+    new = """	{
+		int cfg_size = sizeof(port->port_cfg);
+
+		/* dagu: TDM SET_PARAM size is tdm_cfg */
+		if (param_id == AFE_PARAM_ID_TDM_CONFIG)
+			cfg_size = sizeof(port->port_cfg.tdm_cfg);
+		ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
+					       AFE_MODULE_AUDIO_DEV_INTERFACE,
+					       cfg_size);
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: q6afe_port_start size needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Stock Android rear s5kjn1: 19.2 MHz MCLK, 4080x3060 GBRG preview.
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: s5kjn1 19.2 MHz and 4080x3060 GBRG"
+if marker not in text:
+    old = """#define S5KJN1_MCLK_FREQ_24MHZ		(24 * HZ_PER_MHZ)
+"""
+    new = """#define S5KJN1_MCLK_FREQ_24MHZ		(24 * HZ_PER_MHZ)
+#define S5KJN1_MCLK_FREQ_19_2MHZ	(19200 * HZ_PER_KHZ) /* dagu: s5kjn1 19.2 MHz and 4080x3060 GBRG */
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: S5KJN1_MCLK needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """		.width = 4080,
+		.height = 3072,
+"""
+    new = """		.width = 4080,
+		.height = 3060,
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 4080x3072 mode needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	{ S5KJN1_REG_X_OUTPUT_SIZE, 0x0ff0 },
+	{ S5KJN1_REG_Y_OUTPUT_SIZE, 0x0c00 },
+"""
+    new = """	{ S5KJN1_REG_X_OUTPUT_SIZE, 0x0ff0 },
+	{ S5KJN1_REG_Y_OUTPUT_SIZE, 0x0bf4 },
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: Y_OUTPUT 0x0c00 needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	{ CCI_REG16(0x0136), 0x1800 },
+"""
+    new = """	{ CCI_REG16(0x0136), 0x1333 },
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 0x0136 24MHz needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	s5kjn1->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_HFLIP, 0, 1, 1, 0);
+"""
+    new = """	s5kjn1->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_HFLIP, 0, 1, 1, 1);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hflip default needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	s5kjn1->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_VFLIP, 0, 1, 1, 0);
+"""
+    new = """	s5kjn1->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_VFLIP, 0, 1, 1, 1);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vflip default needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	if (freq != S5KJN1_MCLK_FREQ_24MHZ)
+		return dev_err_probe(s5kjn1->dev, -EINVAL,
+				     "MCLK clock frequency %lu is not supported\\n",
+				     freq);
+"""
+    new = """	if (freq != S5KJN1_MCLK_FREQ_24MHZ &&
+	    freq != S5KJN1_MCLK_FREQ_19_2MHZ)
+		return dev_err_probe(s5kjn1->dev, -EINVAL,
+				     "MCLK clock frequency %lu is not supported\\n",
+				     freq);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MCLK probe check needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# CamX dagu_qtech_s5kjn1 4080x3060 PLL (19.2 MHz EXCK 0x1300).
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: s5kjn1 CamX PLL"
+if marker not in text:
+    camx = """	{ CCI_REG16(0x0136), 0x1300 },
+	{ CCI_REG16(0x013e), 0x00c8 },
+	{ CCI_REG16(0x0300), 0x0006 },
+	{ CCI_REG16(0x0302), 0x0001 },
+	{ CCI_REG16(0x0304), 0x0003 },
+	{ CCI_REG16(0x0306), 0x0083 }, /* dagu: s5kjn1 CamX PLL */
+	{ CCI_REG16(0x0308), 0x0008 },
+	{ CCI_REG16(0x030a), 0x0001 },
+	{ CCI_REG16(0x030c), 0x0000 },
+	{ CCI_REG16(0x030e), 0x0003 },
+	{ CCI_REG16(0x0310), 0x0086 },
+"""
+    old24 = """	{ CCI_REG16(0x0136), 0x1333 },
+	{ CCI_REG16(0x013e), 0x0000 },
+	{ CCI_REG16(0x0300), 0x0006 },
+	{ CCI_REG16(0x0302), 0x0001 },
+	{ CCI_REG16(0x0304), 0x0004 },
+	{ CCI_REG16(0x0306), 0x008c },
+	{ CCI_REG16(0x0308), 0x0008 },
+	{ CCI_REG16(0x030a), 0x0001 },
+	{ CCI_REG16(0x030c), 0x0000 },
+	{ CCI_REG16(0x030e), 0x0004 },
+	{ CCI_REG16(0x0310), 0x0092 },
+"""
+    old192 = """	{ CCI_REG16(0x0136), 0x1333 },
+	{ CCI_REG16(0x013e), 0x0000 },
+	{ CCI_REG16(0x0300), 0x0006 },
+	{ CCI_REG16(0x0302), 0x0001 },
+	{ CCI_REG16(0x0304), 0x0004 },
+	{ CCI_REG16(0x0306), 0x00af }, /* dagu: s5kjn1 PLL for 19.2 MHz MCLK */
+	{ CCI_REG16(0x0308), 0x0008 },
+	{ CCI_REG16(0x030a), 0x0001 },
+	{ CCI_REG16(0x030c), 0x0000 },
+	{ CCI_REG16(0x030e), 0x0004 },
+	{ CCI_REG16(0x0310), 0x00b6 },
+"""
+    if old192 in text:
+        text = text.replace(old192, camx, 1)
+    elif old24 in text:
+        text = text.replace(old24, camx, 1)
+    else:
+        raise SystemExit(f"{path}: s5kjn1 CamX PLL needle missing")
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu s5kjn1 streaming"
+if marker not in text:
+    old = """	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret)
+		goto error;
+
+	return 0;
+"""
+    new = """	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret)
+		goto error;
+
+	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height);
+	return 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: s5kjn1 stream-on needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+# CAF TDM_CONFIG bit_width is 16 or 24 (slot_width is 32). Forcing sample
+# width 32 made SET_PARAM 0x100ef return ADSP_EBADPARAM (0x2).
+marker24 = "dagu: TDM sample bit_width stays 16/24; slot_width is 32"
+marker32 = "dagu: TDM bit_width 32 and dump cfg"
+old32 = """	/* dagu: TDM bit_width 32 and dump cfg */
+	pcfg->tdm_cfg.bit_width = (cfg->bit_width == 24) ? 32 : cfg->bit_width;
+"""
+new24 = """	/* dagu: TDM sample bit_width stays 16/24; slot_width is 32 */
+	pcfg->tdm_cfg.bit_width = cfg->bit_width;
+"""
+if marker24 in text:
+    print(f"already patched {path}: {marker24}")
+elif marker32 in text or old32 in text:
+    if old32 not in text:
+        raise SystemExit(f"{path}: TDM 24->32 conversion needle missing")
+    path.write_text(text.replace(old32, new24, 1))
+    print(f"patched {path}: TDM bit_width keep 24")
+else:
+    old = """	pcfg->tdm_cfg.tdm_cfg_minor_version = AFE_API_VERSION_TDM_CONFIG;
+	pcfg->tdm_cfg.num_channels = cfg->num_channels;
+	pcfg->tdm_cfg.sample_rate = cfg->sample_rate;
+	pcfg->tdm_cfg.bit_width = cfg->bit_width;
+	pcfg->tdm_cfg.data_format = cfg->data_format;
+	pcfg->tdm_cfg.sync_mode = cfg->sync_mode;
+	pcfg->tdm_cfg.sync_src = cfg->sync_src;
+	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame;
+	/* dagu: send TDM invert-sync to AFE */
+	pcfg->tdm_cfg.ctrl_data_out_enable = cfg->data_out_enable;
+	pcfg->tdm_cfg.ctrl_invert_sync_pulse = cfg->invert_sync;
+	pcfg->tdm_cfg.ctrl_sync_data_delay = cfg->data_delay;
+
+	pcfg->tdm_cfg.slot_width = cfg->slot_width;
+	pcfg->tdm_cfg.slot_mask = cfg->slot_mask;
+	port->scfg = kzalloc_obj(*port->scfg);
+	if (!port->scfg)
+		return;
+
+	port->scfg->minor_version = AFE_API_VERSION_SLOT_MAPPING_CONFIG;
+	port->scfg->num_channels = cfg->num_channels;
+	port->scfg->bitwidth = cfg->bit_width;
+"""
+    new = """	pcfg->tdm_cfg.tdm_cfg_minor_version = AFE_API_VERSION_TDM_CONFIG;
+	pcfg->tdm_cfg.num_channels = cfg->num_channels;
+	pcfg->tdm_cfg.sample_rate = cfg->sample_rate;
+	/* dagu: TDM sample bit_width stays 16/24; slot_width is 32 */
+	pcfg->tdm_cfg.bit_width = cfg->bit_width;
+	pcfg->tdm_cfg.data_format = 0;
+	pcfg->tdm_cfg.sync_mode = cfg->sync_mode;
+	pcfg->tdm_cfg.sync_src = cfg->sync_src;
+	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame ?: 4;
+	pcfg->tdm_cfg.ctrl_data_out_enable = cfg->data_out_enable;
+	pcfg->tdm_cfg.ctrl_invert_sync_pulse = cfg->invert_sync;
+	pcfg->tdm_cfg.ctrl_sync_data_delay = cfg->data_delay;
+	pcfg->tdm_cfg.slot_width = cfg->slot_width ?: 32;
+	pcfg->tdm_cfg.slot_mask = cfg->slot_mask ?:
+		((1u << cfg->num_channels) - 1);
+	pr_info("dagu TDM ch=%u rate=%u bw=%u->%u slots=%u sw=%u mask=0x%x sync=%u/%u inv=%u delay=%u dout=%u\\n",
+		pcfg->tdm_cfg.num_channels, pcfg->tdm_cfg.sample_rate,
+		cfg->bit_width, pcfg->tdm_cfg.bit_width,
+		pcfg->tdm_cfg.nslots_per_frame, pcfg->tdm_cfg.slot_width,
+		pcfg->tdm_cfg.slot_mask, pcfg->tdm_cfg.sync_mode,
+		pcfg->tdm_cfg.sync_src, pcfg->tdm_cfg.ctrl_invert_sync_pulse,
+		pcfg->tdm_cfg.ctrl_sync_data_delay,
+		pcfg->tdm_cfg.ctrl_data_out_enable);
+	kfree(port->scfg);
+	port->scfg = kzalloc_obj(*port->scfg);
+	if (!port->scfg)
+		return;
+
+	port->scfg->minor_version = AFE_API_VERSION_SLOT_MAPPING_CONFIG;
+	port->scfg->num_channels = cfg->num_channels;
+	port->scfg->bitwidth = pcfg->tdm_cfg.bit_width;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: TDM dump needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker24}")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+if "q6afe_tdm_group_enable" not in text:
+    raise SystemExit(f"{path}: TDM GROUP helper missing; do not re-extract linux/ without GROUP/V3")
+if "gcfg.slot_mask = 0xFF" in text:
+    text = text.replace("gcfg.slot_mask = 0xFF;",
+                        "gcfg.slot_mask = (1u << gcfg.nslots_per_frame) - 1;", 1)
+    text = text.replace("nslots_per_frame ?: 8", "nslots_per_frame ?: 4")
+    path.write_text(text)
+    print(f"patched {path}: TDM GROUP 4-slot mask")
+
+# SM8250 VFE puts the CAMNOC RCG rates on camnoc_axi_src, but
+# vfe_match_clock_names() only matches camnoc_axi (a branch with rate {0}).
+# Without ICC the RCG stays parked at XO 19.2 MHz and RDI DMA never completes.
+path = root / "drivers/media/platform/qcom/camss/camss-vfe.c"
+text = path.read_text()
+marker = "dagu: scale camnoc_axi_src"
+if marker not in text:
+    old = """	return (!strcmp(clock->name, vfe_name) ||
+		!strcmp(clock->name, vfe_lite_name) ||
+		!strcmp(clock->name, "vfe_lite") ||
+		!strcmp(clock->name, "camnoc_axi") ||
+		!strcmp(clock->name, "camnoc_rt_axi"));
+"""
+    new = """	return (!strcmp(clock->name, vfe_name) ||
+		!strcmp(clock->name, vfe_lite_name) ||
+		!strcmp(clock->name, "vfe_lite") ||
+		!strcmp(clock->name, "camnoc_axi") ||
+		!strcmp(clock->name, "camnoc_axi_src") || /* dagu: scale camnoc_axi_src */
+		!strcmp(clock->name, "camnoc_rt_axi"));
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vfe_match_clock_names needle missing")
+    text = text.replace(old, new, 1)
+    old = """			ret = clk_set_rate(clock->clk, rate);
+			if (ret < 0) {
+				dev_err(dev, "clk set rate failed: %d\\n", ret);
+				return ret;
+			}
+"""
+    new = """			ret = clk_set_rate(clock->clk, rate);
+			if (ret < 0) {
+				dev_err(dev, "clk set rate failed: %d\\n", ret);
+				return ret;
+			}
+			if (!strcmp(clock->name, "camnoc_axi_src"))
+				dev_info(dev, "dagu camnoc_axi_src min=%llu -> %ld\\n",
+					 min_rate, rate);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vfe clk_set_rate needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# CSIPHY MMIO sits on titan AHB. VFE/TPG work with cpas/ife AHB, but
+# core_ahb stayed at enable_count=0 during STREAMON and both sensors
+# produced 0 frames. Enable it with the PHY clocks.
+path = root / "drivers/media/platform/qcom/camss/camss.c"
+text = path.read_text()
+marker = "dagu: csiphy also enable core_ahb"
+if marker not in text:
+    n = 0
+    for i in range(6):
+        old = f'''		.clock = {{ "csiphy{i}", "csiphy{i}_timer" }},
+		.clock_rate = {{ {{ 400000000 }},
+				{{ 300000000 }} }},
+'''
+        new = f'''		.clock = {{ "csiphy{i}", "csiphy{i}_timer", "core_ahb", "cpas_ahb" }}, /* dagu: csiphy also enable core_ahb */
+		.clock_rate = {{ {{ 400000000 }},
+				{{ 300000000 }},
+				{{ 19200000 }},
+				{{ 19200000 }} }},
+'''
+        if old not in text:
+            raise SystemExit(f"{path}: csiphy{i} clock needle missing")
+        text = text.replace(old, new, 1)
+        n += 1
+    path.write_text(text)
+    print(f"patched {path}: {marker} x{n}")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+marker = "dagu: log csiphy settle"
+if marker not in text:
+    old = '''	settle_cnt = csiphy_settle_cnt_calc(link_freq, csiphy->timer_clk_rate);
+
+	val = CSIPHY_3PH_CMN_CSI_COMMON_CTRL5_CLK_ENABLE;
+'''
+    new = '''	settle_cnt = csiphy_settle_cnt_calc(link_freq, csiphy->timer_clk_rate);
+	/* dagu: log csiphy settle */
+	dev_info(csiphy->camss->dev,
+		 "dagu csiphy%d link=%lldHz timer=%u settle=%u nlanes=%u\\n",
+		 csiphy->id, (long long)link_freq, csiphy->timer_clk_rate,
+		 settle_cnt, c->num_data);
+
+	val = CSIPHY_3PH_CMN_CSI_COMMON_CTRL5_CLK_ENABLE;
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: settle_cnt needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu s5kjn1 frame counter"
+if marker not in text:
+    old = '''	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height);
+	return 0;
+'''
+    new = '''	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height);
+	msleep(80);
+	{
+		u64 fc = 0, mode = 0, lanes = 0;
+
+		/* dagu s5kjn1 frame counter */
+		cci_read(s5kjn1->regmap, CCI_REG8(0x0005), &fc, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE, &mode, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0114), &lanes, NULL);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 fc=0x%llx mode=0x%llx r0114=0x%llx\\n",
+			 fc, mode, lanes);
+	}
+	return 0;
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: s5kjn1 streaming log needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: CamX 4080 C-PHY 0x0115=1"
+if marker not in text:
+    replaced = False
+    for old in (
+        "	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: s5kjn1 4-lane D-PHY 0x0115=0 */\n",
+        "	{ CCI_REG16(0x0114), 0x0301 },\n",
+    ):
+        if old in text:
+            text = text.replace(old, "	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */\n", 1)
+            replaced = True
+            break
+    if not replaced:
+        raise SystemExit(f"{path}: 0x0114 C-PHY needle missing")
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+
+# Mainline lane_regs_sm8250 copies CAF combo-mode 0x?904=0x07.
+# dagu sensors each own a PHY (csiphy1 / csiphy4); CAF non-combo 2PH uses 0x03.
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+marker = "dagu: CSIPHY 2PH non-combo 0x03"
+if marker not in text:
+    n = 0
+    for addr in ("0x0904", "0x0C84", "0x0A04", "0x0B04", "0x0C04"):
+        old = f"\t{{{addr}, 0x07, 0x00, CSIPHY_DEFAULT_PARAMS}},\n"
+        new = f"\t{{{addr}, 0x03, 0x00, CSIPHY_DEFAULT_PARAMS}}, /* dagu: CSIPHY 2PH non-combo 0x03 */\n"
+        if old not in text:
+            raise SystemExit(f"{path}: {addr} 0x07 needle missing")
+        text = text.replace(old, new, 1)
+        n += 1
+    path.write_text(text)
+    print(f"patched {path}: {marker} x{n}")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+marker = "dagu: CSIPHY enable IRQs and dump"
+if marker not in text:
+    old = '''	/* IRQ_MASK registers - disable all interrupts */
+	for (i = 11; i < 22; i++) {
+		writel_relaxed(0, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, i));
+	}
+}
+'''
+    new = '''	/* CAF csiphy_irq_reg_1_2_1: unmask lane IRQs. */
+	for (i = 11; i < 22; i++) {
+		u8 irqv = 0xff;
+
+		if (i == 13)
+			irqv = 0xfb;
+		else if (i == 15)
+			irqv = 0x7f;
+		else if (i == 18)
+			irqv = 0xef;
+		writel_relaxed(irqv, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, i));
+	}
+	{
+		u32 c5, c7, r904, hw;
+
+		c5 = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 5));
+		c7 = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 7));
+		r904 = readl_relaxed(csiphy->base + 0x0904);
+		hw = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
+							  regs->common_status_offset, 12));
+		/* dagu: CSIPHY enable IRQs and dump */
+		dev_info(csiphy->camss->dev,
+			 "dagu csiphy%d mmio c5=0x%x c7=0x%x r0904=0x%x st12=0x%x\\n",
+			 csiphy->id, c5, c7, r904, hw);
+	}
+}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: CSIPHY IRQ disable needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+text = path.read_text()
+marker = "dagu: log CSIPHY ISR"
+if marker not in text:
+    old = '''	for (i = 0; i < 11; i++) {
+		int c = i + 22;
+		u8 val = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
+							  regs->common_status_offset, i));
+
+		writel_relaxed(val, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, c));
+	}
+'''
+    new = '''	for (i = 0; i < 11; i++) {
+		int c = i + 22;
+		u8 val = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
+							  regs->common_status_offset, i));
+
+		if (val)
+			dev_info_ratelimited(csiphy->camss->dev,
+					     "dagu csiphy%d irq[%d]=0x%x\\n",
+					     csiphy->id, i, val); /* dagu: log CSIPHY ISR */
+		writel_relaxed(val, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, c));
+	}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: CSIPHY isr needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Unmask CSI2 RX IRQs so missing/corrupt packets are visible.
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+marker = "dagu: unmask CSI2 RX IRQs"
+if marker not in text:
+    old = '''			__csid_configure_rdi_stream(csid, enable, i);
+			__csid_configure_rx(csid, &csid->phy, i);
+			__csid_ctrl_rdi(csid, enable, i);
+'''
+    new = '''			__csid_configure_rdi_stream(csid, enable, i);
+			__csid_configure_rx(csid, &csid->phy, i);
+			__csid_ctrl_rdi(csid, enable, i);
+			if (enable) {
+				/* dagu: unmask CSI2 RX IRQs */
+				writel_relaxed(0xffffffff,
+					       csid->base + CSID_CSI2_RX_IRQ_MASK);
+				dev_info(csid->camss->dev,
+					 "dagu csid phy=%u lanes=%u assign=0x%x\\n",
+					 csid->phy.csiphy_id, csid->phy.lane_cnt,
+					 csid->phy.lane_assign);
+			}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: csid configure_stream needle missing")
+    text = text.replace(old, new, 1)
+    old = '''	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
+	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
+'''
+    new = '''	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
+	if (val)
+		dev_info_ratelimited(csid->camss->dev,
+				     "dagu csid rx irq=0x%x\\n", val);
+	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: csid rx irq status needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+marker = "dagu: log CSI2 RX CFG0"
+if marker not in text:
+    old = '''				dev_info(csid->camss->dev,
+					 "dagu csid phy=%u lanes=%u assign=0x%x\\n",
+					 csid->phy.csiphy_id, csid->phy.lane_cnt,
+					 csid->phy.lane_assign);
+'''
+    new = '''				dev_info(csid->camss->dev,
+					 "dagu csid phy=%u lanes=%u assign=0x%x cfg0=0x%x\\n",
+					 csid->phy.csiphy_id, csid->phy.lane_cnt,
+					 csid->phy.lane_assign,
+					 readl_relaxed(csid->base + CSID_CSI2_RX_CFG0)); /* dagu: log CSI2 RX CFG0 */
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: csid phy log needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# --- dagu C-PHY (CamX 4080 preview) ---
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy.h"
+text = path.read_text()
+if "struct csiphy_csi2_cfg {\n\tu8 cphy;" not in text:
+    old = """struct csiphy_csi2_cfg {
+	struct csiphy_lanes_cfg lane_cfg;
+};
+"""
+    new = """struct csiphy_csi2_cfg {
+	u8 cphy;
+	struct csiphy_lanes_cfg lane_cfg;
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: csiphy_csi2_cfg needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: cphy field")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid.h"
+text = path.read_text()
+if "\tu8 cphy;\n};" not in text.split("struct csid_phy_config", 1)[-1][:400]:
+    old = """	u32 en_vc;
+	u8 need_vc_update;
+};
+"""
+    new = """	u32 en_vc;
+	u8 need_vc_update;
+	u8 cphy;
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: csid_phy_config needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: cphy field")
+
+path = root / "drivers/media/platform/qcom/camss/camss.c"
+text = path.read_text()
+if "V4L2_MBUS_CSI2_CPHY" not in text:
+    old = """	/*
+	 * Most SoCs support both D-PHY and C-PHY standards, but currently only
+	 * D-PHY is supported in the driver.
+	 */
+	if (vep.bus_type != V4L2_MBUS_CSI2_DPHY) {
+		dev_err(dev, "Unsupported bus type %d\\n", vep.bus_type);
+		return -EINVAL;
+	}
+
+	csd->interface.csiphy_id = vep.base.port;
+"""
+    new = """	if (vep.bus_type != V4L2_MBUS_CSI2_DPHY &&
+	    vep.bus_type != V4L2_MBUS_CSI2_CPHY) {
+		dev_err(dev, "Unsupported bus type %d\\n", vep.bus_type);
+		return -EINVAL;
+	}
+
+	csd->interface.csiphy_id = vep.base.port;
+	csd->interface.csi2.cphy = (vep.bus_type == V4L2_MBUS_CSI2_CPHY);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: C-PHY bus_type needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: accept C-PHY")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid.c"
+text = path.read_text()
+if "csid->phy.cphy =" not in text:
+    old = """		csid->phy.lane_cnt = lane_cfg->num_data;
+		csid->phy.lane_assign = csid_get_lane_assign(lane_cfg);
+"""
+    new = """		csid->phy.lane_cnt = lane_cfg->num_data;
+		csid->phy.lane_assign = csid_get_lane_assign(lane_cfg);
+		csid->phy.cphy = csiphy->cfg.csi2->cphy;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: csid cphy copy needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: copy cphy")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "if (phy->cphy)" not in text:
+    old = """	val |= phy->csiphy_id << CSI2_RX_CFG0_PHY_NUM_SEL;
+	writel_relaxed(val, csid->base + CSID_CSI2_RX_CFG0);
+"""
+    new = """	val |= phy->csiphy_id << CSI2_RX_CFG0_PHY_NUM_SEL;
+	if (phy->cphy)
+		val |= 1 << CSI2_RX_CFG0_PHY_TYPE_SEL;
+	writel_relaxed(val, csid->base + CSID_CSI2_RX_CFG0);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: PHY_TYPE_SEL needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: C-PHY PHY_TYPE_SEL")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if ".hts = 5888" not in text:
+    old = """		.width = 4080,
+		.height = 3060,
+		.hts = 4352,
+		.vts = 4288,
+"""
+    new = """		.width = 4080,
+		.height = 3060,
+		.hts = 5888,
+		.vts = 3164,
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 4080 hts/vts needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: CamX 4080 HTS/VTS")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: default <= VTS-margin" not in text:
+    old = """		.hts = 5888,
+		.vts = 3164,
+		.exposure = 3840,
+"""
+    new = """		.hts = 5888,
+		.vts = 3164,
+		.exposure = 3000, /* dagu: default <= VTS-margin (3164-22) */
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 4080 exposure needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: CamX 4080 exposure default")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: omit 0x0bcc" not in text:
+    old8 = """	{ CCI_REG16(0x0106), 0x0001 },
+	/* 0x0bcc 16-bit NACKs on dagu Qtech JN1 (C-PHY); CamX uses 8-bit. */
+	{ CCI_REG8(0x0bcc), 0x00 }, /* dagu: skip 16-bit 0x0bcc NACK */
+	{ CCI_REG16(0x6028), 0x2400 },
+"""
+    old16 = """	{ CCI_REG16(0x0106), 0x0001 },
+	{ CCI_REG16(0x0bcc), 0x0000 },
+	{ CCI_REG16(0x6028), 0x2400 },
+"""
+    new = """	{ CCI_REG16(0x0106), 0x0001 },
+	/* dagu: omit 0x0bcc — 8/16-bit writes NACK on Qtech JN1 */
+	{ CCI_REG16(0x6028), 0x2400 },
+"""
+    if old8 in text:
+        text = text.replace(old8, new, 1)
+    elif old16 in text:
+        text = text.replace(old16, new, 1)
+    else:
+        raise SystemExit(f"{path}: 0x0bcc init_array needle missing")
+    path.write_text(text)
+    print(f"patched {path}: omit 0x0bcc")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "num_data_lanes != 3 &&" not in text:
+    old = """	if (bus_cfg.bus.mipi_csi2.num_data_lanes != S5KJN1_DATA_LANES) {
+"""
+    new = """	if (bus_cfg.bus.mipi_csi2.num_data_lanes != 3 &&
+	    bus_cfg.bus.mipi_csi2.num_data_lanes != S5KJN1_DATA_LANES) {
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: DATA_LANES check needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: allow 3 C-PHY trios")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: accept C-PHY in check_hwcfg" not in text:
+    old = """		.bus_type = V4L2_MBUS_CSI2_DPHY,
+	};
+	unsigned long freq_bitmap;
+	int ret;
+"""
+    new = """		.bus_type = V4L2_MBUS_UNKNOWN, /* dagu: accept C-PHY in check_hwcfg */
+	};
+	unsigned long freq_bitmap;
+	int ret;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: check_hwcfg bus_type needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: accept C-PHY in check_hwcfg")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: CCI settle after XSHUTDOWN" not in text:
+    old = """	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 0);
+	usleep_range(10 * USEC_PER_MSEC, 15 * USEC_PER_MSEC);
+
+	return 0;
+"""
+    new = """	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 1);
+	usleep_range(1000, 2000);
+	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 0);
+	msleep(20); /* dagu: CCI settle after XSHUTDOWN */
+
+	return 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: reset deassert needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: XSHUTDOWN pulse")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu s5kjn1 0x6028 retry" not in text:
+    old = """	/* Page pointer */
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+
+	/* Set version */
+"""
+    new = """	/* Page pointer. First CCI access often NACKs; retry. */
+	{
+		int i;
+
+		for (i = 0; i < 10; i++) {
+			ret = 0;
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+			if (!ret)
+				break;
+			dev_info(s5kjn1->dev, "dagu s5kjn1 0x6028 retry %d: %d\\n",
+				 i, ret);
+			msleep(10);
+		}
+		if (ret)
+			goto error;
+	}
+
+	/* Set version */
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 0x6028 page pointer needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: 0x6028 retry")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: skip 0x6010/0x6226 SW reset" not in text:
+    raise SystemExit(f"{path}: skip 0x6010/0x6226 SW reset missing")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+if "lane_regs_sm8250_cphy" not in text or "cphy=%u" not in text:
+    raise SystemExit(f"{path}: C-PHY 3PH table / lanes_enable missing (CamX 4080)")
+if "if (phy->cphy)" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
+    raise SystemExit("camss-csid-gen2.c: C-PHY PHY_TYPE_SEL missing")
 PY

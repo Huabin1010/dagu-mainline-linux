@@ -323,7 +323,7 @@ static int l81a_prepare(struct drm_panel *panel)
 		goto err_enn;
 	}
 
-	/* CAF dispparam-pen-120hz: E2=0x00. Pixel clock alone does not DFPS. */
+	/* CAF / HyperOS default: E2=0x00 120 Hz. Pixel clock alone does not DFPS. */
 	ret = l81a_set_fps(ctx, 120);
 	if (ret)
 		dev_warn(dev, "L81A 120 Hz E2 failed: %d\n", ret);
@@ -511,7 +511,10 @@ static int l81a_get_modes(struct drm_panel *panel,
 {
 	struct drm_display_mode *mode;
 
-	/* Only 120 Hz: GNOME picked the same 1600x2560 60 Hz name otherwise. */
+	/*
+	 * HyperOS defaultPeak is 120 Hz; 60 Hz is DFPS only. Forcing a 60 Hz
+	 * DRM mode (halved pixel clock + E2=0x10) made dual-DSI flicker.
+	 */
 	mode = drm_mode_duplicate(connector->dev, &l81a_mode_120);
 	if (!mode)
 		return -ENOMEM;

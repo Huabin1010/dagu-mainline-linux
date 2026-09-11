@@ -53,13 +53,26 @@ cat >/etc/gdm3/custom.conf <<'EOF'
 [daemon]
 AutomaticLoginEnable=true
 AutomaticLogin=dagu
+DefaultSession=ubuntu.desktop
 WaylandEnable=true
 EOF
 
+# Stale /tmp/.X*-lock makes XWayland fail 50 times and GDM give up the display.
+mkdir -p /etc/systemd/system/gdm.service.d
+cat >/etc/systemd/system/gdm.service.d/dagu-kms.conf <<'EOF'
+[Service]
+Environment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1
+Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
+ExecStartPre=/bin/sh -c "rm -f /tmp/.X*-lock; mkdir -p /tmp/.X11-unix; find /tmp/.X11-unix -mindepth 1 -delete || true"
+EOF
+
+# GPU: never force llvmpipe here. GDM's systemd --user reads environment.d,
+# and LIBGL_ALWAYS_SOFTWARE=1 + mutter GBM on card0 SIGSEGVs on the first swap.
 mkdir -p /etc/environment.d
-cat >/etc/environment.d/dagu-swrend.conf <<'EOF'
-GSK_RENDERER=cairo
-LIBGL_ALWAYS_SOFTWARE=1
+rm -f /etc/environment.d/dagu-swrend.conf
+cat >/etc/environment.d/dagu-mutter.conf <<'EOF'
+MUTTER_DEBUG_DISABLE_HW_CURSORS=1
+MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
 EOF
 
 mkdir -p /home/dagu/.config/autostart
@@ -83,11 +96,47 @@ screen-keyboard-enabled=true
 
 [org/gnome/desktop/interface]
 toolkit-accessibility=true
+color-scheme='default'
+
+[org/gnome/desktop/background]
+picture-uri='file:///usr/share/backgrounds/warty-final-ubuntu.png'
+picture-uri-dark='file:///usr/share/backgrounds/ubuntu-wallpaper-d.png'
+primary-color='#2c001e'
+picture-options='zoom'
 EOF
 dconf update 2>/dev/null || true
 
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config || true
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config || true
+
+# glycin+bwrap --seccomp exits 1 on this kernel, so GNOME never loads
+# wallpapers/icons and the panel stays solid blue.
+if [ -x /usr/bin/bwrap ] && [ ! -x /usr/bin/bwrap.real ]; then
+	dpkg-divert --local --rename --divert /usr/bin/bwrap.real --add /usr/bin/bwrap || true
+fi
+if [ -x /usr/bin/bwrap.real ]; then
+	cat >/usr/bin/bwrap <<'EOF'
+#!/bin/bash
+i=1
+for a in "$@"; do
+	case "$a" in
+	/usr/libexec/glycin-loaders/*)
+		exec "${@:i}"
+		;;
+	esac
+	i=$((i + 1))
+done
+args=()
+skip=0
+for a in "$@"; do
+	if [ "$skip" = 1 ]; then skip=0; continue; fi
+	if [ "$a" = "--seccomp" ]; then skip=1; continue; fi
+	args+=("$a")
+done
+exec /usr/bin/bwrap.real "${args[@]}"
+EOF
+	chmod 755 /usr/bin/bwrap
+fi
 
 systemctl set-default graphical.target || true
 systemctl enable gdm3.service || true

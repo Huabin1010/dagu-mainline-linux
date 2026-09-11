@@ -8,6 +8,18 @@
 # instead, which makes of_icc_get() hand back NULL and the driver skip it.
 CONFIG_USB_DWC3=y
 CONFIG_USB_DWC3_QCOM=y
+# Dual-role: default peripheral (g_serial). echo host to usb_role for OTG.
+CONFIG_USB_DWC3_DUAL_ROLE=y
+CONFIG_USB_ROLE_SWITCH=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_XHCI_PLATFORM=y
+CONFIG_USB_STORAGE=y
+CONFIG_USB_UAS=y
+CONFIG_USB_HID=y
+CONFIG_HID=y
+CONFIG_HID_GENERIC=y
+CONFIG_HID_SUPPORT=y
+CONFIG_INPUT_MOUSEDEV=y
 # DWC3 needs a real IOMMU domain for its TRB/event buffers; see the
 # apps_smmu comment in sm8250-xiaomi-dagu.dts.
 CONFIG_ARM_SMMU=y

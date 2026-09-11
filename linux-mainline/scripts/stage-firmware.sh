@@ -77,6 +77,11 @@ if [[ "$WIFI_STAGED" -eq 0 ]]; then
 
 	find "$EXTRACT" -type f \( -name '*cs35l41*' -o -name 'TL-cs35l41*' -o -name 'TR-cs35l41*' \
 		-o -name 'BL-cs35l41*' -o -name 'BR-cs35l41*' \) -exec cp -f {} "$LIB/cirrus/" \; 2>/dev/null || true
+	# Stock Android live dump: wmfw deltas + per-amp prot/cali bins.
+	if [[ -d "$REPO/dumps/dagu-android-live/firmware/fw2" ]]; then
+		cp -f "$REPO/dumps/dagu-android-live/firmware/fw2/"* "$LIB/cirrus/" 2>/dev/null || true
+		echo "  cirrus <- dumps/dagu-android-live/firmware/fw2"
+	fi
 
 	copy_one "$DEST/wlan_mac.bin" -path '*/persist/wlan/wlan_mac.bin' || true
 fi

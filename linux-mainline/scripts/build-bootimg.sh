@@ -36,7 +36,7 @@ MAGISKBOOT="${MAGISKBOOT:-$ROOT/../tools/downloads/dagu-android/magisk-patch/mag
 # mappings") and the default FAULT policy aborts MDP's scanout of
 # cont_splash_region — panel black, backlight still on. Belt to the
 # ARM_SMMU_DISABLE_BYPASS_BY_DEFAULT=n suspenders in dagu-usb.fragment.
-CMDLINE_EXTRA="${CMDLINE_EXTRA:-clk_ignore_unused pd_ignore_unused regulator_ignore_unused cpuidle.off=1 arm-smmu.disable_bypass=0 fw_devlink=off fw_devlink.sync_state=disabled kpti=off console=ttyGS0,115200 console=tty0 fbcon=font:TER16x32 ignore_loglevel loglevel=8}"
+CMDLINE_EXTRA="${CMDLINE_EXTRA:-clk_ignore_unused pd_ignore_unused regulator_ignore_unused cpuidle.off=1 arm-smmu.disable_bypass=0 fw_devlink=off fw_devlink.sync_state=disabled kpti=off msm.dpu_use_virtual_planes=1 console=ttyGS0,115200 console=tty0 fbcon=font:TER16x32 ignore_loglevel loglevel=8}"
 
 [[ -x "$MAGISKBOOT" ]] || { echo "missing magiskboot: $MAGISKBOOT" >&2; exit 1; }
 [[ -f "$STOCK_BOOT" && -f "$STOCK_VBOOT" ]] || { echo "missing stock images in $DUMP" >&2; exit 1; }

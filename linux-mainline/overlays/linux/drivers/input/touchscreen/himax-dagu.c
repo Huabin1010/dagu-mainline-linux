@@ -17,6 +17,7 @@
 #include <linux/delay.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
+#include <linux/input/touchscreen.h>
 #include <linux/interrupt.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
@@ -83,9 +84,11 @@ static irqreturn_t himax_irq(int irq, void *data)
 	if (n == 0xff)
 		n = 0;
 	n &= 0x0f;
+	if (n > HIMAX_MAX_FINGERS)
+		n = HIMAX_MAX_FINGERS;
 
 	if (n)
-		dev_dbg_ratelimited(&ts->spi->dev,
+		dev_info_ratelimited(&ts->spi->dev,
 				     "event30 n=%u raw=%u,%u xy=%u,%u\n", n,
 				     (buf[0] << 8) | buf[1],
 				     (buf[2] << 8) | buf[3],
@@ -94,22 +97,24 @@ static irqreturn_t himax_irq(int irq, void *data)
 				     ((buf[2] << 8) | buf[3]) /
 					     HIMAX_TOUCHSCREEN_RATIO);
 
+	/*
+	 * CAF packs the first n contacts into slots 0..n-1. Unused slots
+	 * are 0,0 which is a valid coordinate — do not treat that as down.
+	 */
 	for (i = 0; i < HIMAX_MAX_FINGERS; i++) {
-		u16 x = (buf[i * 4] << 8) | buf[i * 4 + 1];
-		u16 y = (buf[i * 4 + 2] << 8) | buf[i * 4 + 3];
-		bool down = n &&
-			    x <= (ts->max_x + 1) * HIMAX_TOUCHSCREEN_RATIO - 1 &&
-			    y <= (ts->max_y + 1) * HIMAX_TOUCHSCREEN_RATIO - 1;
+		u16 raw_x = (buf[i * 4] << 8) | buf[i * 4 + 1];
+		u16 raw_y = (buf[i * 4 + 2] << 8) | buf[i * 4 + 3];
+		u16 x = raw_x / HIMAX_TOUCHSCREEN_RATIO;
+		u16 y = raw_y / HIMAX_TOUCHSCREEN_RATIO;
+		bool down = i < n && raw_x != 0xffff && raw_y != 0xffff &&
+			    x <= ts->max_x && y <= ts->max_y;
 
 		input_mt_slot(ts->input, i);
 		input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, down);
 		if (!down)
 			continue;
-		input_report_abs(ts->input, ABS_MT_POSITION_X,
-				 x / HIMAX_TOUCHSCREEN_RATIO);
-		input_report_abs(ts->input, ABS_MT_POSITION_Y,
-				 y / HIMAX_TOUCHSCREEN_RATIO);
-		n--;
+		input_report_abs(ts->input, ABS_MT_POSITION_X, x);
+		input_report_abs(ts->input, ABS_MT_POSITION_Y, y);
 	}
 	input_mt_sync_frame(ts->input);
 	input_sync(ts->input);
@@ -159,9 +164,11 @@ static int himax_probe(struct spi_device *spi)
 	input->phys = "himax/spi";
 	input_set_abs_params(input, ABS_MT_POSITION_X, 0, ts->max_x, 0, 0);
 	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, ts->max_y, 0, 0);
-	ret = input_mt_init_slots(input, HIMAX_MAX_FINGERS, INPUT_MT_DIRECT);
+	ret = input_mt_init_slots(input, HIMAX_MAX_FINGERS,
+				  INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
 	if (ret)
 		return ret;
+	touchscreen_parse_properties(input, true, NULL);
 
 	irq = spi->irq;
 	if (irq <= 0)

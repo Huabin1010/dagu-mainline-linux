@@ -559,6 +559,33 @@ if "dev_pm_opp_of_remove_table(cpu_dev)" not in text:
             raise SystemExit(f"{path}: cpufreq Invalid opp table block not found")
         path.write_text(text.replace(lut_old, lut_new, 1))
         print(f"patched {path}: EPSS LUT on OPP EPROBE_DEFER")
+# Never parse DT CPU OPPs: they have no voltages, and even after deleting
+# interconnects of_add_table would set icc_scaling_enabled and then
+# adjust_voltage() against LUT frequencies that do not match DT opp-hz.
+text = path.read_text()
+skip_marker = "dagu: skip DT CPU OPP table"
+if skip_marker not in text:
+    add_old = """\tret = dev_pm_opp_of_add_table(cpu_dev);
+\tif (!ret) {
+"""
+    if add_old not in text:
+        raise SystemExit(f"{path}: of_add_table block not found for skip")
+    start = text.find(add_old)
+    # Cut through the matching if/else that ends at icc_scaling_enabled = false;
+    # followed by the LUT walk.
+    end_token = "\tfor (i = 0; i < LUT_MAX_ENTRIES; i++) {"
+    end = text.find(end_token, start)
+    if end < 0:
+        raise SystemExit(f"{path}: LUT walk not found after of_add_table")
+    add_new = """\t/* dagu: skip DT CPU OPP table — LUT supplies freq/volt, no ICC */
+\t(void)opp;
+\t(void)rate;
+\tpolicy->fast_switch_possible = true;
+\ticc_scaling_enabled = false;
+
+"""
+    path.write_text(text[:start] + add_new + text[end:])
+    print(f"patched {path}: {skip_marker}")
 PY
 
 python3 - "$KERNEL_SRC/drivers/tty/serial/qcom_geni_serial.c" <<'PY'

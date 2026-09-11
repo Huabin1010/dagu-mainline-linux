@@ -63,6 +63,10 @@ CONFIG_ARM_PSCI_CPUIDLE=y
 # GPU + OSM: without these GNOME is llvmpipe at boot freq and feels 60 Hz.
 CONFIG_SM_GPUCC_8250=y
 CONFIG_ARM_QCOM_CPUFREQ_HW=y
+# bringup.fragment turns TSENS off; bring it back for hotspot / stress-ng.
+CONFIG_QCOM_TSENS=y
+CONFIG_THERMAL=y
+CONFIG_THERMAL_OF=y
 
 # QCA6390 Wi-Fi (pcie0 / ath11k). PHY was =m and ramdisk never loaded it.
 CONFIG_PCI=y

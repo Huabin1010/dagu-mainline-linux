@@ -350,6 +350,21 @@
 	status = "okay";
 };
 
+/*
+ * CPU interconnects pull gem_noc/epss_l3. INTERCONNECT_QCOM_SM8250 is off
+ * (BCM voter hangs this QHEE), and of_icc_get() then EPROBE_DEFER inside
+ * _allocate_opp_table(), so even LUT-only dev_pm_opp_add() cannot create a
+ * table. Drop the paths; EPSS still programs frequency in the HW LUT.
+ */
+&cpu0 { /delete-property/ interconnects; };
+&cpu1 { /delete-property/ interconnects; };
+&cpu2 { /delete-property/ interconnects; };
+&cpu3 { /delete-property/ interconnects; };
+&cpu4 { /delete-property/ interconnects; };
+&cpu5 { /delete-property/ interconnects; };
+&cpu6 { /delete-property/ interconnects; };
+&cpu7 { /delete-property/ interconnects; };
+
 &gpu_zap_shader {
 	firmware-name = "qcom/sm8250/xiaomi/dagu/a650_zap.mbn";
 };

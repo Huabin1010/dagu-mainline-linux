@@ -35,7 +35,7 @@
 - Himax 走 `spi-gpio`（CAF gpio8–11 + IRQ39），不要绑 GPIO100（面板 `tp-reset`）
 - **禁止**把 `vreg_l3a_0p9` 改成 1.104V（CX 轨，会硬复位回兔子）
 - 控制台：`python3 linux-mainline/scripts/dagu-console.py`（`/dev/ttyACM0`）
-- **适配，不妥协**：花屏这类 compositor/GPU 布局问题，改会话级 Mesa / 内核扫出（Freedreno 共享缓冲必须 LINEAR，见 `libdagu-linear-mod.so`），**不要**在每个应用里关 GPU 栅格 / 2D / zero-copy。应用侧只关 Ozone 在 Wayland 上不能映射的 Vulkan。
+- **适配，不妥协**：Chromium 组件花屏是 **linux-dmabuf 合同撒谎**（ANGLE 按 EGL 全量 modifier 选出 UBWC，mutter `SEND_KMS_MODIFIERS=0` 只广告 LINEAR，客户端仍标 LINEAR）。底层修合成器：`SEND=1` 广告真实 QCOM modifier、`USE_KMS_MODIFIERS=0` 保持主 fb 线性、`disable-direct-scanout` 避免客户端 UBWC 直接上 DPU；**禁止**给 gnome-shell 设 `FD_MESA_DEBUG=notile`（会把 UBWC 当线性导入）。不要关 GPU 栅格 / 2D / zero-copy。应用侧只关 Ozone 在 Wayland 上不能映射的 Vulkan。
 
 ---
 
@@ -51,15 +51,16 @@
 | CPU 调频 + 温度 | **已通** | EPSS LUT，stress-ng 8/8 |
 | 触控 Himax | **已通** | `spi-gpio`，不要 GENI SPI |
 | Wi‑Fi QCA6390 | **已通** | ath11k，iperf 约 600–665 Mbps |
-| 扬声器 CS35L41 | **软件已通** | 四颗 Main AMP On，`speaker-test` 完整 3 轮；听感待口头确认 |
+| 扬声器 CS35L41 | **软件已通** | 硬件 TDM 已通；桌面曾走 Dummy/8ch Pro 无声。已加 UCM HiFi + mixer 开机路由；听感待口头确认 |
 | 麦克风 | **已通** | `/tmp/mic.wav` 非空（约 192 KB / 2s） |
 | 后摄 s5kjn1 | **部分** | probe + C-PHY 寄存器对，STREAMON CCI NACK，0 帧 |
 | 前摄 imx596 | **部分** | chip id 读到，开流，0 帧 |
 | CAMSS VFE/SMMU | **已通** | CSID TPG 出过完整 1 帧（约 15.6 MB） |
 | 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6；`hci0` `F0:6C:5D:71:3A:2A` Powered: yes。BLE 鼠标走 HOG，需要 `CONFIG_UHID` + `CONFIG_BT_LE` |
-| USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / Type-C / PS5169 未在活 DT 接上 |
+| USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
 | 双电芯电量 | **DT 已写** | 双 BQ27Z561 + `xiaomi-dual-fg`，脚本可查 `power_supply` |
-| 充电泵 / 无线充 | **DT 已写** | BQ25970 ×2、P9418，未做完整充放电验收 |
+| 充电（SMB5） | **DT+驱动已写** | PM8150B `@1000` overlay；GPIO74 拉低放行 VBUS。未刷核验收 |
+| 充电泵 / 无线充 | **DT 已写** | BQ25970 ×2 只做 PPS 快充，P9418 探测；5 V 不靠泵 |
 | 霍尔 / 音量键 | **DT 已写** | gpio-keys；未专项验收 |
 | 马达 | **DT 已写** | PMI632 LRA；未专项验收 |
 | 闪光灯 | **DT 已写** | pm8150l flash；脚本可点 torch |
@@ -97,7 +98,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 分辨率：1600×2560 扫描（竖屏 framebuffer）
 - 压测脚本：`linux-mainline/scripts/dagu-display-stress.sh`、`linux-mainline/scripts/dagu-refresh-test.py`
 - 滑动窗口花屏 / GNOME 断触：fb0 Himax 测试丝滑。GNOME 主 fb 曾是 **XR30 10bpc**（L81A DSC 是 8bpc），再加 `CLUTTER_PAINT` 全屏重绘会拖死输入。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 `format=XR24` `modifier=0x0`；用户态去掉 `CLUTTER_PAINT`、`GSK_RENDERER=ngl`、关掉 onboard / linger（`linux-mainline/scripts/rootfs-desktop-setup.sh`）
-- Chrome / Electron 花屏：Freedreno GBM **即使 LINEAR 排第一也选 QCOM_COMPRESSED**，Ozone 却按 mutter 的 LINEAR 反馈贴 Wayland。会话级 `linux-mainline/scripts/dagu-linear-mod.c`（`LD_PRELOAD`）强制共享缓冲 LINEAR；GPU 栅格保持打开。Ozone 在 Wayland 上不能映射 Vulkan，所以走 GLES。OSK：禁止 `GTK_IM_MODULE=ibus`；Chrome 不发 `show_input_panel`，扩展 `linux-mainline/scripts/dagu-osk-focus@dagu/` 在输入焦点时打开系统键盘。
+- Chrome / Electron 组件花屏：Ozone 把 `LINEAR + QCOM_COMPRESSED + QCOM_TILED3 + INVALID` 交给 `gbm_bo_create_with_modifiers`，但 `zwp_linux_buffer_params_v1.add` **永远标 modifier 0,0**。客户端 `linux-mainline/scripts/dagu-linear-mod.c`（`/usr/local/lib/libdagu-linear-mod.so`）把隐式/窗口 GBM 做成真 `GBM_BO_USE_LINEAR`，像素与 LINEAR 标签一致。**不要**关 GPU 栅格。a6xx `BLIT_EVENT_STORE` 仍会把这些缓冲写成 macrotile。Chrome 与 Mineradio 用 `LD_LIBRARY_PATH=/usr/local/lib/dagu-mesa` 加载补丁版 `libgallium`（`linux-mainline/patches/mesa-26.0.8-linear-cbuf-sysmem.patch`）：没有真实 depth/stencil 测试的 color RT 走 sysmem（Electron/Skia 1–3 draw LINEAR 也算）；带 depth 的 Three.js 继续 GMEM。禁止 `CP_BLIT` r2d 在 BIN_RESOLVE 里 store LINEAR（整窗花屏）。禁止 interpose ANGLE 的 `eglCreateImageKHR`。禁止把 `.so` / dagu-mesa preload 进 gnome-shell。合成器保持 `SEND_KMS_MODIFIERS=1`、`USE_KMS_MODIFIERS=0`、`disable-direct-scanout`。实机：Chrome `file:///tmp/dagu-points-glass.html` 与 Mineradio 首页玻璃均干净，无 CCU hangcheck。
 
 ### GPU（Adreno 650）
 
@@ -159,6 +160,12 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 播放：ADSP Q6 + `TERT_TDM_RX_0`，2ch S24_LE 48 kHz，CAF `TDM_MAX_SLOTS=4`
 - DAPM：四颗 `TL/TR/BL/BR Main AMP: On`；`speaker-test -l 3` 完整 3 轮 440 Hz
 - overlay：`linux-mainline/scripts/apply-overlays.sh` 里 TDM `bit_width` 保持 16/24（slot_width=32）；强行 32 会让 AFE `0x100ef` 返回 `ADSP_EBADPARAM`
+- **桌面无声根因（2026-09-12）**：WirePlumber ACP 认不出 Q6 mixer，卡停在 Profile=Off / Dummy Output；临时 `pro-audio` 会把 `hw:0,0` 开成 **8ch**，而 AFE 仍是 2ch。Chrome 看起来在播，喇叭仍可能无声。
+- **修复**：ALSA UCM2 HiFi（`PlaybackChannels 2`）+ 开机打开 `TERT_TDM_RX_0 Audio Mixer MultiMedia1`。文件：
+  - `linux-mainline/alsa/ucm2/conf.d/sm8250/Xiaomi-dagu-CS35L41-WCD9385.conf`
+  - `linux-mainline/alsa/ucm2/Xiaomi-dagu/HiFi.conf`
+  - `linux-mainline/scripts/dagu-speaker-route.sh`
+  - `linux-mainline/alsa/50-dagu-speaker.conf`（装到 `/etc/wireplumber/wireplumber.conf.d/`）
 - **听感**：软件路径已通，用户尚未口头确认听到
 
 `&adsp` okay，固件 `qcom/sm8250/xiaomi/dagu/adsp.mbn`。需要 `CONFIG_QRTR_SMD=y`（不要 =m），否则 PDR/APR 起不来。
@@ -217,13 +224,14 @@ PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对�
 | 外设 | 硬件 | 说明 |
 |------|------|------|
 | 双电芯 | BQ27Z561 ×2 + `xiaomi,dual-fuel-gauge` | overlay `linux-mainline/overlays/linux/drivers/power/supply/xiaomi-dual-fg.c`；设计 5000 mAh ×2 |
-| 充电泵 | BQ25970 ×2 | `bq2597x-dagu.c`，i2c-gpio |
+| 充电（SMB5） | PM8150B `@1000` | overlay `linux-mainline/overlays/linux/drivers/power/supply/pm8150b-charger-dagu.c`；关 charger wdog、清 USBIN suspend、APSD 设 ICL。GPIO74 低电平放行 VBUS |
+| 充电泵 | BQ25970 ×2 | `bq2597x-dagu.c`，i2c-gpio；67W PPS，不是 5 V 主路径 |
 | 无线充探测 | P9418 | `p9418-dagu.c` |
 | 霍尔 | GPIO110 lid、GPIO121 tablet | `SW_LID` / `SW_TABLET_MODE`；folio 磁铁拉低 121，空闲应为平板。活 DT 用 `GPIO_ACTIVE_HIGH`。未刷新核前由 `linux-mainline/scripts/dagu-tablet-mode.py` 注入 |
 | 音量上 | pm8150 gpio6（elish-common） | |
 | 马达 | PM8150B `@c000` LRA | 主线 `qcom,pmi632-vib` |
 | 闪光灯 | pm8150l `@d300` | `echo 64 > /sys/class/leds/white:flash/brightness` |
-| USB OTG | `dr_mode=otg`，默认 peripheral | 切 host 会掉 g_serial，只能走 Wi‑Fi SSH；`usb_1_qmpphy` / `pm8150b_typec` **disabled**（等 Type-C 曾导致没有 UDC） |
+| USB OTG | `dr_mode=otg`，默认 peripheral | 切 host 会掉 g_serial，只能走 Wi‑Fi SSH；`usb_1_qmpphy` **disabled**。`pm8150b_typec` **okay**（充电 / PD），USB 图仍切断 |
 | USB3 / DP redriver | PS5169 overlay | 活 DT 未挂节点；`i2c17` 仍 disabled |
 | 磁吸键盘 MCU | nanosic overlay | 活 DT 未挂；QUP SE2 I2C 不能开（与 uart2 冲突且 GENI 会挂 QHEE） |
 
@@ -238,7 +246,7 @@ PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对�
 | 给 `&qupv3_id_0` 加 `firmware-name` / 写 wrapper CSR | 会打回兔子；uart6 只把 stock `qupv3fw.elf` 写进 SE6 IRAM |
 | `CONFIG_INTERCONNECT_QCOM_SM8250` | BCM `rpmh_write_batch` 超时，拖死 USB/MDSS/CPU OPP |
 | `&usb_1_qmpphy` | P0 只要 HS gadget；SS 未训 |
-| `&pm8150b_typec` | 等 Type-C 曾让 DWC3 停在 otg、无 UDC |
+| Type-C → DWC3 graph | 等 TCPM 曾让 DWC3 停在 otg、无 UDC；节点本身已 okay 做充电 |
 | `&venus` / `&cdsp` | 避免缺固件 stall |
 | `&slpi` | 未验签名固件前不开 |
 | GENI 触控 / 给 `&qupv3_id_0` 加 `firmware-name` | 与 SPI 同一挂点 |
@@ -251,8 +259,8 @@ PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对�
 
 1. **后摄出 ≥1 帧**：对齐 CamX 的 `0x6028` page `0x2400` 写入时机（或先在 `0x4000` 写完再切页）；不要退回瞎猜的 D-PHY PLL
 2. **前摄出 ≥1 帧**：按 CamX imx596 bin 对齐 PLL / lane（读回像 2-lane）
-3. **扬声器听感**：再跑 `linux-mainline/scripts/dagu-av-test.sh`，确认 440 Hz 能听见
-4. 双电芯 SoC / 充电电流专项读 `power_supply`
+3. **扬声器听感**：桌面应出现 Speakers sink（不是 Dummy）。Chrome 播音乐；也可 `linux-mainline/scripts/dagu-av-test.sh` 听 440 Hz
+4. **充电验收**：插 5 V 砖后 `pm8150b-charger` `status=Charging`，`bms` `current_now` 为负（充电）；PD 砖看 TCPM log。67W 泵以后再接
 5. OTG host：Wi‑Fi SSH 下切 role，插 U 盘 / HID
 6. 霍尔、马达、torch 用 `dagu-periph-test.sh` 点一次
 7. 蓝牙音频（A2DP / 耳机）专项听感；控制器本身已通

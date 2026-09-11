@@ -6,8 +6,9 @@
  * board-id, RAM, and turn off everything that is not needed to reach
  * PID1 and register a HS UDC.
  *
- * USB: force gadget (no Type-C role-switch). ABL already trained the
- * PHY; waiting on pm8150b_typec left DWC3 in otg with no UDC.
+ * USB gadget stays independent of Type-C (graph cut at the end) so DWC3
+ * still comes up as peripheral. Type-C is on for CC Rd / PD sink; the
+ * PM8150B SMB5 overlay charges from VBUS. ABL already trained the HS PHY.
  * Full board tree: sm8250-xiaomi-dagu-full.dts.
  */
 
@@ -539,6 +540,18 @@
 		output-low;
 	};
 
+	/*
+	 * CAF vbus_disable GPIO74: high = cut USB VBUS into SMB5.
+	 * Hold low so 5 V / PD input can reach the charger.
+	 */
+	vbus_path_enable: vbus-path-enable-state {
+		pins = "gpio74";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+		output-low;
+	};
+
 	hall_pins: hall-default-state {
 		pins = "gpio110", "gpio121";
 		function = "gpio";
@@ -678,8 +691,14 @@
 	status = "disabled";
 };
 
+/*
+ * Type-C TCPM presents Rd and does PD. Do NOT reconnect the USB graph —
+ * waiting on pm8150b_typec previously left DWC3 in otg with no UDC.
+ * DWC3 stays peripheral via role-switch-default-mode below.
+ */
 &pm8150b_typec {
-	status = "disabled";
+	vdd-pdphy-supply = <&vreg_l2a_3p1>;
+	status = "okay";
 };
 
 /*
@@ -701,6 +720,27 @@
 	regulator-min-microamp = <500000>;
 	regulator-max-microamp = <3000000>;
 	status = "okay";
+};
+
+/*
+ * CAF qcom,qpnp-smb5 @ SID 2. Mainline qcom_smbx is SMB2 (25 mA ICL /
+ * 7.5 mV float) — wrong for PM8150B. Overlay uses 50 mA / 10 mV.
+ */
+&{/soc@0/spmi@c440000/pmic@2} {
+	charger@1000 {
+		compatible = "qcom,pm8150b-charger-dagu";
+		reg = <0x1000>;
+		interrupts = <0x2 0x13 0x4 IRQ_TYPE_EDGE_BOTH>,
+			     <0x2 0x12 0x2 IRQ_TYPE_EDGE_BOTH>,
+			     <0x2 0x16 0x1 IRQ_TYPE_EDGE_RISING>,
+			     <0x2 0x13 0x6 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "usb-plugin", "bat-ov", "wdog-bark",
+				  "usbin-icl-change";
+		pinctrl-names = "default";
+		pinctrl-0 = <&vbus_path_enable>;
+		monitored-battery = <&battery_l>;
+		status = "okay";
+	};
 };
 
 /* P0 bisect: off until PID1 proven — I2C wait can block probe queue. */
@@ -1296,11 +1336,15 @@
 &battery_l {
 	charge-full-design-microamp-hours = <5000000>;
 	energy-full-design-microwatt-hours = <19350000>;
+	voltage-min-design-microvolt = <3400000>;
+	voltage-max-design-microvolt = <4450000>;
 };
 
 &battery_r {
 	charge-full-design-microamp-hours = <5000000>;
 	energy-full-design-microwatt-hours = <19350000>;
+	voltage-min-design-microvolt = <3400000>;
+	voltage-max-design-microvolt = <4450000>;
 };
 
 /* Dump qcom,qpnp-flash-led-v2 @d300: flash_0 / torch_0 (channel 0). */
@@ -1372,7 +1416,8 @@
 
 /*
  * Must be last: elish-common ends with &usb_1_dwc3_hs_out → pm8150b_hs_in.
- * With pm8150b_typec disabled, cut both ends of the graph (and SS to qmpphy).
+ * Type-C is okay for charging, but keep the USB graph cut so DWC3 does
+ * not wait on TCPM for a UDC (P0 hang). HS gadget stays peripheral.
  */
 &usb_1_dwc3_hs_out {
 	/delete-property/ remote-endpoint;

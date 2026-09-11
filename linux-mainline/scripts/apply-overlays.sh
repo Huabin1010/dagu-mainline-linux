@@ -23,6 +23,7 @@ install_src drivers/input/touchscreen/himax-dagu.c
 install_src drivers/usb/misc/ps5169-dagu.c
 install_src drivers/input/keyboard/nanosic-dagu.c
 install_src drivers/power/supply/bq2597x-dagu.c
+install_src drivers/power/supply/pm8150b-charger-dagu.c
 install_src drivers/power/supply/p9418-dagu.c
 install_src drivers/power/supply/xiaomi-dual-fg.c
 install_src drivers/watchdog/qcom-wdt-early-dagu.c
@@ -55,6 +56,10 @@ append_once "$KERNEL_SRC/drivers/input/keyboard/Makefile" \
 append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
 	'bq2597x-dagu.o' \
 	'obj-$(CONFIG_CHARGER_BQ2597X_DAGU) += bq2597x-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
+	'pm8150b-charger-dagu.o' \
+	'obj-$(CONFIG_CHARGER_PM8150B_DAGU) += pm8150b-charger-dagu.o'
 
 append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
 	'p9418-dagu.o' \
@@ -148,6 +153,13 @@ insert_kconfig(
 	help
 	  Dual BQ25970 / SC8551 switched-cap pumps for 67W PPS on dagu.
 
+config CHARGER_PM8150B_DAGU
+	tristate "PM8150B SMB5 charger (Xiaomi dagu)"
+	depends on MFD_SPMI_PMIC
+	help
+	  PM8150B buck charger for 5 V / 9 V input on dagu. Does not
+	  copy CAF qpnp-smb5 or touch Type-C registers.
+
 config CHARGER_P9418_DAGU
 	tristate "IDT P9418 wireless charger (Xiaomi dagu)"
 	depends on I2C
@@ -160,6 +172,19 @@ config BATTERY_XIAOMI_DUAL_FG
 	depends on POWER_SUPPLY
 	help
 	  CAF xiaomi,dual-FuelGauge: one bms from master+slave BQ27Z561.
+
+""",
+)
+
+insert_kconfig(
+    root / "drivers/power/supply/Kconfig",
+    "config CHARGER_P9418_DAGU",
+    """config CHARGER_PM8150B_DAGU
+	tristate "PM8150B SMB5 charger (Xiaomi dagu)"
+	depends on MFD_SPMI_PMIC
+	help
+	  PM8150B buck charger for 5 V / 9 V input on dagu. Does not
+	  copy CAF qpnp-smb5 or touch Type-C registers.
 
 """,
 )

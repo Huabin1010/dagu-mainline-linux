@@ -40,7 +40,13 @@ grep -A6 -E "hall_key|gpio-keys" /proc/bus/input/devices || true
 echo ===haptic===
 dmesg | grep -iE "vib|haptic|pmi632" | tail -8
 echo ===i2c-fg===
-dmesg | grep -iE "bq27|bq259|p9418|i2c-gpio|dual-fg|xiaomi-dual" | tail -25
+dmesg | grep -iE "bq27|bq259|p9418|i2c-gpio|dual-fg|xiaomi-dual|smb5|pm8150b-charger|typec" | tail -40
+echo ===charger===
+for f in online status usb_type input_current_limit constant_charge_current constant_charge_voltage; do
+  printf "pm8150b-charger %s=%s\n" "$f" "$(cat /sys/class/power_supply/pm8150b-charger/$f 2>/dev/null || echo -)"
+done
+ls /sys/class/typec 2>/dev/null || echo "no typec class"
+
 echo ===iio-sensors===
 ls /sys/bus/iio/devices 2>/dev/null || echo none
 echo ===slpi===

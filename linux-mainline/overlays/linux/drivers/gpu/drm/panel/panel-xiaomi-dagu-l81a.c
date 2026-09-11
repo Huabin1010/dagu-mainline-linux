@@ -168,30 +168,42 @@ static int l81a_tx_table(struct dagu_l81a *ctx, const struct l81a_cmd *cmds,
 	return 0;
 }
 
-static void l81a_bl_force(struct backlight_device *bl, int brightness)
-{
-	if (!bl || IS_ERR(bl))
-		return;
-	bl->props.power = BACKLIGHT_POWER_ON;
-	bl->props.state &= ~(BL_CORE_FBBLANK | BL_CORE_SUSPENDED);
-	bl->props.brightness = brightness;
-	backlight_update_status(bl);
-}
-
-static void l81a_bl_set(struct dagu_l81a *ctx, int brightness)
+static void l81a_hwen_on(struct dagu_l81a *ctx)
 {
 	/*
-	 * Dual KTZ share HWEN GPIO 139. Drive it from the panel so blinks
-	 * work even if the KTZ I2C devices never registered.
+	 * Dual KTZ share GPIO 139. I2C is off on this QHEE, so ABL's
+	 * programming is the only brightness source. Dropping HWEN
+	 * resets the chips and the panel stays black until the next
+	 * ABL boot. Keep it high for the whole session.
 	 */
-	if (ctx->hwen_gpio) {
-		gpiod_set_value_cansleep(ctx->hwen_gpio, brightness > 0);
-		if (brightness > 0)
-			usleep_range(2000, 3000);
-	}
-	l81a_bl_force(ctx->panel.backlight, brightness);
-	l81a_bl_force(ctx->backlight_aux, brightness);
+	if (ctx->hwen_gpio)
+		gpiod_set_value_cansleep(ctx->hwen_gpio, 1);
 }
+
+static int l81a_bl_dcs(struct dagu_l81a *ctx, int brightness)
+{
+	/*
+	 * Video-mode cmd DMA for DCS 0x51 always hits -ETIMEDOUT (~200 ms
+	 * per dual-DSI host). Userspace writing l81a-wled then stalling
+	 * the DRM atomic thread: power key "blinks" and the panel stays
+	 * dark. KTZ brightness is ABL+HWEN only; do not poke 0x51 here.
+	 */
+	(void)ctx;
+	(void)brightness;
+	return 0;
+}
+
+static int l81a_backlight_update(struct backlight_device *bl)
+{
+	struct dagu_l81a *ctx = bl_get_data(bl);
+
+	l81a_bl_dcs(ctx, backlight_get_brightness(bl));
+	return 0;
+}
+
+static const struct backlight_ops l81a_backlight_ops = {
+	.update_status = l81a_backlight_update,
+};
 
 static void l81a_reset(struct dagu_l81a *ctx)
 {
@@ -280,11 +292,6 @@ static void l81a_disable_one(struct regulator *reg)
 	if (reg)
 		regulator_disable(reg);
 }
-
-static const struct l81a_cmd l81a_off_cmds[] = {
-	L81A_CMD(0, 0x28),
-	L81A_CMD(70, 0x10),
-};
 
 static int l81a_prepare(struct drm_panel *panel)
 {
@@ -387,91 +394,40 @@ static int l81a_set_fps(struct dagu_l81a *ctx, unsigned int fps)
 	return l81a_tx_table(ctx, l81a_fps_120, ARRAY_SIZE(l81a_fps_120));
 }
 
-static void l81a_bl_blink(struct dagu_l81a *ctx, int times)
-{
-	int i;
-
-	/*
-	 * HWEN (GPIO 139) drops the WLED even when KTZ is still in ABL
-	 * I2C×PWM. Short edges: ktz overlay uses 1µs ramp.
-	 */
-	/* Start from off so ABL leftover brightness dips once for sure. */
-	l81a_bl_set(ctx, 0);
-	msleep(800);
-	for (i = 0; i < times; i++) {
-		l81a_bl_set(ctx, 1500);
-		msleep(400);
-		l81a_bl_set(ctx, 0);
-		msleep(400);
-	}
-	l81a_bl_set(ctx, 1500);
-}
-
-static int l81a_hs_display_on(struct dagu_l81a *ctx)
-{
-	unsigned long flags0 = ctx->dsi[0]->mode_flags;
-	unsigned long flags1 = ctx->dsi[1]->mode_flags;
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = NULL };
-
-	/* CAF qcom,mdss-dsi-displayon-command is HS 0x29 after video. */
-	ctx->dsi[0]->mode_flags &= ~MIPI_DSI_MODE_LPM;
-	ctx->dsi[1]->mode_flags &= ~MIPI_DSI_MODE_LPM;
-	mipi_dsi_dual_dcs_write_seq_multi(&dsi_ctx, ctx->dsi[0], ctx->dsi[1],
-					  0x29);
-	mipi_dsi_msleep(&dsi_ctx, 20);
-	ctx->dsi[0]->mode_flags = flags0;
-	ctx->dsi[1]->mode_flags = flags1;
-	return dsi_ctx.accum_err;
-}
-
 static int l81a_enable(struct drm_panel *panel)
 {
 	struct dagu_l81a *ctx = to_dagu_l81a(panel);
-	int blinks;
 
-	/*
-	 * No UART: encode DCS 0x0A (CAF ESD expects 0x9D) as BL blinks.
-	 * Blink BEFORE HS 0x29 — video-mode DMA can stall that write.
-	 * 1 = read failed before video (commands may not reach Himax)
-	 * 2 = read ok, display-on bit clear
-	 * 3 = display-on (if still black, video/DSC)
+	/* First prepare() already sent 0x11/0x29. Do not replay 0x51/0x29
+	 * on every Mutter DPMS — those DMA waits are ~400 ms and lose
+	 * the video link.
 	 */
-	if (ctx->power_mode_rc < 0)
-		blinks = 1;
-	else if (!(ctx->power_mode & 0x04))
-		blinks = 2;
-	else
-		blinks = 3;
-
-	// #region agent log
-	pr_emerg("{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"C\",\"location\":\"panel-xiaomi-dagu-l81a.c:l81a_enable\",\"message\":\"enable-blinks\",\"data\":{\"blinks\":%d,\"pwr_rc\":%d,\"pwr\":%u},\"timestamp\":%lu}\n",
-		 blinks, ctx->power_mode_rc, ctx->power_mode,
-		 (unsigned long)jiffies);
-	// #endregion
-	l81a_bl_blink(ctx, blinks);
-	l81a_hs_display_on(ctx);
+	l81a_hwen_on(ctx);
 	return 0;
 }
 
 static int l81a_disable(struct drm_panel *panel)
 {
-	struct dagu_l81a *ctx = to_dagu_l81a(panel);
-
-	l81a_tx_table(ctx, l81a_off_cmds, ARRAY_SIZE(l81a_off_cmds));
+	/*
+	 * Leave the Himax programmed. DCS 0x28/0x10 and 0x51=0 both
+	 * ETIMEDOUT on this video-mode link; a later unblank cannot
+	 * replay B9 init (-EINVAL/-ETIMEDOUT) so the tablet stays dark.
+	 * Userspace dims with l81a-wled if it must.
+	 */
+	(void)panel;
 	return 0;
 }
 
 static int l81a_unprepare(struct drm_panel *panel)
 {
-	struct dagu_l81a *ctx = to_dagu_l81a(panel);
-
-	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-	if (ctx->tp_reset_gpio)
-		gpiod_set_value_cansleep(ctx->tp_reset_gpio, 0);
-	l81a_disable_one(ctx->enn);
-	l81a_disable_one(ctx->enp);
-	l81a_disable_one(ctx->vddio);
-	ctx->prepared = false;
+	/*
+	 * ABL + the first prepare() are the only working init. Mutter
+	 * DPMS / a modeset will call this, then prepare() again. Reset
+	 * + dropping ENP/ENN/VDDIO kills PWM into the KTZ, and B9
+	 * cannot be replayed. Keep supplies and ctx->prepared so the
+	 * next prepare() is a no-op and video resumes with the PHY.
+	 */
+	(void)panel;
 	return 0;
 }
 
@@ -571,11 +527,6 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 	};
 	int ret, i;
 
-	// #region agent log
-	pr_emerg("{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"D\",\"location\":\"panel-xiaomi-dagu-l81a.c:l81a_probe\",\"message\":\"probe-enter\",\"data\":{},\"timestamp\":%lu}\n",
-		 (unsigned long)jiffies);
-	// #endregion
-
 	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
@@ -602,11 +553,12 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 		return dev_err_probe(dev, PTR_ERR(ctx->tp_reset_gpio),
 				     "tp-reset GPIO\n");
 
-	/* HWEN is owned by gpio-leds (heartbeat) for this bring-up. */
+	/* Dual KTZ HWEN (TLMM 139). ABL leaves it high; keep it high so
+	 * attach/enable is not racing a forced-off WLED.
+	 */
 	ctx->hwen_gpio = devm_gpiod_get_optional(dev, "hwen", GPIOD_OUT_HIGH);
 	if (IS_ERR(ctx->hwen_gpio)) {
-		dev_warn(dev, "hwen GPIO %ld (leds may own it)\n",
-			 PTR_ERR(ctx->hwen_gpio));
+		dev_warn(dev, "hwen GPIO %ld\n", PTR_ERR(ctx->hwen_gpio));
 		ctx->hwen_gpio = NULL;
 	}
 
@@ -615,13 +567,8 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 		return dev_err_probe(dev, -ENODEV, "no secondary DSI node\n");
 	dsi1_host = of_find_mipi_dsi_host_by_node(dsi1_node);
 	of_node_put(dsi1_node);
-	if (!dsi1_host) {
-		// #region agent log
-		pr_emerg("{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"D\",\"location\":\"panel-xiaomi-dagu-l81a.c:l81a_probe\",\"message\":\"no-dsi1-host\",\"data\":{},\"timestamp\":%lu}\n",
-			 (unsigned long)jiffies);
-		// #endregion
+	if (!dsi1_host)
 		return dev_err_probe(dev, -EPROBE_DEFER, "secondary DSI host\n");
-	}
 
 	ctx->dsi[1] = devm_mipi_dsi_device_register_full(dev, dsi1_host, &info);
 	if (IS_ERR(ctx->dsi[1]))
@@ -657,6 +604,23 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 			ctx->backlight_aux = NULL;
 	}
 
+	if (!ctx->panel.backlight && ctx->hwen_gpio) {
+		const struct backlight_properties props = {
+			.type = BACKLIGHT_RAW,
+			.max_brightness = 2047,
+			.brightness = 1500,
+			.power = BACKLIGHT_POWER_ON,
+		};
+
+		ctx->panel.backlight = devm_backlight_device_register(
+			dev, "l81a-wled", dev, ctx, &l81a_backlight_ops, &props);
+		if (IS_ERR(ctx->panel.backlight)) {
+			dev_warn(dev, "l81a-wled register %ld\n",
+				 PTR_ERR(ctx->panel.backlight));
+			ctx->panel.backlight = NULL;
+		}
+	}
+
 	drm_panel_add(&ctx->panel);
 
 	for (i = 0; i < 2; i++) {
@@ -671,13 +635,9 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 			return dev_err_probe(dev, ret, "attach DSI%d\n", i);
 	}
 
-	/* KTZ lights at probe; zero until drm_panel_enable. */
-	l81a_bl_set(ctx, 0);
-	// #region agent log
-	pr_emerg("{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"D\",\"location\":\"panel-xiaomi-dagu-l81a.c:l81a_probe\",\"message\":\"probe-ok\",\"data\":{\"hwen_gpio\":%d,\"aux\":%d},\"timestamp\":%lu}\n",
+	dev_info(dev, "L81A probe hwen=%d aux=%d bl=%d\n",
 		 ctx->hwen_gpio ? 1 : 0, ctx->backlight_aux ? 1 : 0,
-		 (unsigned long)jiffies);
-	// #endregion
+		 ctx->panel.backlight ? 1 : 0);
 	return 0;
 }
 

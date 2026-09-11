@@ -92,10 +92,11 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 面板：L81A dual-DPHY，**不是** elish NT36523 C-PHY
 - 驱动：`linux-mainline/overlays/linux/drivers/gpu/drm/panel/panel-xiaomi-dagu-l81a.c`
 - `prepare()` 发 CAF `E2=0x00`（120Hz）；`get_modes()` 只登记 120Hz，避免 GNOME 选同名 60Hz
-- 背光：双 KTZ8866
+- 背光：双 KTZ8866。ABL 编程后只能靠 GPIO139 HWEN 维持，**整次开机不要拉低 HWEN**。`l81a_disable()`/`l81a_unprepare()`/`l81a_bl_dcs()` 必须空操作：video-mode 上 DCS `0x51` 每次 `-110`（约 400ms），电源键会闪一下再黑。短按只切 Mutter `PowerSaveMode` 0/3（`linux-mainline/scripts/dagu-power-button.py`）。长按关机。禁止 suspend。
 - 分辨率：1600×2560 扫描（竖屏 framebuffer）
 - 压测脚本：`linux-mainline/scripts/dagu-display-stress.sh`、`linux-mainline/scripts/dagu-refresh-test.py`
 - 滑动窗口花屏 / GNOME 断触：fb0 Himax 测试丝滑。GNOME 主 fb 曾是 **XR30 10bpc**（L81A DSC 是 8bpc），再加 `CLUTTER_PAINT` 全屏重绘会拖死输入。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 `format=XR24` `modifier=0x0`；用户态去掉 `CLUTTER_PAINT`、`GSK_RENDERER=ngl`、关掉 onboard / linger（`linux-mainline/scripts/rootfs-desktop-setup.sh`）
+- Chrome 字体花 / 模糊：Freedreno tile+UBWC dma-buf 和 Wayland overlay 把字形图集扫坏；12.4" 1600×2560 在 scale 1 上字过小。包装器 `linux-mainline/scripts/dagu-chrome.sh` 走 GLES 合成 + 软件栅格。GNOME OSK：GTK 必须走 Wayland `text-input-v3`，**禁止** `GTK_IM_MODULE=ibus`。Chrome 会 `enable()` 但源码写明 *Text-input-v3 does not support input panel show/hide yet*，GNOME 50 因此不弹。扩展 `linux-mainline/scripts/dagu-osk-focus@dagu/` 在 `cursor-location-changed` 时打开系统键盘。不要再开 onboard。
 
 ### GPU（Adreno 650）
 
@@ -217,7 +218,7 @@ PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对�
 | 双电芯 | BQ27Z561 ×2 + `xiaomi,dual-fuel-gauge` | overlay `linux-mainline/overlays/linux/drivers/power/supply/xiaomi-dual-fg.c`；设计 5000 mAh ×2 |
 | 充电泵 | BQ25970 ×2 | `bq2597x-dagu.c`，i2c-gpio |
 | 无线充探测 | P9418 | `p9418-dagu.c` |
-| 霍尔 | GPIO110 lid、GPIO121 tablet | `SW_LID` / `SW_TABLET_MODE` |
+| 霍尔 | GPIO110 lid、GPIO121 tablet | `SW_LID` / `SW_TABLET_MODE`；folio 磁铁拉低 121，空闲应为平板。活 DT 用 `GPIO_ACTIVE_HIGH`。未刷新核前由 `linux-mainline/scripts/dagu-tablet-mode.py` 注入 |
 | 音量上 | pm8150 gpio6（elish-common） | |
 | 马达 | PM8150B `@c000` LRA | 主线 `qcom,pmi632-vib` |
 | 闪光灯 | pm8150l `@d300` | `echo 64 > /sys/class/leds/white:flash/brightness` |

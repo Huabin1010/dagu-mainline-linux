@@ -824,10 +824,11 @@
 	enn-supply = <&bl_vddneg_5p5>;
 	reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
 	tp-reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+	/* Dual KTZ HWEN. ABL leaves it high; panel disable must drop it. */
+	hwen-gpios = <&tlmm 139 GPIO_ACTIVE_HIGH>;
 	/*
-	 * backlight stays deleted: ABL already lit the WLED, and a "backlight"
-	 * phandle to the KTZ8866 on the still-disabled i2c9 would make
-	 * drm_panel_of_backlight() EPROBE_DEFER forever.
+	 * KTZ I2C stays off (i2c9 hang). A phandle to the disabled chip
+	 * would make drm_panel_of_backlight() EPROBE_DEFER forever.
 	 */
 	/delete-property/ backlight;
 	/delete-property/ backlight-aux;
@@ -1282,8 +1283,9 @@
 	};
 
 	hall-tablet {
+		/* Folio magnet pulls the line low. Unconnected/high = slate. */
 		label = "hall_key1";
-		gpios = <&tlmm 121 GPIO_ACTIVE_LOW>;
+		gpios = <&tlmm 121 GPIO_ACTIVE_HIGH>;
 		linux,input-type = <EV_SW>;
 		linux,code = <SW_TABLET_MODE>;
 		wakeup-source;

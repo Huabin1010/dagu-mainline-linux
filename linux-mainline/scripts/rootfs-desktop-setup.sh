@@ -58,10 +58,17 @@ WaylandEnable=true
 EOF
 
 # Stale /tmp/.X*-lock makes XWayland fail 50 times and GDM give up the display.
+# fb0 Himax test is smooth; GNOME snow+断触 is compositor:
+#   XR30 10bpc (panel is 8bpc DSC) plus full-stage CLUTTER_PAINT at 120Hz
+#   starves input. Keep linear modifiers; do not disable clipped redraws.
+# Onboard on Wayland eats touch (XInput fallback). GNOME OSK is enough.
 mkdir -p /etc/systemd/system/gdm.service.d
 cat >/etc/systemd/system/gdm.service.d/dagu-kms.conf <<'EOF'
 [Service]
 Environment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1
+Environment=MUTTER_DEBUG_SEND_KMS_MODIFIERS=0
+Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=0
+Environment=GSK_RENDERER=ngl
 Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
 ExecStartPre=/bin/sh -c "rm -f /tmp/.X*-lock; mkdir -p /tmp/.X11-unix; find /tmp/.X11-unix -mindepth 1 -delete || true"
 EOF
@@ -72,17 +79,37 @@ mkdir -p /etc/environment.d
 rm -f /etc/environment.d/dagu-swrend.conf
 cat >/etc/environment.d/dagu-mutter.conf <<'EOF'
 MUTTER_DEBUG_DISABLE_HW_CURSORS=1
+MUTTER_DEBUG_SEND_KMS_MODIFIERS=0
+MUTTER_DEBUG_USE_KMS_MODIFIERS=0
+GSK_RENDERER=ngl
 MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
+EOF
+mkdir -p /etc/systemd/user.conf.d
+cat >/etc/systemd/user.conf.d/dagu-mutter.conf <<'EOF'
+[Manager]
+DefaultEnvironment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1 MUTTER_DEBUG_SEND_KMS_MODIFIERS=0 MUTTER_DEBUG_USE_KMS_MODIFIERS=0 GSK_RENDERER=ngl MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
+EOF
+mkdir -p /usr/share/drirc.d
+cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
+<driconf>
+    <device>
+        <application name="Default">
+            <option name="allow_rgb10_configs" value="false" />
+        </application>
+    </device>
+</driconf>
 EOF
 
 mkdir -p /home/dagu/.config/autostart
-cat >/home/dagu/.config/autostart/onboard.desktop <<'EOF'
+# Onboard on Wayland has no XInput and steals GTK touch; GNOME OSK is enough.
+rm -f /home/dagu/.config/autostart/onboard.desktop
+cat >/home/dagu/.config/autostart/onboard-autostart.desktop <<'EOF'
 [Desktop Entry]
-Type=Application
-Name=Onboard
-Exec=onboard
-X-GNOME-Autostart-enabled=true
+Hidden=true
+X-GNOME-Autostart-enabled=false
 EOF
+# Linger keeps user systemd across GDM restarts, so old CLUTTER_PAINT sticks.
+rm -f /var/lib/systemd/linger/dagu
 chown -R dagu:dagu /home/dagu
 
 mkdir -p /etc/dconf/profile /etc/dconf/db/local.d

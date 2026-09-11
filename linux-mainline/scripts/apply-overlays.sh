@@ -778,7 +778,32 @@ if marker not in text:
         raise SystemExit(f"{path}: try_multirect_parallel body missing")
     text = text.replace(old_para, new_para, 1)
     print(f"patched {path}: {marker}")
+marker = "dagu: skip 10bpc XR30"
+if marker not in text:
+    old10 = "\tDRM_FORMAT_ARGB2101010,\n\tDRM_FORMAT_XRGB2101010,\n"
+    new10 = "\t/* dagu: skip 10bpc XR30 — L81A DSC is 8bpc; mutter XR30 snows. */\n"
+    if old10 not in text:
+        raise SystemExit(f"{path}: 10bpc format needle missing")
+    text = text.replace(old10, new10)
+    print(f"patched {path}: {marker}")
 path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: skip 10bpc XR30"
+if marker not in text:
+    old = "\tDRM_FORMAT_ARGB2101010,\n\tDRM_FORMAT_XRGB2101010,\n"
+    new = "\t/* dagu: skip 10bpc XR30 — L81A DSC is 8bpc; mutter XR30 snows. */\n"
+    if text.count(old) < 1:
+        raise SystemExit(f"{path}: 10bpc format needle missing")
+    text = text.replace(old, new)
+    path.write_text(text)
+    print(f"patched {path}: {marker} ({text.count(marker)} sites)")
 PY
 
 python3 - "$KERNEL_SRC/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c" <<'PY'

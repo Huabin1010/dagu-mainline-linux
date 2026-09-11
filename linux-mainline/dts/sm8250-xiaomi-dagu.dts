@@ -90,14 +90,19 @@
 		himax_ts: touchscreen@0 {
 			compatible = "himax,hx83121-dagu", "himax,hxcommon";
 			reg = <0>;
-			spi-max-frequency = <1000000>;
+			spi-max-frequency = <4000000>;
 			/* CAF probe forces SPI_MODE_3 (CPOL|CPHA), not DT CPHA. */
 			spi-cpol;
 			spi-cpha;
 			pinctrl-names = "default";
 			pinctrl-0 = <&himax_irq_default>;
 			interrupt-parent = <&tlmm>;
-			interrupts = <39 IRQ_TYPE_EDGE_FALLING>;
+			/*
+			 * Idle high, asserted low until the 0x30 read. EDGE+
+			 * ONESHOT drops the next pulse while spi-gpio bitbangs
+			 * (断触). LEVEL_LOW retriggers if the line is still low.
+			 */
+			interrupts = <39 IRQ_TYPE_LEVEL_LOW>;
 			touchscreen-size-x = <1600>;
 			touchscreen-size-y = <2560>;
 			himax,display-coords = <0 1600 0 2560>;
@@ -437,7 +442,8 @@
 
 	/*
 	 * CAF himax,irq-gpio = GPIO 39 (0x2008 = input / pull-up).
-	 * Falling edge; in-cell HX83121 shares the panel, not a second reset.
+	 * Active-low until event 0x30 is read; in-cell HX83121 shares the
+	 * panel, not a second reset.
 	 */
 	himax_irq_default: himax-irq-default-state {
 		pins = "gpio39";

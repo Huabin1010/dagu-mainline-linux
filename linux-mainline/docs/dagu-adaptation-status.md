@@ -95,6 +95,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 背光：双 KTZ8866
 - 分辨率：1600×2560 扫描（竖屏 framebuffer）
 - 压测脚本：`linux-mainline/scripts/dagu-display-stress.sh`、`linux-mainline/scripts/dagu-refresh-test.py`
+- 滑动窗口花屏 / GNOME 断触：fb0 Himax 测试丝滑。GNOME 主 fb 曾是 **XR30 10bpc**（L81A DSC 是 8bpc），再加 `CLUTTER_PAINT` 全屏重绘会拖死输入。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 `format=XR24` `modifier=0x0`；用户态去掉 `CLUTTER_PAINT`、`GSK_RENDERER=ngl`、关掉 onboard / linger（`linux-mainline/scripts/rootfs-desktop-setup.sh`）
 
 ### GPU（Adreno 650）
 
@@ -124,6 +125,8 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - Himax HX83121，`spi-gpio`（gpio8–11 + IRQ39）
 - 驱动：`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`
 - `&spi4` / `&gpi_dma0` disabled；`# CONFIG_SPI_QCOM_GENI is not set`
+- 滑动断触：IRQ 线程里不要 `dev_info`（`ignore_loglevel` 会堵 fbcon/串口）；DT 用 `IRQ_TYPE_LEVEL_LOW`，坏帧（全 0xff）不当抬手
+- OSK 连打字母：LEVEL_LOW + spi-gpio 会在一次按住里读到校验失败 / n=0 毛刺，tracking ID 被拆成多次点击。驱动排空 IRQ、校验和、连续空帧才抬手，80ms 超时兜底（`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`）
 
 ### Wi‑Fi
 

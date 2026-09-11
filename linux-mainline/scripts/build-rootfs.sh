@@ -137,20 +137,11 @@ AutomaticLoginEnable=true
 AutomaticLogin=dagu
 WaylandEnable=true
 EOF
-		# No Adreno yet — cairo + llvmpipe so GNOME can light up on msmdrmfb.
-		mkdir -p "$ROOTFS/etc/environment.d"
-		cat >"$ROOTFS/etc/environment.d/dagu-swrend.conf" <<'EOF'
-GSK_RENDERER=cairo
-LIBGL_ALWAYS_SOFTWARE=1
-EOF
+		# Desktop env lives in rootfs-desktop-setup.sh. Do not force cairo /
+		# llvmpipe (GDM SIGSEGV) or autostart onboard (steals Wayland touch).
+		rm -f "$ROOTFS/etc/environment.d/dagu-swrend.conf"
+		rm -f "$ROOTFS/home/dagu/.config/autostart/onboard.desktop"
 		mkdir -p "$ROOTFS/home/dagu/.config/autostart"
-		cat >"$ROOTFS/home/dagu/.config/autostart/onboard.desktop" <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Onboard
-Exec=onboard
-X-GNOME-Autostart-enabled=true
-EOF
 		chroot "$ROOTFS" chown -R dagu:dagu /home/dagu
 		# Screen keyboard via GNOME a11y if onboard is missing.
 		mkdir -p "$ROOTFS/etc/dconf/db/local.d"

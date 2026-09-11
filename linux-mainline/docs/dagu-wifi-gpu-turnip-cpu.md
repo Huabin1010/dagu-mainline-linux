@@ -76,6 +76,8 @@ conformanceVersion = 1.2.7.1
 
 `vkcube --wsi display` 选中 Turnip。EGL GBM 驱动名 `msm`。
 
+fb0 Himax 测试丝滑，GNOME 花屏+断触是合成器：L81A DSC 8bpc，mutter 却扫 **XR30**；`CLUTTER_PAINT` 全屏 120Hz 重绘会拖死触摸。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 gnome-shell 主 fb 为 **XR24** 线性。用户态 `GSK_RENDERER=ngl`、关掉 onboard / linger、保留线性 modifier（`linux-mainline/scripts/rootfs-desktop-setup.sh`）。
+
 面板：`linux-mainline/overlays/linux/drivers/gpu/drm/panel/panel-xiaomi-dagu-l81a.c` 在 `prepare()` 发 CAF `E2=0x00`（120Hz），`get_modes()` 只登记 120Hz，避免 GNOME 选同名 60Hz。
 
 ## dEQP（Khronos CTS）

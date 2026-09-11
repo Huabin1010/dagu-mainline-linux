@@ -12,6 +12,10 @@
  *   spi->mode = SPI_MODE_3 (DT spi-cpha is overridden in the factory probe)
  *   read  cmd 0x30 via [0xF3, cmd, 0x00] + payload
  *   10 fingers × 4 bytes; HX_TOUCH_INFO_POINT_CNT = 52 for HX_MAX_PT=10.
+ *
+ * LEVEL_LOW + spi-gpio will re-enter while the line is still low. A
+ * checksum-fail / 0xff / n=0 glitch in that stream must not emit a lift
+ * then a new tracking ID — GNOME OSK then types one letter per glitch.
  */
 
 #include <linux/delay.h>
@@ -19,6 +23,7 @@
 #include <linux/input/mt.h>
 #include <linux/input/touchscreen.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -33,15 +38,21 @@
 #define HIMAX_EVENT_CMD		0x30
 /* CAF FIX_HX_TOUCHSCREEN_RATIO: FW reports 8× display coords. */
 #define HIMAX_TOUCHSCREEN_RATIO	8
+#define HIMAX_IRQ_DRAIN		8
+#define HIMAX_LIFT_MS		80
 
 struct himax_dagu {
 	struct spi_device *spi;
 	struct input_dev *input;
 	struct delayed_work irq_work;
+	struct delayed_work lift_work;
 	struct mutex lock;
 	u32 max_x;
 	u32 max_y;
 	u8 xfer[HIMAX_BUS_R_HLEN + HIMAX_EVENT_LEN];
+	u8 empty_streak;
+	bool fingers_down;
+	unsigned long lift_deadline;
 };
 
 static int himax_bus_read(struct himax_dagu *ts, u8 cmd, u8 *buf, u32 len)
@@ -70,54 +81,163 @@ static int himax_bus_read(struct himax_dagu *ts, u8 cmd, u8 *buf, u32 len)
 	return ret;
 }
 
-static irqreturn_t himax_irq(int irq, void *data)
+static bool himax_event_valid(const u8 *buf)
 {
-	struct himax_dagu *ts = data;
-	u8 buf[HIMAX_EVENT_LEN];
-	int ret, i, n;
+	int i;
 
-	ret = himax_bus_read(ts, HIMAX_EVENT_CMD, buf, sizeof(buf));
-	if (ret)
-		return IRQ_HANDLED;
+	for (i = 0; i < HIMAX_EVENT_LEN; i++) {
+		if (buf[i] != 0xff)
+			return true;
+	}
+	return false;
+}
 
-	n = buf[HIMAX_POINT_CNT];
+/* CAF / mainline hx83112b: sum of the 56-byte event must be 0 mod 256. */
+static bool himax_checksum_ok(const u8 *buf)
+{
+	u16 sum = 0;
+	int i;
+
+	for (i = 0; i < HIMAX_EVENT_LEN; i++)
+		sum += buf[i];
+	return (sum & 0xff) == 0;
+}
+
+static bool himax_irq_line_low(int irq)
+{
+	bool level = true;
+
+	if (irq_get_irqchip_state(irq, IRQCHIP_STATE_LINE_LEVEL, &level))
+		return false;
+	return !level;
+}
+
+static int himax_point_count(const u8 *buf)
+{
+	int n = buf[HIMAX_POINT_CNT];
+
 	if (n == 0xff)
-		n = 0;
+		return 0;
 	n &= 0x0f;
 	if (n > HIMAX_MAX_FINGERS)
 		n = HIMAX_MAX_FINGERS;
+	return n;
+}
 
-	if (n)
-		dev_info_ratelimited(&ts->spi->dev,
-				     "event30 n=%u raw=%u,%u xy=%u,%u\n", n,
-				     (buf[0] << 8) | buf[1],
-				     (buf[2] << 8) | buf[3],
-				     ((buf[0] << 8) | buf[1]) /
-					     HIMAX_TOUCHSCREEN_RATIO,
-				     ((buf[2] << 8) | buf[3]) /
-					     HIMAX_TOUCHSCREEN_RATIO);
+static void himax_lift_unlocked(struct himax_dagu *ts)
+{
+	int i;
 
-	/*
-	 * CAF packs the first n contacts into slots 0..n-1. Unused slots
-	 * are 0,0 which is a valid coordinate — do not treat that as down.
-	 */
+	if (!ts->fingers_down)
+		return;
 	for (i = 0; i < HIMAX_MAX_FINGERS; i++) {
+		input_mt_slot(ts->input, i);
+		input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, false);
+	}
+	input_mt_sync_frame(ts->input);
+	input_sync(ts->input);
+	ts->fingers_down = false;
+	ts->empty_streak = 0;
+}
+
+static void himax_lift_workfn(struct work_struct *work)
+{
+	struct himax_dagu *ts = container_of(to_delayed_work(work),
+					     struct himax_dagu, lift_work);
+
+	mutex_lock(&ts->lock);
+	if (ts->fingers_down && time_before(jiffies, ts->lift_deadline)) {
+		unsigned long left = ts->lift_deadline - jiffies;
+
+		mutex_unlock(&ts->lock);
+		mod_delayed_work(system_wq, &ts->lift_work, left);
+		return;
+	}
+	himax_lift_unlocked(ts);
+	mutex_unlock(&ts->lock);
+}
+
+static void himax_report(struct himax_dagu *ts, const u8 *buf)
+{
+	int i, n, active = 0;
+
+	n = himax_point_count(buf);
+
+	mutex_lock(&ts->lock);
+	if (n == 0) {
+		if (ts->fingers_down && ts->empty_streak < 1) {
+			ts->empty_streak++;
+			ts->lift_deadline = jiffies + msecs_to_jiffies(HIMAX_LIFT_MS);
+			mod_delayed_work(system_wq, &ts->lift_work,
+					 msecs_to_jiffies(HIMAX_LIFT_MS));
+			mutex_unlock(&ts->lock);
+			return;
+		}
+		cancel_delayed_work(&ts->lift_work);
+		himax_lift_unlocked(ts);
+		mutex_unlock(&ts->lock);
+		return;
+	}
+
+	ts->empty_streak = 0;
+	for (i = 0; i < HIMAX_MAX_FINGERS && active < n; i++) {
 		u16 raw_x = (buf[i * 4] << 8) | buf[i * 4 + 1];
 		u16 raw_y = (buf[i * 4 + 2] << 8) | buf[i * 4 + 3];
 		u16 x = raw_x / HIMAX_TOUCHSCREEN_RATIO;
 		u16 y = raw_y / HIMAX_TOUCHSCREEN_RATIO;
-		bool down = i < n && raw_x != 0xffff && raw_y != 0xffff &&
-			    x <= ts->max_x && y <= ts->max_y;
+
+		if (raw_x == 0xffff || raw_y == 0xffff)
+			continue;
+		if (x > ts->max_x || y > ts->max_y)
+			continue;
 
 		input_mt_slot(ts->input, i);
-		input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, down);
-		if (!down)
-			continue;
+		input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, true);
 		input_report_abs(ts->input, ABS_MT_POSITION_X, x);
 		input_report_abs(ts->input, ABS_MT_POSITION_Y, y);
+		active++;
 	}
+
 	input_mt_sync_frame(ts->input);
 	input_sync(ts->input);
+	ts->fingers_down = active > 0;
+	if (ts->fingers_down) {
+		ts->lift_deadline = jiffies + msecs_to_jiffies(HIMAX_LIFT_MS);
+		mod_delayed_work(system_wq, &ts->lift_work,
+				 msecs_to_jiffies(HIMAX_LIFT_MS));
+	} else {
+		cancel_delayed_work(&ts->lift_work);
+	}
+	mutex_unlock(&ts->lock);
+}
+
+static irqreturn_t himax_irq(int irq, void *data)
+{
+	struct himax_dagu *ts = data;
+	u8 buf[HIMAX_EVENT_LEN];
+	u8 last[HIMAX_EVENT_LEN];
+	bool have = false;
+	int ret, loops = 0;
+
+	/*
+	 * spi-gpio + ONESHOT already stretches the masked window. Never
+	 * printk on this path (cmdline has ignore_loglevel; console/fbcon
+	 * stalls the thread and the next falling edge is lost → 断触).
+	 * Drain while the line is still low and keep the last checksum-ok
+	 * frame so a mid-burst 0xff/n=0 glitch cannot cycle tracking IDs.
+	 */
+	do {
+		ret = himax_bus_read(ts, HIMAX_EVENT_CMD, buf, sizeof(buf));
+		if (ret)
+			break;
+		if (himax_event_valid(buf) && himax_checksum_ok(buf)) {
+			memcpy(last, buf, sizeof(last));
+			have = true;
+		}
+	} while (++loops < HIMAX_IRQ_DRAIN && himax_irq_line_low(irq));
+
+	if (have)
+		himax_report(ts, last);
 	return IRQ_HANDLED;
 }
 
@@ -143,6 +263,7 @@ static int himax_probe(struct spi_device *spi)
 	ts->spi = spi;
 	mutex_init(&ts->lock);
 	INIT_DELAYED_WORK(&ts->irq_work, himax_enable_irq);
+	INIT_DELAYED_WORK(&ts->lift_work, himax_lift_workfn);
 	/* CAF himax_chip_common_probe: spi->mode = SPI_MODE_3, not DT CPHA. */
 	spi->mode = SPI_MODE_3;
 	spi->bits_per_word = 8;
@@ -179,12 +300,13 @@ static int himax_probe(struct spi_device *spi)
 		return ret;
 
 	/*
-	 * Delay IRQ until USB serial is up. A stuck SPI xfer on a falling
-	 * line held by the in-cell FW must not bite the watchdog first.
+	 * Delay IRQ until USB serial is up. A stuck SPI xfer on a line
+	 * held by the in-cell FW must not bite the watchdog first.
+	 * Trigger type comes from DT (LEVEL_LOW): EDGE+ONESHOT misses
+	 * pulses while spi-gpio is still in the thread.
 	 */
 	ret = devm_request_threaded_irq(&spi->dev, irq, NULL, himax_irq,
-					IRQF_ONESHOT | IRQF_TRIGGER_FALLING |
-					IRQF_NO_AUTOEN,
+					IRQF_ONESHOT | IRQF_NO_AUTOEN,
 					"himax-dagu", ts);
 	if (ret)
 		return ret;
@@ -223,8 +345,10 @@ static void himax_remove(struct spi_device *spi)
 {
 	struct himax_dagu *ts = spi_get_drvdata(spi);
 
-	if (ts)
-		cancel_delayed_work_sync(&ts->irq_work);
+	if (!ts)
+		return;
+	cancel_delayed_work_sync(&ts->irq_work);
+	cancel_delayed_work_sync(&ts->lift_work);
 }
 
 static const struct of_device_id himax_of_match[] = {

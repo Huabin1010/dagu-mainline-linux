@@ -52,7 +52,7 @@ iperf3 对端是主机有线 `192.168.1.157:5201`（`enp11s0` 1000Mb/s）。反�
 
 BDF 继续用 dump `bd_l81a.elf` → `linux-mainline/firmware/dagu/lib/firmware/ath11k/QCA6390/hw2.0/board.bin`，不要 `board-2.bin`。
 
-蓝牙：`uart6` / `hci_qca` 在 proto=INVALID 时**禁止** `geni_load_se_firmware()`，否则这套 QHEE 打回兔子。当前 `hci0` 起不来，有意不硬上。
+蓝牙：`uart6` / `hci_qca` / QCA6390。内核 #158 起 uart6 把 stock `qupv3fw.elf` 只写进 SE6 IRAM（`linux-mainline/dts/sm8250-xiaomi-dagu.dts`），**禁止**给 `&qupv3_id_0` 加 `firmware-name`。`local-bd-address` 按 DT 小端写 `[2a 3a 71 5d 6c f0]`（人读 `F0:6C:5D:71:3A:2A`，与 Wi‑Fi `…:3A:2B` 相邻）。实机 `hci0` 已 `QCA setup on UART is completed`，`bluetoothctl` Powered: yes。固件：`linux-mainline/firmware/dagu/lib/firmware/qcom/sm8250/xiaomi/dagu/qupv3fw.elf`（`dumps/.../qupfw_a.img`）、`qca/htbtfw20.tlv`、`qca/htnv20.bin`。
 
 ## GPU / GMU / Turnip
 
@@ -76,7 +76,7 @@ conformanceVersion = 1.2.7.1
 
 `vkcube --wsi display` 选中 Turnip。EGL GBM 驱动名 `msm`。
 
-fb0 Himax 测试丝滑，GNOME 花屏+断触是合成器：L81A DSC 8bpc，mutter 却扫 **XR30**；`CLUTTER_PAINT` 全屏 120Hz 重绘会拖死触摸。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 gnome-shell 主 fb 为 **XR24** 线性。用户态 `GSK_RENDERER=ngl`、关掉 onboard / linger、保留线性 modifier（`linux-mainline/scripts/rootfs-desktop-setup.sh`）。Chrome 字体花/糊：包装器 `linux-mainline/scripts/dagu-chrome.sh`（`FD_MESA_DEBUG=noubwc,notile`、关 overlay / LCD AA / zero-copy），会话整数 2x。
+fb0 Himax 测试丝滑，GNOME 花屏+断触是合成器：L81A DSC 8bpc，mutter 却扫 **XR30**；`CLUTTER_PAINT` 全屏 120Hz 重绘会拖死触摸。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 gnome-shell 主 fb 为 **XR24** 线性。用户态（Ubuntu 26.04 Mesa 26.0.8）Freedreno FD650。Chromium/Electron 花屏是 **a6xx TILE** 共享缓冲被按 LINEAR 导入：`FD_MESA_DEBUG=sysmem` 只关 binning；要 `noubwc,notile`（`linux-mainline/scripts/rootfs-desktop-setup.sh`），GPU 栅格保持打开。
 
 面板：`linux-mainline/overlays/linux/drivers/gpu/drm/panel/panel-xiaomi-dagu-l81a.c` 在 `prepare()` 发 CAF `E2=0x00`（120Hz），`get_modes()` 只登记 120Hz，避免 GNOME 选同名 60Hz。
 
@@ -138,7 +138,7 @@ stress-ng --cpu 8 --cpu-method all --verify --timeout 45s --metrics-brief --tz
 ## 不要再做
 
 - `DAGU_PRIMARY_ENTRY_PROBE=1`，或在 `head.S` `primary_entry` 插 PSCI `SYSTEM_RESET`
-- `CONFIG_SPI_QCOM_GENI`、给 `&qupv3_id_0` 加 `firmware-name`、proto=INVALID 时 `geni_load_se_firmware()`（SPI 和 UART 同一挂点）
+- `CONFIG_SPI_QCOM_GENI`、给 `&qupv3_id_0` 加 `firmware-name`、往 QUPV3 wrapper CSR 写（uart6 只装 SE RAM）
 - 打开 `CONFIG_INTERCONNECT_QCOM_SM8250` 给 CPU 投票
 - Himax 绑 GPIO100（那是面板 `tp-reset`）
 - 刷 A 槽 / Google `fastboot reboot`

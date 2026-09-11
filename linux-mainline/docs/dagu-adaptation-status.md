@@ -31,10 +31,11 @@
 - 刷写用 `linux-mainline/scripts/fb-usb.py` / `flash-boot.sh flash-b`，不要 Google `fastboot reboot`
 - **禁止** `DAGU_PRIMARY_ENTRY_PROBE=1`，禁止在 `linux-mainline/linux/arch/arm64/kernel/head.S` 的 `primary_entry` 插 PSCI `SYSTEM_RESET`
 - 刷完 `g_serial` `0525:a4a7` 须保持 **>30s**，不能在约 25s 变回兔子 `18d1:d00d`
-- **禁止** `geni_load_se_fw()`、给 `&qupv3_id_0` 加 `firmware-name`、`CONFIG_SPI_QCOM_GENI`、`CONFIG_I2C_QCOM_GENI`、`CONFIG_INTERCONNECT_QCOM_SM8250`
+- **禁止**给 `&qupv3_id_0` 加 `firmware-name`、写 QUPV3 wrapper CSR、`CONFIG_SPI_QCOM_GENI`、`CONFIG_I2C_QCOM_GENI`、`CONFIG_INTERCONNECT_QCOM_SM8250`。uart6 只把 stock `qupv3fw.elf` 写进 SE6 IRAM。
 - Himax 走 `spi-gpio`（CAF gpio8–11 + IRQ39），不要绑 GPIO100（面板 `tp-reset`）
 - **禁止**把 `vreg_l3a_0p9` 改成 1.104V（CX 轨，会硬复位回兔子）
 - 控制台：`python3 linux-mainline/scripts/dagu-console.py`（`/dev/ttyACM0`）
+- **适配，不妥协**：花屏这类 compositor/GPU 布局问题，改会话级 Mesa / 内核扫出（Freedreno 必须 `noubwc,notile` 才是线性 DRAM，对上 mutter XR24），**不要**在每个应用里关 GPU 栅格 / 2D / zero-copy。应用侧只关 Ozone 在 Wayland 上不能映射的 Vulkan。
 
 ---
 
@@ -55,7 +56,7 @@
 | 后摄 s5kjn1 | **部分** | probe + C-PHY 寄存器对，STREAMON CCI NACK，0 帧 |
 | 前摄 imx596 | **部分** | chip id 读到，开流，0 帧 |
 | CAMSS VFE/SMMU | **已通** | CSID TPG 出过完整 1 帧（约 15.6 MB） |
-| 蓝牙 | **有意关闭** | uart6 在 proto=INVALID 时不能 `geni_load_se_firmware()` |
+| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6；`hci0` `F0:6C:5D:71:3A:2A` Powered: yes |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / Type-C / PS5169 未在活 DT 接上 |
 | 双电芯电量 | **DT 已写** | 双 BQ27Z561 + `xiaomi-dual-fg`，脚本可查 `power_supply` |
 | 充电泵 / 无线充 | **DT 已写** | BQ25970 ×2、P9418，未做完整充放电验收 |
@@ -66,7 +67,7 @@
 | IMU / 光线传感器 | **有意关闭** | `&slpi` disabled，不在 AP I2C 上猜 |
 | 视频编解码 Venus | **有意关闭** | 缺/未验 `venus.mbn`，probe 会 stall |
 | CDSP | **有意关闭** | `status = disabled` |
-| 蓝牙音频 / 耳机口 | **未做** | 板子无 3.5mm；BT 未起 |
+| 蓝牙音频 / 耳机口 | **未做** | 板子无 3.5mm；控制器已通，A2DP / 耳机听感未测 |
 | RTC | **未做** | 启动后停在 2026-07-27，apt 前需对时 |
 | Win11 ARM 日常 | **未做** | 仍是调研 / UEFI 移植，不是当前运行目标 |
 
@@ -96,7 +97,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 分辨率：1600×2560 扫描（竖屏 framebuffer）
 - 压测脚本：`linux-mainline/scripts/dagu-display-stress.sh`、`linux-mainline/scripts/dagu-refresh-test.py`
 - 滑动窗口花屏 / GNOME 断触：fb0 Himax 测试丝滑。GNOME 主 fb 曾是 **XR30 10bpc**（L81A DSC 是 8bpc），再加 `CLUTTER_PAINT` 全屏重绘会拖死输入。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 `format=XR24` `modifier=0x0`；用户态去掉 `CLUTTER_PAINT`、`GSK_RENDERER=ngl`、关掉 onboard / linger（`linux-mainline/scripts/rootfs-desktop-setup.sh`）
-- Chrome 字体花 / 模糊：Freedreno tile+UBWC dma-buf 和 Wayland overlay 把字形图集扫坏；12.4" 1600×2560 在 scale 1 上字过小。包装器 `linux-mainline/scripts/dagu-chrome.sh` 走 GLES 合成 + 软件栅格。GNOME OSK：GTK 必须走 Wayland `text-input-v3`，**禁止** `GTK_IM_MODULE=ibus`。Chrome 会 `enable()` 但源码写明 *Text-input-v3 does not support input panel show/hide yet*，GNOME 50 因此不弹。扩展 `linux-mainline/scripts/dagu-osk-focus@dagu/` 在 `cursor-location-changed` 时打开系统键盘。不要再开 onboard。
+- Chrome / Electron 花屏：Freedreno **a6xx TILE**（即使关了 UBWC）被按 **LINEAR** 交给 mutter。`FD_MESA_DEBUG=sysmem` 只关 GMEM binning，不够；会话级 `FD_MESA_DEBUG=noubwc,notile` 才让共享缓冲真正线性。GPU 栅格保持打开。Ozone 在 Wayland 上不能映射 Vulkan，所以 Chrome/Mineradio 走 GLES。OSK：禁止 `GTK_IM_MODULE=ibus`；Chrome 不发 `show_input_panel`，扩展 `linux-mainline/scripts/dagu-osk-focus@dagu/` 在输入焦点时打开系统键盘。
 
 ### GPU（Adreno 650）
 
@@ -234,7 +235,7 @@ PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对�
 |----|------|
 | `CONFIG_SPI_QCOM_GENI` / `&spi4` | `geni_load_se_fw` / `geni_se_init` 写 SE MMIO 挂死这套 QHEE |
 | `CONFIG_I2C_QCOM_GENI` | 同上；喇叭/电量改 i2c-gpio |
-| uart6 上加载 QUPFW | proto=INVALID 时 `geni_load_se_firmware()` 打回兔子；蓝牙 `hci0` 因此不起 |
+| 给 `&qupv3_id_0` 加 `firmware-name` / 写 wrapper CSR | 会打回兔子；uart6 只把 stock `qupv3fw.elf` 写进 SE6 IRAM |
 | `CONFIG_INTERCONNECT_QCOM_SM8250` | BCM `rpmh_write_batch` 超时，拖死 USB/MDSS/CPU OPP |
 | `&usb_1_qmpphy` | P0 只要 HS gadget；SS 未训 |
 | `&pm8150b_typec` | 等 Type-C 曾让 DWC3 停在 otg、无 UDC |
@@ -254,7 +255,7 @@ PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对�
 4. 双电芯 SoC / 充电电流专项读 `power_supply`
 5. OTG host：Wi‑Fi SSH 下切 role，插 U 盘 / HID
 6. 霍尔、马达、torch 用 `dagu-periph-test.sh` 点一次
-7. 蓝牙：需要不触发 QUPFW 的路径（当前有意不做）
+7. 蓝牙音频（A2DP / 耳机）专项听感；控制器本身已通
 8. SLPI：固件签名确认后再开 IMU/ALS
 9. USB3 + DP + PS5169：先保证 HS gadget 不回退
 10. 磁吸键盘：没有安全的 GENI I2C 之前无法走原厂 MCU 总线

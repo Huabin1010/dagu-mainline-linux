@@ -31,7 +31,8 @@ apt-get install -y --no-install-recommends \
 	libinput-bin xserver-xorg-input-libinput \
 	fonts-noto-core fonts-noto-cjk \
 	network-manager onboard \
-	ibus ibus-gtk3 ibus-gtk4 ibus-libpinyin
+	ibus ibus-gtk3 ibus-gtk4 ibus-libpinyin \
+	bluez
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -43,7 +44,7 @@ printf '%s\n' 'LABEL=dagu-linux / ext4 defaults 0 1' >/etc/fstab
 echo "root:$PASS" | chpasswd
 id dagu >/dev/null 2>&1 || useradd -m -s /bin/bash dagu
 echo "dagu:$PASS" | chpasswd
-for g in sudo video render input plugdev; do
+for g in sudo video render input plugdev bluetooth; do
 	getent group "$g" >/dev/null && usermod -aG "$g" dagu || true
 done
 echo 'dagu ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/dagu
@@ -70,6 +71,9 @@ Environment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1
 Environment=MUTTER_DEBUG_SEND_KMS_MODIFIERS=0
 Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=0
 Environment=GSK_RENDERER=ngl
+Environment=TU_DEBUG=noubwc
+Environment=FD_MESA_DEBUG=noubwc,notile
+Environment=MESA_VK_WSI_DEBUG=linear
 Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
 ExecStartPre=/bin/sh -c "rm -f /tmp/.X*-lock; mkdir -p /tmp/.X11-unix; find /tmp/.X11-unix -mindepth 1 -delete || true"
 EOF
@@ -83,12 +87,15 @@ MUTTER_DEBUG_DISABLE_HW_CURSORS=1
 MUTTER_DEBUG_SEND_KMS_MODIFIERS=0
 MUTTER_DEBUG_USE_KMS_MODIFIERS=0
 GSK_RENDERER=ngl
+TU_DEBUG=noubwc
+FD_MESA_DEBUG=noubwc,notile
+MESA_VK_WSI_DEBUG=linear
 MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
 EOF
 mkdir -p /etc/systemd/user.conf.d
 cat >/etc/systemd/user.conf.d/dagu-mutter.conf <<'EOF'
 [Manager]
-DefaultEnvironment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1 MUTTER_DEBUG_SEND_KMS_MODIFIERS=0 MUTTER_DEBUG_USE_KMS_MODIFIERS=0 GSK_RENDERER=ngl MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
+DefaultEnvironment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1 MUTTER_DEBUG_SEND_KMS_MODIFIERS=0 MUTTER_DEBUG_USE_KMS_MODIFIERS=0 GSK_RENDERER=ngl TU_DEBUG=noubwc FD_MESA_DEBUG=noubwc,notile MESA_VK_WSI_DEBUG=linear MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
 EOF
 mkdir -p /usr/share/drirc.d
 cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
@@ -101,18 +108,16 @@ cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
 </driconf>
 EOF
 
-# Chrome: GPU compositing is required for a visible Wayland window.
-# Wayland text-input-v3 (disable GTK IM) so mutter/GNOME OSK see omnibox focus.
-# Software raster only, to limit Freedreno tile/UBWC snow on glyphs.
-CHROME_DISABLE_FEATURES='Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,SkiaGraphite,CanvasOopRasterization,WaylandOverlayDelegation,VaapiVideoDecoder,AcceleratedVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo'
+# Chrome: native Wayland + GLES. Buffer layout is session Mesa (noubwc,notile);
+# do not disable GPU raster here.
+CHROME_DISABLE_FEATURES='Vulkan,DefaultANGLEVulkan,VulkanFromANGLE'
 if [ -x /opt/google/chrome/chrome ]; then
 	cat >/usr/local/bin/dagu-chrome <<'EOF'
 #!/bin/sh
-export TU_DEBUG=noubwc,sysmem
-export FD_MESA_DEBUG=noubwc,sysmem
-export MESA_VK_WSI_DEBUG=linear
-export MESA_EXTENSION_OVERRIDE="-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update;-EGL_EXT_image_dma_buf_import_modifiers"
 export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"
+export TU_DEBUG="${TU_DEBUG:-noubwc}"
+export FD_MESA_DEBUG="${FD_MESA_DEBUG:-noubwc,notile}"
+export MESA_VK_WSI_DEBUG="${MESA_VK_WSI_DEBUG:-linear}"
 exec /opt/google/chrome/chrome \
 	--ozone-platform=wayland \
 	--ozone-platform-hint=wayland \
@@ -123,15 +128,8 @@ exec /opt/google/chrome/chrome \
 	--enable-wayland-ime \
 	--disable-gtk-ime \
 	--wayland-text-input-version=3 \
-	--disable-gpu-rasterization \
-	--disable-accelerated-2d-canvas \
-	--disable-partial-swap \
-	--disable-lcd-text \
-	--disable-font-subpixel-positioning \
-	--disable-gpu-memory-buffer-compositor-resources \
-	--disable-zero-copy \
 	--enable-features=WaylandTextInputV3 \
-	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,SkiaGraphite,CanvasOopRasterization,WaylandOverlayDelegation,VaapiVideoDecoder,AcceleratedVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo \
+	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE \
 	"$@"
 EOF
 	chmod 755 /usr/local/bin/dagu-chrome
@@ -161,18 +159,14 @@ for line in text.splitlines(True):
         continue
     if 'exec -a "$0" "$HERE/chrome"' in line:
         out.append(
-            'export TU_DEBUG=noubwc,sysmem\n'
-            'export FD_MESA_DEBUG=noubwc,sysmem\n'
-            'export MESA_VK_WSI_DEBUG=linear\n'
-            'export MESA_EXTENSION_OVERRIDE="-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update;-EGL_EXT_image_dma_buf_import_modifiers"\n'
             'export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"\n'
+            'export TU_DEBUG="${TU_DEBUG:-noubwc}"\n'
+            'export FD_MESA_DEBUG="${FD_MESA_DEBUG:-noubwc,notile}"\n'
+            'export MESA_VK_WSI_DEBUG="${MESA_VK_WSI_DEBUG:-linear}"\n'
             '# dagu-chrome-gpu\n'
             'exec -a "$0" "$HERE/chrome" --ozone-platform=wayland --ozone-platform-hint=wayland --in-process-gpu'
             ' --use-gl=angle --use-angle=gles --start-maximized --enable-wayland-ime --disable-gtk-ime'
-            ' --wayland-text-input-version=3 --disable-gpu-rasterization'
-            ' --disable-accelerated-2d-canvas --disable-partial-swap --disable-lcd-text'
-            ' --disable-font-subpixel-positioning --disable-gpu-memory-buffer-compositor-resources'
-            f' --disable-zero-copy --enable-features=WaylandTextInputV3 --disable-features={feat} "$@"\n'
+            f' --wayland-text-input-version=3 --enable-features=WaylandTextInputV3 --disable-features={feat} "$@"\n'
         )
         continue
     out.append(line)

@@ -638,10 +638,11 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
-marker = "dagu: UART proto invalid, not loading QUPFW"
+marker = "dagu: load UART QUPFW from this SE"
 if marker in text:
     raise SystemExit(0)
-old = """\tif (proto == GENI_SE_INVALID_PROTO) {
+new = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\t/* dagu: load UART QUPFW from this SE firmware-name, never the wrapper */
 \t\tret = geni_load_se_firmware(&port->se, GENI_SE_UART);
 \t\tif (ret) {
 \t\t\tdev_err(uport->dev, "UART firmware load failed ret: %d\\n", ret);
@@ -649,17 +650,91 @@ old = """\tif (proto == GENI_SE_INVALID_PROTO) {
 \t\t}
 \t} else if (proto != GENI_SE_UART) {
 """
-new = """\tif (proto == GENI_SE_INVALID_PROTO) {
+skip = """\tif (proto == GENI_SE_INVALID_PROTO) {
 \t\t/* dagu: UART proto invalid, not loading QUPFW on this QHEE */
 \t\tdev_err(uport->dev,
 \t\t\t"UART proto invalid, not loading QUPFW on this QHEE\\n");
 \t\treturn -EOPNOTSUPP;
 \t} else if (proto != GENI_SE_UART) {
 """
-if old not in text:
+upstream = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\tret = geni_load_se_firmware(&port->se, GENI_SE_UART);
+\t\tif (ret) {
+\t\t\tdev_err(uport->dev, "UART firmware load failed ret: %d\\n", ret);
+\t\t\treturn ret;
+\t\t}
+\t} else if (proto != GENI_SE_UART) {
+"""
+if skip in text:
+    text = text.replace(skip, new, 1)
+elif upstream in text:
+    text = text.replace(upstream, new, 1)
+else:
     raise SystemExit(f"{path}: UART firmware-load block not found")
-path.write_text(text.replace(old, new, 1))
+path.write_text(text)
 print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/drivers/soc/qcom/qcom-geni-se.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: SE firmware-name before wrapper"
+if marker not in text:
+    old = """\tret = device_property_read_string(se->wrapper->dev, "firmware-name", &fw_name);
+\tif (ret) {
+\t\tdev_err(se->dev, "Failed to read firmware-name property: %d\\n", ret);
+\t\treturn -EINVAL;
+\t}
+"""
+    new = """\t/* dagu: SE firmware-name before wrapper — never put firmware-name on qupv3_id_0 */
+\tret = device_property_read_string(se->dev, "firmware-name", &fw_name);
+\tif (ret)
+\t\tret = device_property_read_string(se->wrapper->dev, "firmware-name", &fw_name);
+\tif (ret) {
+\t\tdev_err(se->dev, "Failed to read firmware-name property: %d\\n", ret);
+\t\treturn -EINVAL;
+\t}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: firmware-name lookup not found")
+    text = text.replace(old, new, 1)
+
+marker2 = "dagu: skip QUPV3 wrapper CSRs while loading SE RAM"
+if marker2 not in text:
+    old = """\t/*
+\t * Disable high-priority interrupts until all currently executing
+\t * low-priority interrupts have been fully handled.
+\t */
+\tgeni_setbits32(se->wrapper->base + QUPV3_COMMON_CFG, FAST_SWITCH_TO_HIGH_DISABLE);
+
+\t/* Set AHB_M_CLK_CGC_ON to indicate hardware controls se-wrapper cgc clock. */
+\tgeni_setbits32(se->wrapper->base + QUPV3_SE_AHB_M_CFG, AHB_M_CLK_CGC_ON);
+
+\t/* Let hardware to control common cgc. */
+\tgeni_setbits32(se->wrapper->base + QUPV3_COMMON_CGC_CTRL, COMMON_CSR_SLV_CLK_CGC_ON);
+"""
+    new = """\t/*
+\t * dagu: skip QUPV3 wrapper CSRs while loading SE RAM.
+\t * Writing QUPV3_COMMON_CFG / AHB_M_CFG on this QHEE bounced to the
+\t * bootloader. ABL already configured the wrapper; only program this SE.
+\t */
+\tif (!of_property_read_bool(se->dev->of_node, "qcom,skip-wrapper-fw-init")) {
+\t\tgeni_setbits32(se->wrapper->base + QUPV3_COMMON_CFG,
+\t\t\t       FAST_SWITCH_TO_HIGH_DISABLE);
+\t\tgeni_setbits32(se->wrapper->base + QUPV3_SE_AHB_M_CFG, AHB_M_CLK_CGC_ON);
+\t\tgeni_setbits32(se->wrapper->base + QUPV3_COMMON_CGC_CTRL,
+\t\t\t       COMMON_CSR_SLV_CLK_CGC_ON);
+\t}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: wrapper CSR block not found")
+    text = text.replace(old, new, 1)
+
+path.write_text(text)
+print(f"patched {path}: geni SE firmware-name + skip wrapper CSRs")
 PY
 
 python3 - "$KERNEL_SRC/drivers/i2c/busses/i2c-qcom-geni.c" <<'PY'

@@ -52,9 +52,8 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 fi
 make O="$KBUILD_OUTPUT" olddefconfig
 
-# Do not embed QUP firmware: geni_load_se_fw() hangs this QHEE, and
-# firmware-name is intentionally absent so probe fails closed (-EINVAL).
-# QUPFW_REL="qcom/sm8250/xiaomi/dagu/qupv3fw.elf"
+# Do not embed QUP firmware and do not put firmware-name on &qupv3_id_0.
+# uart6 loads stock qupv3fw.elf from its own firmware-name (SE RAM only).
 
 cfg="$KBUILD_OUTPUT/.config"
 need_y() {

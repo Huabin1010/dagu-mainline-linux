@@ -1331,9 +1331,20 @@
 &uart6 {
 	/delete-property/ interconnects;
 	/delete-property/ interconnect-names;
+	/*
+	 * Stock qupfw_a.img. Loader reads this SE node, never &qupv3_id_0.
+	 * qcom,skip-wrapper-fw-init avoids QUPV3_COMMON_CFG writes that hang QHEE.
+	 */
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
 	status = "okay";
 	bluetooth {
-		firmware-name = "qca/htbtfw20.tlv";
+		/* Wi-Fi is f0:6c:5d:71:3a:2b; BT uses the adjacent address.
+		 * local-bd-address is little-endian (LSB first). Without this the
+		 * controller stays unconfigured (00:00:00:00:00:00) and GNOME /
+		 * bluetoothctl show no adapter until btmgmt public-addr.
+		 */
+		local-bd-address = [2a 3a 71 5d 6c f0];
 	};
 };
 
@@ -1348,7 +1359,8 @@
 /*
  * GENI QUP0 SE4 stays off: geni_load_se_fw / geni_se_init hang this QHEE.
  * Himax is on the spi-gpio node in / { himax_spi }.
- * Wrapper is on for uart6 (QCA6390 BT, SE6). SERIAL skips QUPFW load.
+ * Wrapper is on for uart6 (QCA6390 BT, SE6). QUPFW loads from uart6's
+ * firmware-name into SE6 only; wrapper CSRs are not written.
  */
 &gpi_dma0 { status = "disabled"; };
 &qupv3_id_0 { status = "okay"; };

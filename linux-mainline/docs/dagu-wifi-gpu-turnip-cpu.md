@@ -54,6 +54,8 @@ BDF 继续用 dump `bd_l81a.elf` → `linux-mainline/firmware/dagu/lib/firmware/
 
 蓝牙：`uart6` / `hci_qca` / QCA6390。内核 #158 起 uart6 把 stock `qupv3fw.elf` 只写进 SE6 IRAM（`linux-mainline/dts/sm8250-xiaomi-dagu.dts`），**禁止**给 `&qupv3_id_0` 加 `firmware-name`。`local-bd-address` 按 DT 小端写 `[2a 3a 71 5d 6c f0]`（人读 `F0:6C:5D:71:3A:2A`，与 Wi‑Fi `…:3A:2B` 相邻）。实机 `hci0` 已 `QCA setup on UART is completed`，`bluetoothctl` Powered: yes。固件：`linux-mainline/firmware/dagu/lib/firmware/qcom/sm8250/xiaomi/dagu/qupv3fw.elf`（`dumps/.../qupfw_a.img`）、`qca/htbtfw20.tlv`、`qca/htnv20.bin`。
 
+BLE 鼠标（如 MCHOSE A7 Pro，UUID `00001812` HID）走 BlueZ HOG：GATT 连上不等于能用。必须 `CONFIG_UHID=y`（`/dev/uhid`）和 `CONFIG_BT_LE=y`，否则 `bluetoothd` 报 `input-hog profile accept failed`，GNOME 显示 Connected，指针不动，鼠标一直闪配对灯。经典 BR/EDR HID 另外需要 `CONFIG_BT_HIDP=y`（不要只编成 `=m` 却不装模块）。
+
 ## GPU / GMU / Turnip
 
 `&gpu` / `&gmu` / `&adreno_smmu` 为 okay。zap：`qcom/sm8250/xiaomi/dagu/a650_zap.mbn`（本机签名，不要 elish）。
@@ -76,7 +78,7 @@ conformanceVersion = 1.2.7.1
 
 `vkcube --wsi display` 选中 Turnip。EGL GBM 驱动名 `msm`。
 
-fb0 Himax 测试丝滑，GNOME 花屏+断触是合成器：L81A DSC 8bpc，mutter 却扫 **XR30**；`CLUTTER_PAINT` 全屏 120Hz 重绘会拖死触摸。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 gnome-shell 主 fb 为 **XR24** 线性。用户态（Ubuntu 26.04 Mesa 26.0.8）Freedreno FD650。Chromium/Electron 花屏是 **a6xx TILE** 共享缓冲被按 LINEAR 导入：`FD_MESA_DEBUG=sysmem` 只关 binning；要 `noubwc,notile`（`linux-mainline/scripts/rootfs-desktop-setup.sh`），GPU 栅格保持打开。
+fb0 Himax 测试丝滑，GNOME 花屏+断触是合成器：L81A DSC 8bpc，mutter 却扫 **XR30**；`CLUTTER_PAINT` 全屏 120Hz 重绘会拖死触摸。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 gnome-shell 主 fb 为 **XR24** 线性。用户态（Ubuntu 26.04 Mesa 26.0.8）Freedreno FD650。Chromium/Electron 花屏是 GBM **优先 UBWC** 却按 LINEAR 交给 mutter：`linux-mainline/scripts/dagu-linear-mod.c` 强制共享 modifier 为 LINEAR，GPU 栅格保持打开。
 
 面板：`linux-mainline/overlays/linux/drivers/gpu/drm/panel/panel-xiaomi-dagu-l81a.c` 在 `prepare()` 发 CAF `E2=0x00`（120Hz），`get_modes()` 只登记 120Hz，避免 GNOME 选同名 60Hz。
 

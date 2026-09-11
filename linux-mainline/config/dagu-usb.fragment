@@ -19,6 +19,9 @@ CONFIG_USB_HID=y
 CONFIG_HID=y
 CONFIG_HID_GENERIC=y
 CONFIG_HID_SUPPORT=y
+CONFIG_HIDRAW=y
+# BlueZ HOG (BLE mice/keyboards) feeds reports through /dev/uhid.
+CONFIG_UHID=y
 CONFIG_INPUT_MOUSEDEV=y
 # DWC3 needs a real IOMMU domain for its TRB/event buffers; see the
 # apps_smmu comment in sm8250-xiaomi-dagu.dts.

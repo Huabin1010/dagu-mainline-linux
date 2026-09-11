@@ -35,7 +35,7 @@
 - Himax 走 `spi-gpio`（CAF gpio8–11 + IRQ39），不要绑 GPIO100（面板 `tp-reset`）
 - **禁止**把 `vreg_l3a_0p9` 改成 1.104V（CX 轨，会硬复位回兔子）
 - 控制台：`python3 linux-mainline/scripts/dagu-console.py`（`/dev/ttyACM0`）
-- **适配，不妥协**：花屏这类 compositor/GPU 布局问题，改会话级 Mesa / 内核扫出（Freedreno 必须 `noubwc,notile` 才是线性 DRAM，对上 mutter XR24），**不要**在每个应用里关 GPU 栅格 / 2D / zero-copy。应用侧只关 Ozone 在 Wayland 上不能映射的 Vulkan。
+- **适配，不妥协**：花屏这类 compositor/GPU 布局问题，改会话级 Mesa / 内核扫出（Freedreno 共享缓冲必须 LINEAR，见 `libdagu-linear-mod.so`），**不要**在每个应用里关 GPU 栅格 / 2D / zero-copy。应用侧只关 Ozone 在 Wayland 上不能映射的 Vulkan。
 
 ---
 
@@ -56,7 +56,7 @@
 | 后摄 s5kjn1 | **部分** | probe + C-PHY 寄存器对，STREAMON CCI NACK，0 帧 |
 | 前摄 imx596 | **部分** | chip id 读到，开流，0 帧 |
 | CAMSS VFE/SMMU | **已通** | CSID TPG 出过完整 1 帧（约 15.6 MB） |
-| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6；`hci0` `F0:6C:5D:71:3A:2A` Powered: yes |
+| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6；`hci0` `F0:6C:5D:71:3A:2A` Powered: yes。BLE 鼠标走 HOG，需要 `CONFIG_UHID` + `CONFIG_BT_LE` |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / Type-C / PS5169 未在活 DT 接上 |
 | 双电芯电量 | **DT 已写** | 双 BQ27Z561 + `xiaomi-dual-fg`，脚本可查 `power_supply` |
 | 充电泵 / 无线充 | **DT 已写** | BQ25970 ×2、P9418，未做完整充放电验收 |
@@ -97,7 +97,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 分辨率：1600×2560 扫描（竖屏 framebuffer）
 - 压测脚本：`linux-mainline/scripts/dagu-display-stress.sh`、`linux-mainline/scripts/dagu-refresh-test.py`
 - 滑动窗口花屏 / GNOME 断触：fb0 Himax 测试丝滑。GNOME 主 fb 曾是 **XR30 10bpc**（L81A DSC 是 8bpc），再加 `CLUTTER_PAINT` 全屏重绘会拖死输入。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 `format=XR24` `modifier=0x0`；用户态去掉 `CLUTTER_PAINT`、`GSK_RENDERER=ngl`、关掉 onboard / linger（`linux-mainline/scripts/rootfs-desktop-setup.sh`）
-- Chrome / Electron 花屏：Freedreno **a6xx TILE**（即使关了 UBWC）被按 **LINEAR** 交给 mutter。`FD_MESA_DEBUG=sysmem` 只关 GMEM binning，不够；会话级 `FD_MESA_DEBUG=noubwc,notile` 才让共享缓冲真正线性。GPU 栅格保持打开。Ozone 在 Wayland 上不能映射 Vulkan，所以 Chrome/Mineradio 走 GLES。OSK：禁止 `GTK_IM_MODULE=ibus`；Chrome 不发 `show_input_panel`，扩展 `linux-mainline/scripts/dagu-osk-focus@dagu/` 在输入焦点时打开系统键盘。
+- Chrome / Electron 花屏：Freedreno GBM **即使 LINEAR 排第一也选 QCOM_COMPRESSED**，Ozone 却按 mutter 的 LINEAR 反馈贴 Wayland。会话级 `linux-mainline/scripts/dagu-linear-mod.c`（`LD_PRELOAD`）强制共享缓冲 LINEAR；GPU 栅格保持打开。Ozone 在 Wayland 上不能映射 Vulkan，所以走 GLES。OSK：禁止 `GTK_IM_MODULE=ibus`；Chrome 不发 `show_input_panel`，扩展 `linux-mainline/scripts/dagu-osk-focus@dagu/` 在输入焦点时打开系统键盘。
 
 ### GPU（Adreno 650）
 

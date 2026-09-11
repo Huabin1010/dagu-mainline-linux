@@ -34,7 +34,7 @@ UEFI 在 **本机 Linux** 编译（edk2-msm 需要 bash + 交叉工具链）。W
 ./tools/build-dagu-uefi.sh       # 产物：artifacts/boot-dagu-latest.img
 ```
 
-主线 Linux（对照 ginkgo）在 [`linux-mainline/`](linux-mainline/README.md)：内核只 `fastboot boot`；Ubuntu 刷 **userdata**，覆盖安卓，不另建分区。
+主线 Linux（对照 ginkgo）在 [`linux-mainline/`](linux-mainline/README.md)：内核刷 B 槽；Ubuntu 刷 **userdata**。外设适配总表：[linux-mainline/docs/dagu-adaptation-status.md](linux-mainline/docs/dagu-adaptation-status.md)。
 
 
 ---

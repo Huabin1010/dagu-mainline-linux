@@ -4,7 +4,7 @@
 
 内核源码和 `out/` **不入库**。blob 用 `./scripts/stage-firmware.sh` 从 `dumps/` 解开。
 
-刷写 / ABL / ramdisk 实验记录（2026-08-30，P0 未通）：[docs/dagu-fastboot-abl-ramdisk.md](docs/dagu-fastboot-abl-ramdisk.md)。ABL 是什么、和 LK / ginkgo 的差别：[docs/abl-vs-lk.md](docs/abl-vs-lk.md)。Wi‑Fi 866 PHY、Adreno/GMU、Turnip dEQP、CPU 调频与 stress-ng（2026-09-11）：[docs/dagu-wifi-gpu-turnip-cpu.md](docs/dagu-wifi-gpu-turnip-cpu.md)。
+刷写 / ABL / ramdisk 实验记录（2026-08-30，P0 未通）：[docs/dagu-fastboot-abl-ramdisk.md](docs/dagu-fastboot-abl-ramdisk.md)。ABL 是什么、和 LK / ginkgo 的差别：[docs/abl-vs-lk.md](docs/abl-vs-lk.md)。**外设适配总表（2026-09-11）**：[docs/dagu-adaptation-status.md](docs/dagu-adaptation-status.md)。Wi‑Fi 866 PHY、Adreno/GMU、Turnip dEQP、CPU 调频与 stress-ng：[docs/dagu-wifi-gpu-turnip-cpu.md](docs/dagu-wifi-gpu-turnip-cpu.md)。
 
 ## 铁律
 
@@ -29,6 +29,8 @@
 | P6 | 双 BQ27Z561 5000 mAh | `power_supply` |
 | P7 | CS35L41 节点 + ADSP 路径 | 能 probe；`speaker-test` 后置 |
 | P8 | 本机 a650 zap + Turnip；Ubuntu 在 userdata | `fastboot flash userdata out/rootfs.ext4` |
+
+上表是早期里程碑。2026-09-11 起以 [docs/dagu-adaptation-status.md](docs/dagu-adaptation-status.md) 为准（P2–P5、P8 已通；P7 软件已通；相机仍部分）。
 
 ## 主机 USB（AMD 这台）
 

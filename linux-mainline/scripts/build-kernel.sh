@@ -65,6 +65,11 @@ need_y CONFIG_ARM64_VA_BITS_39
 need_y CONFIG_QCOM_WDT
 need_y CONFIG_PSTORE_CONSOLE
 need_y CONFIG_DETECT_HUNG_TASK
+grep -qE '^CONFIG_BOOTPARAM_HUNG_TASK_PANIC=[1-9]' "$cfg" && \
+	die "HUNG_TASK_PANIC still on — UFS D-state would panic the desktop"
+if ! grep -q 'dagu: skip UFSHCD_CAP_CLK_SCALING' "$KERNEL_SRC/drivers/ufs/host/ufs-qcom.c"; then
+	die "ufs-qcom.c still has CLK_SCALING — apply-overlays.sh missed the UFS patch"
+fi
 grep -q '^CONFIG_ARM64_VA_BITS_52=y' "$cfg" && die "VA_BITS_52 still on — Kryo 585 has no FEAT_LVA"
 grep -q '^CONFIG_ARM64_VA_BITS_48=y' "$cfg" && die "VA_BITS_48 still on — dump 4.19 is VA_BITS_39 / 3-level"
 grep -q '^CONFIG_KVM=y' "$cfg" && die "KVM still on — dump 4.19 has no hypervisor stub"

@@ -869,6 +869,14 @@
  * elish-common already sets vcc/vccq and status=okay. Drop interconnects so
  * ufshcd's of_icc_get() skips the BCM voter (same QHEE AMC timeout as USB/MDSS).
  * PID1 stays on ramdisk forever without a block device.
+ *
+ * Keep operating-points-v2: ufshcd_init_clocks() needs it to set 300 MHz
+ * and vote rpmhpd nom. Deleting the OPP table left GCC clocks at the
+ * default rate, UFS never enumerated, ramdisk logged
+ * "userdata partition not found".
+ *
+ * Runtime CLK_SCALING stays off (ufs-qcom overlay): periodic devfreq
+ * down_write vs exception_event QUERY_ATTR is the hung_task panic.
  */
 &ufs_mem_hc {
 	/delete-property/ interconnects;
@@ -1073,7 +1081,56 @@
 
 &rxmacro { status = "okay"; };
 &txmacro { status = "okay"; };
-&vamacro { status = "okay"; };
+
+/*
+ * CAF dagu wires three DMIC pairs on LPASS TLMM: dmic01 gpio6/7,
+ * dmic23 gpio8/9, dmic45 gpio12/13 (qcom,cdc-dmic{01,23,45}-gpios).
+ * Only dmic01_active exists in sm8250.dtsi, so add the other two.
+ */
+&lpass_tlmm {
+	dmic23_active: dmic23-active-state {
+		clk-pins {
+			pins = "gpio8";
+			function = "dmic2_clk";
+			drive-strength = <8>;
+			output-high;
+		};
+
+		data-pins {
+			pins = "gpio9";
+			function = "dmic2_data";
+			drive-strength = <8>;
+		};
+	};
+
+	dmic45_active: dmic45-active-state {
+		clk-pins {
+			pins = "gpio12";
+			function = "dmic3_clk";
+			drive-strength = <8>;
+			output-high;
+		};
+
+		data-pins {
+			pins = "gpio13";
+			function = "dmic3_data";
+			drive-strength = <8>;
+		};
+	};
+};
+
+/*
+ * Without dmic-sample-rate the driver falls back to CLK_DIV_2 and the
+ * DMICs stay silent. 9.6 MHz / 600 kHz = div 16, matching both CAF
+ * (qcom,va-dmic-sample-rate) and qrb5165-rb5.
+ */
+&vamacro {
+	pinctrl-names = "default";
+	pinctrl-0 = <&dmic01_active>, <&dmic23_active>, <&dmic45_active>;
+	vdd-micb-supply = <&vreg_s4a_1p8>;
+	qcom,dmic-sample-rate = <600000>;
+	status = "okay";
+};
 
 &swr1 {
 	status = "okay";
@@ -1129,7 +1186,20 @@
 		"TX SWR_ADC0", "ADC1_OUTPUT",
 		"TX SWR_ADC1", "ADC2_OUTPUT",
 		"TX SWR_ADC2", "ADC3_OUTPUT",
-		"TX SWR_ADC3", "ADC4_OUTPUT";
+		"TX SWR_ADC3", "ADC4_OUTPUT",
+		/*
+		 * dagu's built-in mics are the six VA DMICs, not the AMICs
+		 * (those serve the headset). Bias them off vdd-micb as
+		 * qrb5165-rb5 does: routing them to the wcd938x "VA MIC
+		 * BIAS*" widgets instead (as CAF does) hangs userspace
+		 * during boot.
+		 */
+		"VA DMIC0", "vdd-micb",
+		"VA DMIC1", "vdd-micb",
+		"VA DMIC2", "vdd-micb",
+		"VA DMIC3", "vdd-micb",
+		"VA DMIC4", "vdd-micb",
+		"VA DMIC5", "vdd-micb";
 	status = "okay";
 
 	mm1-dai-link {

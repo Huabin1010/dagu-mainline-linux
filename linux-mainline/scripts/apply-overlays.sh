@@ -1903,4 +1903,25 @@ if "lane_regs_sm8250_cphy" not in text or "cphy=%u" not in text:
     raise SystemExit(f"{path}: C-PHY 3PH table / lanes_enable missing (CamX 4080)")
 if "if (phy->cphy)" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
     raise SystemExit("camss-csid-gen2.c: C-PHY PHY_TYPE_SEL missing")
+
+# UFS clk scaling + OPP rpmhpd deadlocks exception_event vs devfreq on this
+# QHEE (no ICC). Keep gating/hibern8; just do not register devfreq.
+path = root / "drivers/ufs/host/ufs-qcom.c"
+text = path.read_text()
+marker = "dagu: skip UFSHCD_CAP_CLK_SCALING"
+if marker not in text:
+    old = """	hba->caps |= UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING;
+	hba->caps |= UFSHCD_CAP_CLK_SCALING | UFSHCD_CAP_WB_WITH_CLK_SCALING;
+	hba->caps |= UFSHCD_CAP_AUTO_BKOPS_SUSPEND;
+"""
+    new = """	hba->caps |= UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING;
+	/* dagu: skip UFSHCD_CAP_CLK_SCALING — OPP rpmhpd + devfreq vs
+	 * exception_event_handler clk_scaling_lock hung_task panic.
+	 */
+	hba->caps |= UFSHCD_CAP_AUTO_BKOPS_SUSPEND;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: UFSHCD_CAP_CLK_SCALING needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
 PY

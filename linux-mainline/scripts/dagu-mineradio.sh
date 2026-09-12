@@ -16,11 +16,8 @@ fi
 if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
 	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
-# LINEAR swapchain / Skia glass / backdrop FB fetch: sysmem.
-# Tiled WebGL FBO: GMEM. Destile is leftover for remaining GMEM LINEAR.
+# LINEAR store and LINEAR+FB_READ can GMEM (UCHE base=cbuf offset).
 # Never FD_MESA_DEBUG=notile (CCU hang). Never into gnome-shell.
-export DAGU_LINEAR_SYSMEM=1
-export DAGU_LINEAR_DESTILE=1
 exec /opt/Mineradio/mineradio \
 	--ozone-platform=wayland \
 	--ozone-platform-hint=wayland \

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Dump a landscape crop of the live KMS fb (1600x2560 + 270°)."""
+"""Dump a landscape crop of the live KMS fb (1600x2560 + 270°).
+
+Only valid when the primary fb is LINEAR (modifier=0). After
+MUTTER_DEBUG_USE_KMS_MODIFIERS=1 the scanout is QCOM_COMPRESSED;
+mmap-as-linear is compression noise, not a screenshot.
+"""
 from __future__ import annotations
 
 import ctypes

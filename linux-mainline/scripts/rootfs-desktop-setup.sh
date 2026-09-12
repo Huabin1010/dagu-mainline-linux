@@ -62,10 +62,9 @@ WaylandEnable=true
 EOF
 
 # Stale /tmp/.X*-lock makes XWayland fail 50 times and GDM give up the display.
-# Chromium component snow: mutter SEND=0 advertised only LINEAR, ANGLE still
-# allocated Adreno TILE/UBWC and tagged the dmabuf LINEAR. Honest KMS
-# modifiers + disable-direct-scanout lets GL import the real layout; primary
-# KMS fb stays XR24 linear (USE=0). Do not set FD_MESA_DEBUG on mutter —
+# Honest KMS modifiers: SEND=1 advertises QCOM_*, USE=1 lets the primary fb
+# be QCOM_COMPRESSED (UBWC). disable-direct-scanout keeps client buffers
+# (Chrome LINEAR) off the DPU. Do not set FD_MESA_DEBUG on mutter —
 # noubwc/notile on the compositor breaks UBWC import.
 # Onboard on Wayland eats touch (XInput fallback). GNOME OSK is enough.
 mkdir -p /etc/systemd/system/gdm.service.d
@@ -73,7 +72,7 @@ cat >/etc/systemd/system/gdm.service.d/dagu-kms.conf <<'EOF'
 [Service]
 Environment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1
 Environment=MUTTER_DEBUG_SEND_KMS_MODIFIERS=1
-Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=0
+Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=1
 Environment=MUTTER_DEBUG_PAINT=disable-direct-scanout
 Environment=GSK_RENDERER=ngl
 Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
@@ -88,7 +87,7 @@ rm -f /etc/environment.d/dagu-swrend.conf
 cat >/etc/environment.d/dagu-mutter.conf <<'EOF'
 MUTTER_DEBUG_DISABLE_HW_CURSORS=1
 MUTTER_DEBUG_SEND_KMS_MODIFIERS=1
-MUTTER_DEBUG_USE_KMS_MODIFIERS=0
+MUTTER_DEBUG_USE_KMS_MODIFIERS=1
 MUTTER_DEBUG_PAINT=disable-direct-scanout
 GSK_RENDERER=ngl
 MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
@@ -96,7 +95,7 @@ EOF
 mkdir -p /etc/systemd/user.conf.d
 cat >/etc/systemd/user.conf.d/dagu-mutter.conf <<'EOF'
 [Manager]
-DefaultEnvironment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1 MUTTER_DEBUG_SEND_KMS_MODIFIERS=1 MUTTER_DEBUG_USE_KMS_MODIFIERS=0 MUTTER_DEBUG_PAINT=disable-direct-scanout GSK_RENDERER=ngl MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
+DefaultEnvironment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1 MUTTER_DEBUG_SEND_KMS_MODIFIERS=1 MUTTER_DEBUG_USE_KMS_MODIFIERS=1 MUTTER_DEBUG_PAINT=disable-direct-scanout GSK_RENDERER=ngl MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
 EOF
 # gnome-shell is org.gnome.Shell@.service under the user manager, which can
 # outlive GDM restarts. Put the compositor contract on that unit so mutter
@@ -106,7 +105,7 @@ cat >/etc/systemd/user/org.gnome.Shell@.service.d/dagu-kms.conf <<'EOF'
 [Service]
 Environment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1
 Environment=MUTTER_DEBUG_SEND_KMS_MODIFIERS=1
-Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=0
+Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=1
 Environment=MUTTER_DEBUG_PAINT=disable-direct-scanout
 Environment=GSK_RENDERER=ngl
 Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
@@ -124,8 +123,8 @@ cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
 EOF
 
 # Chrome: native Wayland + GLES. Ozone tags linux-dmabuf LINEAR; force GBM
-# pixels LINEAR and load dagu-mesa (LINEAR color → sysmem; tiled WebGL GMEM).
-# Destile stays off. linear-mod is Chrome/Mineradio only — not gnome-shell.
+# pixels LINEAR and load dagu-mesa (LINEAR GMEM store/fetch). Destile stays
+# off. linear-mod is Chrome/Mineradio only — not gnome-shell.
 CHROME_DISABLE_FEATURES='Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation'
 if [ -x /opt/google/chrome/chrome ]; then
 	cat >/usr/local/bin/dagu-chrome <<'EOF'
@@ -149,8 +148,6 @@ fi
 if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
 	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
-export DAGU_LINEAR_SYSMEM=1
-export DAGU_LINEAR_DESTILE=1
 if [ ! -e "$lock" ] && [ -f "$profile/Local State" ]; then
 	python3 - "$profile/Local State" <<'PY' 2>/dev/null || true
 import json, sys
@@ -248,8 +245,6 @@ fi
 if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
 	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
-export DAGU_LINEAR_SYSMEM=1
-export DAGU_LINEAR_DESTILE=1
 exec /opt/Mineradio/mineradio \
 	--ozone-platform=wayland \
 	--ozone-platform-hint=wayland \

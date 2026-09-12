@@ -1,0 +1,16 @@
+说明：dagu-fb-fetch-hunt。LINEAR + FD_GMEM_FB_READ 自动走 sysmem。
+
+活补丁在 /tmp/mesa-26.0.8（不在 git 树）：
+  src/gallium/drivers/freedreno/freedreno_gmem.c
+  src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc   (hunt log / TILE6_2 ARRAY_PITCH)
+  src/gallium/drivers/freedreno/a6xx/fd6_emit.cc   (CCU barrier on every fb_read)
+
+证据：
+  PASS3 FD_MESA_DEBUG=gmem 512x256：整幅 00 00 ff（invert 清屏）。
+  颜色在 CCU，GMEM bin 空。gmem_base=0x100000 cbuf=0。
+  emit_mrt TILE6_2 / fetch TILE6_LINEAR 都救不了。
+  无 gmem debug：FETCH_OK。Chrome SYSMEM=0 1.0/1.25/2.0 真霜。
+
+DAGU_LINEAR_SYSMEM=1 仍会把所有 LINEAR 色绕开（含墙纸）。
+默认关闭。LINEAR+FB_READ 不看这个环境变量。
+FD_MESA_DEBUG=gmem 仍强迫 GMEM fetch（探针用）。

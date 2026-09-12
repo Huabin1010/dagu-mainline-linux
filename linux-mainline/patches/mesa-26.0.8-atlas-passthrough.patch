@@ -1,0 +1,41 @@
+说明：dagu-mesa 4bpp LINEAR 钩子加尺寸门。活树在 /tmp/mesa-26.0.8。
+
+只对「宽和高都 >1024」的 4bpp 色强制 TILE6_LINEAR。
+Skia 图集常见 3840×360（单边 >1024），必须保持 TILE。
+Wayland 窗口/标签长条由 GBM 带 SCANOUT+LINEAR，不靠这道钩子。
+
+ANGLE 还会给每个色 tex 打 PIPE_BIND_LINEAR（25×25 / 38×38 工具栏
+图标、1981×40 工具栏 FBO）。必须忽略 implicit LINEAR bind，
+否则尺寸门形同虚设，图标仍是 1-bit 砖。
+
+scanout / 窗口 / explicit GBM modifier 仍走 LINEAR。
+
+配套：linux-mainline/scripts/dagu-linear-mod.c 的 should_force_linear()
+对 GBM_FORMAT_R8 和 width<=1024 && height<=1024 去掉 GBM_BO_USE_LINEAR；
+1819×89 一类导出长条仍强制 LINEAR（Ozone 标 0,0）。
+
+不要覆盖发行版 /usr/lib/aarch64-linux-gnu/libgallium-26.0.8-1ubuntu0.3.so。
+只装 /usr/local/lib/dagu-mesa/（Chrome / Mineradio）。
+
+---
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -1346,7 +1346,8 @@
+    if (!dagu_force_tiled_alloc &&
+        !util_format_is_depth_or_stencil(tmpl->format) &&
+        !(tmpl->bind & (PIPE_BIND_SCANOUT | PIPE_BIND_DISPLAY_TARGET)) &&
+-       util_format_get_blocksize(tmpl->format) == 4)
++       util_format_get_blocksize(tmpl->format) == 4 &&
++       tmpl->width0 > 1024 && tmpl->height0 > 1024)
+       return FD_LAYOUT_LINEAR;
+
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_blitter.cc
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_blitter.cc
+@@ -1746,7 +1746,8 @@
+        !util_format_is_depth_or_stencil(tmpl->format) &&
+        !(tmpl->bind & (PIPE_BIND_SCANOUT | PIPE_BIND_DISPLAY_TARGET)) &&
+        util_format_get_blocksize(tmpl->format) == 4 &&
+-       tmpl->width0 > 0) {
++       tmpl->width0 > 1024 && tmpl->height0 > 1024) {
+       return TILE6_LINEAR;
+    }

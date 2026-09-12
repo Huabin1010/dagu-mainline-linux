@@ -1,5 +1,8 @@
 #!/bin/sh
-# dagu Chrome: native Wayland + GLES. GPU raster stays on.
+# dagu Chrome: native Wayland + GLES.
+# Skia GPU raster of SVG/iconfont writes macrotile into LINEAR
+# atlases on a650; --disable-gpu-rasterization keeps vectors on
+# the CPU upload path that already works (avatars / refresh).
 # Ozone tags linux-dmabuf LINEAR; force GBM pixels LINEAR (dagu-linear-mod.c)
 # and load dagu-mesa (LINEAR GMEM destile per tile; tiled WebGL stays GMEM).
 # Never into gnome-shell.
@@ -34,6 +37,8 @@ fi
 # a650 UCHE samples GMEM at cbuf offset 0 (not msm gmem_base).
 # Do not export DAGU_LINEAR_SYSMEM=1 or DAGU_LINEAR_DESTILE=1.
 # Never put this in gnome-shell (LINEAR+stencil sysmem blacked scanout).
+# --disable-gpu-rasterization: a650 Skia GPU path/SVG/iconfont into
+# LINEAR atlases is macrotile. CPU raster + glTexSubImage is clean.
 # lcd-text-aa@2 = Disabled in chrome://flags, survives UI chrome paths
 # that do not look at --disable-lcd-text.
 if [ ! -e "$lock" ] && [ -f "$profile/Local State" ]; then
@@ -69,9 +74,10 @@ exec /opt/google/chrome/chrome \
 	--enable-wayland-ime \
 	--disable-gtk-ime \
 	--wayland-text-input-version=3 \
-	--enable-features=WaylandTextInputV3,WaylandFractionalScaleV1 \
+	--enable-features=WaylandTextInputV3,WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj \
 	--disable-lcd-text \
 	--font-render-hinting=none \
 	--disable-partial-swap \
-	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation \
+	--disable-gpu-rasterization \
+	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation,PartialSwap \
 	"$@"

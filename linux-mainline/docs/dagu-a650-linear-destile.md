@@ -243,8 +243,7 @@ LD_PRELOAD=/usr/local/lib/libdagu-linear-mod.so
 
 钩子行为（活源码 `/tmp/mesa-26.0.8`）：
 
-1. **4bpp** 非 depth、非 scanout 色强制 `FD_LAYOUT_LINEAR` / `TILE6_LINEAR`  
-   R8 字形图集、depth、scanout **保持 TILE**
+1. **4bpp** 非 depth、非 scanout、且 **宽和高都 >1024** 才强制 `FD_LAYOUT_LINEAR`（躲开 Skia `3840×360` 图集）。R8、depth、scanout、单边超 1024 的内部图集 **保持 TILE**。Wayland 窗口/标签长条由 `dagu-linear-mod.c` 带 `PIPE_BIND_LINEAR` 进来，`get_best_layout` 后面的 bind 分支仍走 LINEAR。GBM：`R8` / 两边都 ≤1024 原样传递；任一边 >1024 的 AR24/XR24 强制 LINEAR。
 2. 颜色 RT 已是 LINEAR → **整批 sysmem**，**包括** `FD_GMEM_FB_READ`
 3. FB-fetch 用 `patch_fb_read_sysmem`；第一次 fb_read draw 前 flush CCU
 4. A2D：src 或 dest 任一 LINEAR → `handle_rgba_blit` 返回 false，走 `u_blitter`
@@ -430,7 +429,7 @@ Mesa 对照（`/tmp/mesa-26.0.8`，只部署 dagu-mesa）：
 
 Chrome 毛玻璃（无 `DAGU_LINEAR_SYSMEM` / `DAGU_LINEAR_DESTILE`，hunt `sys=0 fbread=1` 61 条）：A–H 真霜，J 条纹，K 真霜，`webgl=ok`。图：`linux-mainline/out/display-stress/glass-gmem-fbread-full.png`。
 
-活 so md5：`c4b64d129054706ce689f70fffef3f15`（`/usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so` 与 `linux-mainline/out/libgallium-26.0.8-1ubuntu0.3.so`）。说明补丁：`linux-mainline/patches/mesa-26.0.8-gmem-fbread-sync.patch`。主线系列：`linux-mainline/patches/0001-freedreno-a6xx-fix-event-store-linear-layout.patch`、`linux-mainline/patches/0002-freedreno-a6xx-fix-gmem-fb-read-linear-base-offset.patch`。
+活 so md5：`9222c92152933e232f2bf302bd482b5d`（图集放行后；`/usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so` 与 `linux-mainline/out/libgallium-26.0.8-1ubuntu0.3.so`）。4bpp 尺寸门：`linux-mainline/patches/mesa-26.0.8-atlas-passthrough.patch`。主线系列：`linux-mainline/patches/0001-freedreno-a6xx-fix-event-store-linear-layout.patch`、`linux-mainline/patches/0002-freedreno-a6xx-fix-gmem-fb-read-linear-base-offset.patch`。
 
 ### 9.7 代号 `dagu-ubwc-reclamation`（2026-09-12）
 
@@ -586,3 +585,4 @@ aarch64-linux-gnu-strip --strip-unneeded "$DEST"
 | 2026-09-12 | LINEAR+FB_READ 自动 sysmem。Chrome `SYSMEM=0` 1.0/1.25/2.0 真霜。已从 `dagu-chrome.sh` 拔掉 `DAGU_LINEAR_SYSMEM`。 |
 | 2026-09-12 | `dagu-gmem-fbread-sync`：blob 判决 A。UCHE 读 GMEM 用偏移 0。PASS3 GMEM `FETCH_OK`。已撤 FB_READ sysmem 回退和 `DAGU_LINEAR_DESTILE`。 |
 | 2026-09-12 | `dagu-ubwc-reclamation`：Mutter `USE=1`，主 fb `QCOM_COMPRESSED`，Chrome LINEAR GMEM 仍 `sys=0 fbread=1`。正式 patchset 0001/0002。 |
+| 2026-09-12 | 图集放行：`dagu-linear-mod.c` 对 R8 / ≤1024² 原样传递，Wayland 长条仍 LINEAR。dagu-mesa 4bpp 只在宽**和**高都 >1024 时动手（躲开 Skia `3840×360`）。补丁 `linux-mainline/patches/mesa-26.0.8-atlas-passthrough.patch`。 |

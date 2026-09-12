@@ -16,10 +16,12 @@
  * and still asks GBM for COMPRESSED. Mesa get_best_layout() then picks
  * UBWC/macrotile, so pixels disagree with the LINEAR tag.
  *
- * Force GBM buffers LINEAR so Ozone's LINEAR wayland tag matches pixels.
- * a6xx GMEM store destiles LINEAR per tile in dagu-mesa (not sysmem).
- * Load via LD_LIBRARY_PATH, never into gnome-shell. Keep GPU raster. Do NOT
- * export EGL symbols (ANGLE).
+ * Force window-sized ARGB/XRGB GBM LINEAR so Ozone's LINEAR wayland tag
+ * matches pixels. Skia/ANGLE glyph (R8) and UI atlases stay TILE/UBWC —
+ * they never hit DPU scanout. Blind LINEAR on those BOs is the 1-bit
+ * icon brick. a6xx GMEM store destiles LINEAR windows per tile in
+ * dagu-mesa. Load via LD_LIBRARY_PATH, never into gnome-shell. Keep GPU
+ * raster. Do NOT export EGL symbols (ANGLE).
  */
 
 
@@ -28,6 +30,12 @@
 #define GBM_BO_USE_LINEAR 16u
 #define DRM_FORMAT_MOD_LINEAR 0ull
 #define DRM_FORMAT_MOD_INVALID 0xffffffffffffffffull
+#define GBM_FORMAT_R8 0x20203852u
+#define GBM_FORMAT_ARGB8888 0x34325241u
+#define GBM_FORMAT_XRGB8888 0x34325258u
+#define GBM_FORMAT_ABGR8888 0x34324241u
+#define GBM_FORMAT_XBGR8888 0x34324258u
+#define DAGU_ATLAS_MAX 1024u
 
 #define EGL_LINUX_DMA_BUF_EXT 0x3270
 #define EGL_DMA_BUF_PLANE0_FD_EXT 0x3272
@@ -233,6 +241,9 @@ struct bo_mod_ent {
 
 static struct bo_mod_ent bo_mods[64];
 static unsigned bo_mods_i;
+static unsigned live_bos;
+static unsigned created_bos;
+static unsigned destroyed_bos;
 
 static void remember_bo_mod(struct gbm_bo *bo, uint64_t mod)
 {
@@ -289,19 +300,30 @@ static uint64_t real_bo_modifier(struct gbm_bo *bo)
 	return (real && bo) ? real(bo) : DRM_FORMAT_MOD_INVALID;
 }
 
-/* Wayland / mutter scanout must stay LINEAR. Backdrop-filter layers are
- * small GBM BOs; forcing those LINEAR makes a650 event-store write
- * macrotile (glass snow on the right of the pill).
- */
-static int should_force_linear(uint32_t width, uint32_t height, uint32_t flags)
+static int is_window_rgba(uint32_t format)
 {
-	unsigned long px = (unsigned long)width * (unsigned long)height;
+	return format == GBM_FORMAT_ARGB8888 || format == GBM_FORMAT_XRGB8888 ||
+	       format == GBM_FORMAT_ABGR8888 || format == GBM_FORMAT_XBGR8888;
+}
 
-	if (flags & GBM_BO_USE_SCANOUT)
-		return 1;
-	if (px >= 400000ul)
-		return 1;
-	return 0;
+/*
+ * Only the Wayland window (near-scanout AR24/XR24) is forced LINEAR.
+ * R8 glyph atlases and UI icon atlases (<=1024²) stay TILE/UBWC.
+ */
+static int should_force_linear(uint32_t width, uint32_t height,
+			       uint32_t format, uint32_t flags)
+{
+	(void)flags;
+	if (format == GBM_FORMAT_R8)
+		return 0;
+	/* Atlas / icon FBO: both sides <=1024. A 1819x89 tab strip is
+	 * exported to Wayland as LINEAR — must stay LINEAR pixels.
+	 */
+	if (width <= DAGU_ATLAS_MAX && height <= DAGU_ATLAS_MAX)
+		return 0;
+	if (!is_window_rgba(format))
+		return 0;
+	return 1;
 }
 
 static struct gbm_bo *note_created_bo(struct gbm_bo *bo, const char *tag,
@@ -313,13 +335,16 @@ static struct gbm_bo *note_created_bo(struct gbm_bo *bo, const char *tag,
 		return NULL;
 	mod = real_bo_modifier(bo);
 	remember_bo_mod(bo, mod);
+	created_bos++;
+	live_bos++;
 	{
 		FILE *log = fopen("/tmp/dagu-linear-mod.log", "a");
 
 		if (log) {
-			fprintf(log, "pid=%d %s %ux%u bo=%p mod=0x%llx\n",
+			fprintf(log, "pid=%d %s %ux%u bo=%p mod=0x%llx live=%u created=%u destroyed=%u\n",
 				(int)getpid(), tag, width, height, (void *)bo,
-				(unsigned long long)mod);
+				(unsigned long long)mod, live_bos, created_bos,
+				destroyed_bos);
 			fclose(log);
 		}
 	}
@@ -409,18 +434,14 @@ static EGLBoolean dagu_eglQueryDmaBufModifiersEXT(EGLDisplay dpy, EGLint format,
 					     external_only, &n);
 	if (!ok)
 		return ok;
-	if (modifiers && max > 0 && n > 0) {
-		modifiers[0] = DRM_FORMAT_MOD_LINEAR;
-		if (external_only)
-			external_only[0] = 0;
-		n = 1;
-	} else if (!modifiers && n > 0) {
-		n = 1;
-	}
+	/* Do not collapse to LINEAR-only. That made ANGLE create every
+	 * icon/atlas as LINEAR-only; a650 then destiled those 25x25
+	 * BOs into 1-bit bricks. Window pixels stay LINEAR via GBM.
+	 */
 	if (count)
 		*count = n;
-	dlog("mesa eglQueryDmaBufModifiersEXT->LINEAR", (uint32_t)format,
-	     (uint32_t)n, (unsigned)n, 1, 0);
+	dlog("mesa eglQueryDmaBufModifiersEXT passthrough", (uint32_t)format,
+	     (uint32_t)n, (unsigned)n, (unsigned)n, 0);
 	return ok;
 }
 
@@ -573,10 +594,16 @@ struct gbm_bo *gbm_bo_create(struct gbm_device *gbm, uint32_t width,
 		real = real_gbm("gbm_bo_create");
 	if (!real)
 		return NULL;
-	dlog("gbm_bo_create", width, height, 0, 0, flags);
-	flags |= GBM_BO_USE_LINEAR;
+	if (should_force_linear(width, height, format, flags)) {
+		dlog("gbm_bo_create LINEAR", width, height, 0, 0, flags);
+		flags |= GBM_BO_USE_LINEAR;
+		return note_created_bo(real(gbm, width, height, format, flags),
+				       "gbm_bo_create LINEAR", width, height);
+	}
+	flags &= ~GBM_BO_USE_LINEAR;
+	dlog("gbm_bo_create passthrough", width, height, 0, 0, flags);
 	return note_created_bo(real(gbm, width, height, format, flags),
-			       "gbm_bo_create", width, height);
+			       "gbm_bo_create passthrough", width, height);
 }
 
 struct gbm_surface *gbm_surface_create(struct gbm_device *gbm, uint32_t width,
@@ -610,15 +637,21 @@ struct gbm_bo *gbm_bo_create_with_modifiers(struct gbm_device *gbm,
 		real = real_gbm("gbm_bo_create_with_modifiers");
 	if (!real)
 		return NULL;
-	/* Always real LINEAR pixels. ANGLE samples backdrop as LINEAR;
+	if (!should_force_linear(width, height, format, 0)) {
+		dlog_mods("with_modifiers passthrough", width, height,
+			  modifiers, count);
+		return note_created_bo(real(gbm, width, height, format,
+					    modifiers, count),
+				       "with_modifiers passthrough", width,
+				       height);
+	}
+	/* Window color: real LINEAR pixels. Ozone tags wayland LINEAR.
 	 * TILED3 pixels + LINEAR sample is the full-card glass snow.
 	 */
 	dlog_mods("with_modifiers -> LINEAR", width, height, modifiers, count);
 	return gbm_bo_create(gbm, width, height, format,
-			     (should_force_linear(width, height, 0)
-				      ? GBM_BO_USE_SCANOUT
-				      : 0) |
-				     GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+			     GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING |
+				     GBM_BO_USE_LINEAR);
 }
 
 struct gbm_bo *gbm_bo_create_with_modifiers2(struct gbm_device *gbm,
@@ -638,6 +671,15 @@ struct gbm_bo *gbm_bo_create_with_modifiers2(struct gbm_device *gbm,
 	if (!real)
 		return gbm_bo_create_with_modifiers(gbm, width, height, format,
 						    modifiers, count);
+	if (!should_force_linear(width, height, format, flags)) {
+		flags &= ~GBM_BO_USE_LINEAR;
+		dlog_mods("with_modifiers2 passthrough", width, height,
+			  modifiers, count);
+		return note_created_bo(real(gbm, width, height, format,
+					    modifiers, count, flags),
+				       "with_modifiers2 passthrough", width,
+				       height);
+	}
 	dlog_mods("with_modifiers2 -> LINEAR", width, height, modifiers, count);
 	flags |= GBM_BO_USE_LINEAR;
 	return gbm_bo_create(gbm, width, height, format, flags);
@@ -764,6 +806,11 @@ void gbm_bo_destroy(struct gbm_bo *bo)
 	if (!real)
 		real = real_gbm("gbm_bo_destroy");
 	forget_bo_mod(bo);
+	if (bo) {
+		if (live_bos)
+			live_bos--;
+		destroyed_bos++;
+	}
 	if (real)
 		real(bo);
 }

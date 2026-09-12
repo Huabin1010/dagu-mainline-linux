@@ -1,6 +1,7 @@
 {
   "uuid": "dagu-osk-focus@dagu",
   "name": "dagu OSK on text focus",
-  "description": "Show GNOME OSK when a Wayland client enables text-input without show_input_panel (Chrome).",
-  "shell-version": ["50"]
+  "description": "Show GNOME OSK for Chrome omnibox; fit landscape height.",
+  "shell-version": ["50"],
+  "session-modes": ["user"]
 }

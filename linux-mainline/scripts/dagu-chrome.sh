@@ -3,6 +3,16 @@
 # Ozone tags linux-dmabuf LINEAR; force GBM pixels LINEAR (dagu-linear-mod.c)
 # and load dagu-mesa (unused-depth color sysmem; 3D with depth stays GMEM).
 # Never into gnome-shell.
+profile="${HOME}/.config/google-chrome"
+lock="$profile/SingletonLock"
+if [ -L "$lock" ]; then
+	hostpid=$(readlink "$lock")
+	pid=${hostpid##*-}
+	if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+		rm -f "$profile/SingletonLock" "$profile/SingletonSocket" "$profile/SingletonCookie"
+		rm -rf /tmp/com.google.Chrome.* /tmp/.com.google.Chrome.*
+	fi
+fi
 export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"
 if [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
 	export LD_LIBRARY_PATH="/usr/local/lib/dagu-mesa${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

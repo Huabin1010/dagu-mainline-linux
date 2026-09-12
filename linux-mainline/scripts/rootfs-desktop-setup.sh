@@ -130,6 +130,16 @@ CHROME_DISABLE_FEATURES='Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverla
 if [ -x /opt/google/chrome/chrome ]; then
 	cat >/usr/local/bin/dagu-chrome <<'EOF'
 #!/bin/sh
+profile="${HOME}/.config/google-chrome"
+lock="$profile/SingletonLock"
+if [ -L "$lock" ]; then
+	hostpid=$(readlink "$lock")
+	pid=${hostpid##*-}
+	if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+		rm -f "$profile/SingletonLock" "$profile/SingletonSocket" "$profile/SingletonCookie"
+		rm -rf /tmp/com.google.Chrome.* /tmp/.com.google.Chrome.*
+	fi
+fi
 export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"
 if [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
 	export LD_LIBRARY_PATH="/usr/local/lib/dagu-mesa${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -246,7 +256,7 @@ install_dagu_osk() {
 {
   "uuid": "dagu-osk-focus@dagu",
   "name": "dagu OSK on text focus",
-  "description": "Show GNOME OSK for Chrome omnibox; fit landscape height.",
+  "description": "Show GNOME OSK after tap on Chrome text; fit landscape height.",
   "shell-version": ["50"],
   "session-modes": ["user"]
 }
@@ -257,47 +267,125 @@ import GLib from 'gi://GLib';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
+// Chrome never sends show_input_panel. GNOME/IM focus still auto-opens the
+// OSK (NTP search, omnibox). Gate keyboard.open so only an explicit tap that
+// moves the text caret (or the address-bar strip) can show it. Close when
+// the user taps the page or the field loses focus.
 export default class DaguOskFocus extends Extension {
     enable() {
         this._im = Main.inputMethod;
         this._openTimeout = 0;
+        this._closeTimeout = 0;
+        this._awaitTap = false;
+        this._permitOpen = false;
+        this._visible = false;
         this._conns = [];
+        this._winTitleId = 0;
+        this._trackedWin = null;
+        this._gateKeyboard();
         this._connect(this._im, 'notify::current-focus', () => {
-            if (this._im.currentFocus)
-                this._openSoon(50);
+            if (!this._im.currentFocus)
+                this._close();
         });
-        this._connect(this._im, 'cursor-location-changed', () => this._openSoon(50));
+        this._connect(this._im, 'cursor-location-changed', () => {
+            if (this._awaitTap)
+                this._openSoon(40);
+        });
         this._connect(Main.layoutManager, 'monitors-changed', () => {
             this._patchRelayout();
-            if (this._im.currentFocus)
-                this._openSoon(120);
+        });
+        this._connect(global.display, 'notify::focus-window', () => {
+            this._trackFocusWindow();
+            if (!this._isChrome())
+                this._close();
         });
         this._connect(global.stage, 'captured-event', (_a, event) => {
-            this._maybeChromeOmnibox(event);
+            this._onPointer(event);
             return Clutter.EVENT_PROPAGATE;
         });
         this._patchRelayout();
+        this._trackFocusWindow();
     }
 
     _connect(obj, sig, cb) {
         this._conns.push([obj, obj.connect(sig, cb)]);
     }
 
-    _patchRelayout() {
-        const kbd = Main.keyboard?.keyboardActor;
-        if (!kbd || kbd._daguRelayout)
+    _gateKeyboard() {
+        const kbd = Main.keyboard;
+        if (!kbd || kbd._daguOpenGate)
             return;
-        kbd._daguRelayout = true;
-        const orig = kbd._relayout.bind(kbd);
-        kbd._relayout = () => {
+        kbd._daguOpenGate = true;
+        this._origKbdOpen = kbd.open.bind(kbd);
+        kbd.open = monitor => {
+            if (!this._permitOpen)
+                return;
+            this._origKbdOpen(monitor);
+        };
+        if (typeof kbd.close === 'function')
+            this._origKbdClose = kbd.close.bind(kbd);
+    }
+
+    _ungateKeyboard() {
+        const kbd = Main.keyboard;
+        if (!kbd || !kbd._daguOpenGate)
+            return;
+        if (this._origKbdOpen)
+            kbd.open = this._origKbdOpen;
+        kbd._daguOpenGate = false;
+        this._origKbdOpen = null;
+        this._origKbdClose = null;
+    }
+
+    _patchRelayout() {
+        const actor = Main.keyboard?.keyboardActor;
+        if (!actor || actor._daguRelayout)
+            return;
+        actor._daguRelayout = true;
+        const orig = actor._relayout.bind(actor);
+        actor._relayout = () => {
             orig();
             const mon = Main.layoutManager.keyboardMonitor;
             if (!mon)
                 return;
-            kbd.width = mon.width;
+            actor.width = mon.width;
             if (mon.width > mon.height)
-                kbd.height = Math.round(Math.min(mon.height * 0.46, 380));
+                actor.height = Math.round(Math.min(mon.height * 0.46, 380));
         };
+        if (typeof actor.open === 'function') {
+            actor._daguActorOpen = actor.open.bind(actor);
+            actor.open = immediate => {
+                if (!this._permitOpen)
+                    return;
+                actor._daguActorOpen(immediate);
+            };
+        }
+    }
+
+    _isChrome() {
+        const win = global.display.focus_window;
+        if (!win)
+            return false;
+        const wm = `${win.get_wm_class() || ''} ${win.get_title() || ''}`;
+        return /chrome|chromium|google-chrome/i.test(wm);
+    }
+
+    _trackFocusWindow() {
+        if (this._trackedWin && this._winTitleId) {
+            try {
+                this._trackedWin.disconnect(this._winTitleId);
+            } catch (e) {
+            }
+        }
+        this._winTitleId = 0;
+        this._trackedWin = global.display.focus_window;
+        if (!this._trackedWin)
+            return;
+        this._winTitleId = this._trackedWin.connect('notify::title', () => {
+            // Navigation / new tab: hide unless a tap just requested the OSK.
+            if (!this._awaitTap)
+                this._close();
+        });
     }
 
     _eventXY(event) {
@@ -312,32 +400,53 @@ export default class DaguOskFocus extends Extension {
         return [0, 0];
     }
 
-    _maybeChromeOmnibox(event) {
+    _inOmniboxBand(event) {
+        if (!this._isChrome())
+            return false;
+        const win = global.display.focus_window;
+        const [x, y] = this._eventXY(event);
+        const rect = win.get_frame_rect();
+        const tabs = Math.max(36, Math.round(rect.height * 0.06));
+        const bar = tabs + Math.max(48, Math.round(rect.height * 0.08));
+        if (x < rect.x || x > rect.x + rect.width)
+            return false;
+        // Skip the tab strip; only the address-bar row counts as an input tap.
+        return y >= rect.y + tabs && y <= rect.y + bar;
+    }
+
+    _onPointer(event) {
         const type = event.type();
         if (type !== Clutter.EventType.TOUCH_BEGIN &&
             type !== Clutter.EventType.BUTTON_PRESS)
             return;
-        const win = global.display.focus_window;
-        if (!win)
+        if (this._inOmniboxBand(event)) {
+            this._awaitTap = true;
+            this._openSoon(60);
             return;
-        const wm = `${win.get_wm_class() || ''} ${win.get_title() || ''}`;
-        if (!/chrome|chromium|google-chrome/i.test(wm))
-            return;
-        const [x, y] = this._eventXY(event);
-        const rect = win.get_frame_rect();
-        const band = Math.max(80, Math.round(rect.height * 0.14));
-        if (x < rect.x || x > rect.x + rect.width)
-            return;
-        if (y < rect.y || y > rect.y + band)
-            return;
-        this._openSoon(80);
+        }
+        // Any other tap: wait briefly for a caret move (real text field).
+        // If none, this was a page/button tap — hide the OSK.
+        this._awaitTap = true;
+        if (this._closeTimeout)
+            GLib.source_remove(this._closeTimeout);
+        this._closeTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 220, () => {
+            this._closeTimeout = 0;
+            this._awaitTap = false;
+            this._close();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _openSoon(ms) {
+        if (this._closeTimeout) {
+            GLib.source_remove(this._closeTimeout);
+            this._closeTimeout = 0;
+        }
         if (this._openTimeout)
             GLib.source_remove(this._openTimeout);
         this._openTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
             this._openTimeout = 0;
+            this._awaitTap = false;
             this._open();
             return GLib.SOURCE_REMOVE;
         });
@@ -345,12 +454,42 @@ export default class DaguOskFocus extends Extension {
 
     _open() {
         this._patchRelayout();
-        const idx = Main.layoutManager.focusIndex;
-        Main.layoutManager.keyboardIndex = idx;
-        Main.keyboard?.open(idx);
-        const kbd = Main.keyboard?.keyboardActor;
-        kbd?._relayout?.();
-        kbd?.open?.(true);
+        this._permitOpen = true;
+        try {
+            const idx = Main.layoutManager.focusIndex;
+            Main.layoutManager.keyboardIndex = idx;
+            Main.keyboard?.open(idx);
+            const actor = Main.keyboard?.keyboardActor;
+            actor?._relayout?.();
+            if (actor?._daguActorOpen)
+                actor._daguActorOpen(true);
+            else
+                actor?.open?.(true);
+        } finally {
+            this._permitOpen = false;
+        }
+        this._visible = true;
+    }
+
+    _close() {
+        if (this._openTimeout) {
+            GLib.source_remove(this._openTimeout);
+            this._openTimeout = 0;
+        }
+        this._awaitTap = false;
+        this._visible = false;
+        const actor = Main.keyboard?.keyboardActor;
+        try {
+            actor?.close?.();
+        } catch (e) {
+        }
+        try {
+            if (this._origKbdClose)
+                this._origKbdClose();
+            else
+                Main.keyboard?.close?.();
+        } catch (e) {
+        }
     }
 
     disable() {
@@ -358,11 +497,30 @@ export default class DaguOskFocus extends Extension {
             GLib.source_remove(this._openTimeout);
             this._openTimeout = 0;
         }
+        if (this._closeTimeout) {
+            GLib.source_remove(this._closeTimeout);
+            this._closeTimeout = 0;
+        }
+        if (this._trackedWin && this._winTitleId) {
+            try {
+                this._trackedWin.disconnect(this._winTitleId);
+            } catch (e) {
+            }
+        }
+        this._winTitleId = 0;
+        this._trackedWin = null;
+        const actor = Main.keyboard?.keyboardActor;
+        if (actor?._daguActorOpen) {
+            actor.open = actor._daguActorOpen;
+            delete actor._daguActorOpen;
+        }
+        this._ungateKeyboard();
         for (const [obj, id] of this._conns)
             obj.disconnect(id);
         this._conns = [];
     }
 }
+
 EOF
 }
 install_dagu_osk /usr/share/gnome-shell/extensions/dagu-osk-focus@dagu
@@ -1004,18 +1162,26 @@ Syntax 7
 SectionVerb {
 	EnableSequence [
 		cset "name='TERT_TDM_RX_0 Audio Mixer MultiMedia1' on"
-		cset "name='TL PCM Source' ASP"
-		cset "name='TR PCM Source' ASP"
-		cset "name='BL PCM Source' ASP"
-		cset "name='BR PCM Source' ASP"
-		cset "name='TL Analog PCM Volume' 20"
-		cset "name='TR Analog PCM Volume' 20"
-		cset "name='BL Analog PCM Volume' 20"
-		cset "name='BR Analog PCM Volume' 20"
-		cset "name='TL Digital PCM Volume' 850"
-		cset "name='TR Digital PCM Volume' 850"
-		cset "name='BL Digital PCM Volume' 850"
-		cset "name='BR Digital PCM Volume' 850"
+		cset "name='TL PCM Source' DSP"
+		cset "name='TR PCM Source' DSP"
+		cset "name='BL PCM Source' DSP"
+		cset "name='BR PCM Source' DSP"
+		cset "name='TL DRE Switch' on"
+		cset "name='TR DRE Switch' on"
+		cset "name='BL DRE Switch' on"
+		cset "name='BR DRE Switch' on"
+		cset "name='TL Analog PCM Volume' 18"
+		cset "name='TR Analog PCM Volume' 18"
+		cset "name='BL Analog PCM Volume' 18"
+		cset "name='BR Analog PCM Volume' 18"
+		cset "name='TL Digital PCM Volume' 817"
+		cset "name='TR Digital PCM Volume' 817"
+		cset "name='BL Digital PCM Volume' 817"
+		cset "name='BR Digital PCM Volume' 817"
+		cset "name='TL PCM Soft Ramp' 4ms"
+		cset "name='TR PCM Soft Ramp' 4ms"
+		cset "name='BL PCM Soft Ramp' 4ms"
+		cset "name='BR PCM Soft Ramp' 4ms"
 	]
 	DisableSequence [
 		cset "name='TERT_TDM_RX_0 Audio Mixer MultiMedia1' off"
@@ -1032,6 +1198,8 @@ SectionDevice."Speaker" {
 		PlaybackPCM "hw:${CardId},0"
 		PlaybackChannels 2
 		PlaybackRate 48000
+		PlaybackFormat "S24_LE"
+		# No PlaybackMixerElem: GNOME must not move Digital PCM.
 	}
 }
 EOF
@@ -1039,14 +1207,36 @@ cat >/usr/local/sbin/dagu-speaker-route.sh <<'EOF'
 #!/bin/sh
 set -eu
 CARD="${DAGU_ALSA_CARD:-0}"
+FWDIR=/lib/firmware/cirrus
+STAMP=/run/dagu/speaker-dsp-loaded
 cset() {
 	amixer -c "$CARD" cset "name=$1" "$2" >/dev/null 2>&1 || true
 }
 cset "TERT_TDM_RX_0 Audio Mixer MultiMedia1" on
+mkdir -p /run/dagu
+if [ ! -f "$STAMP" ]; then
+	for p in TL TR BL BR; do
+		cset "$p DSP1 Preload Switch" off
+	done
+	for p in TL TR BL BR; do
+		bin="$FWDIR/${p}-cs35l41-dsp1-spk-prot.bin"
+		[ -f "$bin" ] && cp -f "$bin" "$FWDIR/cs35l41-dsp1-spk-prot.bin"
+		cset "$p DSP1 Firmware" Protection
+		cset "$p DSP RX1 Source" ASPRX1
+		cset "$p DSP RX2 Source" ASPRX2
+		cset "$p DSP1 Preload Switch" on
+	done
+	date -u +%s >"$STAMP"
+fi
 for p in TL TR BL BR; do
-	cset "$p PCM Source" ASP
-	cset "$p Analog PCM Volume" 20
-	cset "$p Digital PCM Volume" 850
+	cset "$p DSP1 Firmware" Protection
+	cset "$p DSP RX1 Source" ASPRX1
+	cset "$p DSP RX2 Source" ASPRX2
+	cset "$p PCM Soft Ramp" 4ms
+	cset "$p DRE Switch" on
+	cset "$p Analog PCM Volume" 18
+	cset "$p Digital PCM Volume" 817
+	cset "$p PCM Source" DSP
 done
 exit 0
 EOF
@@ -1096,6 +1286,8 @@ monitor.alsa.rules = [
         audio.channels = 2
         audio.rate = 48000
         audio.format = "S24_LE"
+        alsa.resolution_bits = 24
+        api.alsa.soft-mixer = true
         audio.position = [ FL FR ]
         node.nick = "Speakers"
         priority.session = 2000
@@ -1104,6 +1296,21 @@ monitor.alsa.rules = [
   }
 ]
 EOF
+
+# DSP + analog 18 is the Android path. Do not stack GNOME over-amplification
+# (that is extra digital gain).
+mkdir -p /etc/dconf/db/local.d /etc/dconf/profile
+if [ ! -f /etc/dconf/profile/user ]; then
+	cat >/etc/dconf/profile/user <<'EOF'
+user-db:user
+system-db:local
+EOF
+fi
+cat >/etc/dconf/db/local.d/00-dagu-sound <<'EOF'
+[org/gnome/desktop/sound]
+allow-volume-above-100-percent=false
+EOF
+dconf update 2>/dev/null || true
 
 rm -f /usr/sbin/policy-rc.d
 echo "==> desktop setup done"

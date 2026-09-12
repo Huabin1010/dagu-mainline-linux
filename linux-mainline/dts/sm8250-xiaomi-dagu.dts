@@ -141,6 +141,7 @@
 			cirrus,asp-sdout-hiz = <3>;
 			cirrus,gpio2-src-select = <4>;
 			cirrus,gpio2-output-enable;
+			cirrus,subsystem-id = "dagu";
 			sound-name-prefix = "BR";
 			#sound-dai-cells = <1>;
 		};
@@ -160,6 +161,7 @@
 			cirrus,gpio2-src-select = <4>;
 			cirrus,gpio2-output-enable;
 			cirrus,right-channel-amp;
+			cirrus,subsystem-id = "dagu";
 			sound-name-prefix = "BL";
 			#sound-dai-cells = <1>;
 		};
@@ -190,6 +192,7 @@
 			cirrus,asp-sdout-hiz = <3>;
 			cirrus,gpio2-src-select = <4>;
 			cirrus,gpio2-output-enable;
+			cirrus,subsystem-id = "dagu";
 			sound-name-prefix = "TL";
 			#sound-dai-cells = <1>;
 		};
@@ -208,6 +211,7 @@
 			cirrus,asp-sdout-hiz = <3>;
 			cirrus,gpio2-src-select = <4>;
 			cirrus,gpio2-output-enable;
+			cirrus,subsystem-id = "dagu";
 			sound-name-prefix = "TR";
 			#sound-dai-cells = <1>;
 		};

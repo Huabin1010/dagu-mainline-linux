@@ -106,7 +106,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - zap：本机签名 `qcom/sm8250/xiaomi/dagu/a650_zap.mbn`（不要 elish）
 - SQE：linux-firmware **31964 字节、word1 `0x112`**；dump 旧 0.93 会被拒
 - `gpu-initialized: 1`，`/dev/dri/card0` + `renderD128`，GNOME 走 msm atomic（不是 llvmpipe）
-- GNOME Resources 只扫 `/sys/class/drm/card0/device`（DPU，不是 `3d00000.gpu`）。`linux-mainline/overlays/linux/drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c` 提供 `gpu_busy_percent`、`mem_info_vram_*`、`hwmon/freq1_input` / `freq2_input` / `temp1_input` / `power1_average`（功耗为占用×OPP 估算，无独立 GPU 电表）。Resources 只认 `hwmon?`（个位数），实机是 `hwmon31`，由 `linux-mainline/scripts/dagu-resources-fix.sh` bind 成 `hwmon0`。CPU 名走包装后的 `lscpu`（Kryo 585 / Snapdragon 870）。Wi‑Fi 厂商依赖单空格 `pci.ids`。电池 Design Capacity 读 `energy_full_design`（`xiaomi-dual-fg`）。
+- GNOME Resources 只扫 `/sys/class/drm/card0/device`（DPU，不是 `3d00000.gpu`）。`linux-mainline/overlays/linux/drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c` 提供 `gpu_busy_percent`、`mem_info_vram_*`、`hwmon/freq1_input` / `temp1_input`（来自 devfreq / thermal）。Resources 只认 `hwmon?`，由 `linux-mainline/scripts/dagu-resources-fix.sh` bind 成 `hwmon0`。禁止伪造：UFS 不是 PCIe，硬盘 Link / GPU Slot / Max Power Cap 等没有真实值的项由 `linux-mainline/scripts/dagu-resources-hide-na.c` 藏行。禁止 bind 覆盖 `/sys/class/drm/card0/device/uevent`（假 PCI_ID 会让 Chrome `drmGetDeviceFromDevId` 失败、`--in-process-gpu` 整进程退出）。`linux-mainline/scripts/dagu-chrome.sh` 会清掉已死进程的 Singleton 锁。Wi‑Fi Manufacturer 用发行版 `/usr/share/misc/pci.ids` 复制到 `/usr/share/hwdata/pci.ids`（须双空格）。CPU 名走包装 `lscpu`（Kryo 585 / Snapdragon 870）。
 - 用户态：Mesa Turnip，`vkcube` 选中 Adreno 650
 - dEQP 冒烟 / compute / draw 核心组 0 失败（详见 `linux-mainline/docs/dagu-wifi-gpu-turnip-cpu.md`）
 
@@ -131,7 +131,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - `&spi4` / `&gpi_dma0` disabled；`# CONFIG_SPI_QCOM_GENI is not set`
 - 滑动断触：IRQ 线程里不要 `dev_info`（`ignore_loglevel` 会堵 fbcon/串口）；DT 用 `IRQ_TYPE_LEVEL_LOW`，坏帧（全 0xff）不当抬手
 - OSK 连打字母：LEVEL_LOW + spi-gpio 会在一次按住里读到校验失败 / n=0 毛刺，tracking ID 被拆成多次点击。驱动排空 IRQ、校验和、连续空帧才抬手，80ms 超时兜底（`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`）
-- Chrome 横屏地址栏不出屏上键盘：`disable-user-extensions=true` 会卸掉 `dagu-osk-focus@dagu`；GNOME OSK 横屏 `_relayout` 的 minHeight 可能超过短边。扩展装到 `/usr/share/gnome-shell/extensions/dagu-osk-focus@dagu/`（`linux-mainline/scripts/dagu-osk-focus@dagu/`、`linux-mainline/scripts/rootfs-desktop-setup.sh`），点地址栏顶栏会弹出并压到约 46% 屏高
+- Chrome 屏上键盘：`dagu-osk-focus@dagu` 拦住 GNOME 自动 `keyboard.open`，只在点地址栏或点按后光标移动时打开；点页面/失焦/切标题则收起。扩展：`linux-mainline/scripts/dagu-osk-focus@dagu/`、`linux-mainline/scripts/rootfs-desktop-setup.sh`。
 
 ### Wi‑Fi
 
@@ -169,7 +169,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
   - `linux-mainline/alsa/ucm2/Xiaomi-dagu/HiFi.conf`
   - `linux-mainline/scripts/dagu-speaker-route.sh`
   - `linux-mainline/alsa/50-dagu-speaker.conf`（装到 `/etc/wireplumber/wireplumber.conf.d/`）
-- **听感**：软件路径已通，用户尚未口头确认听到
+- **听感（对齐安卓，2026-09-12）**：安卓 `mixer_paths_overlay_static.xml` 走 CS35L41 **DSP Protection**（`PCM Source=DSP`、`AMP PCM Gain=18`、`Digital=0 dB`、`DRE=on`、`TL/TR/BL/BR-cs35l41-dsp1-spk-prot.bin`）。Linux 之前切成 ASP 直通，没有 Xiaomi 调音/DRC，所以再加大数字增益也和安卓差一截。`linux-mainline/scripts/dagu-speaker-route.sh` 现按安卓路径 preload 每颗功放的 prot.bin。下一次编核：DTS `cirrus,subsystem-id = "dagu"` + `cs35l41-dsp1-spk-prot-dagu-*.bin` 别名。
 
 `&adsp` okay，固件 `qcom/sm8250/xiaomi/dagu/adsp.mbn`。需要 `CONFIG_QRTR_SMD=y`（不要 =m），否则 PDR/APR 起不来。
 

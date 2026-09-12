@@ -6,47 +6,61 @@ RUN=/run/dagu
 mkdir -p "$RUN" /usr/share/hwdata /usr/local/lib /usr/local/lib/dagu-resources-bin \
 	/usr/local/share/applications /etc/systemd/system
 
-# Resources' pci.ids parser splits on a *single* space. A "\t\tVID PID  Name"
-# subdevice line with two spaces produces an empty token and aborts the whole
-# file, so Manufacturer stays N/A even when 17cb/1101 is present.
+# Resources parses pci.ids with split("  "): ID and name need TWO spaces.
+# Ubuntu's canonical file is /usr/share/misc/pci.ids; Resources opens hwdata.
+# A one-space "minimal" file makes parse_pci_ids() fail → Manufacturer N/A.
+mkdir -p /usr/share/hwdata
 if [ -f /usr/share/misc/pci.ids ]; then
+	cp -a /usr/share/misc/pci.ids /usr/share/hwdata/pci.ids
+else
+	cat >/usr/share/hwdata/pci.ids <<'EOF'
+# Fallback pci.ids for dagu Resources (double spaces required).
+17cb  Qualcomm Technologies, Inc
+	010b  SM8250 PCIe Root Complex
+	1101  QCA6390 Wireless Network Adapter
+	a650  Adreno (TM) 650
+EOF
+fi
+# pci.ids has no Adreno 650 id; Resources needs Device::from_vid_pid(17cb,a650).
+if ! grep -q $'^\ta650  ' /usr/share/hwdata/pci.ids; then
 	python3 - <<'PY'
 from pathlib import Path
-import re
-
-src = Path("/usr/share/misc/pci.ids")
-dst = Path("/usr/share/hwdata/pci.ids")
-out = []
-for line in src.read_text(errors="replace").splitlines(True):
-	nl = line.endswith("\n")
-	body = line[:-1] if nl else line
-	if body.startswith("#") or body.startswith("C ") or body == "":
-		out.append(line)
-		continue
-	if body.startswith("\t\t"):
-		m = re.match(r"^(\t\t)([0-9a-fA-F]{4})\s+([0-9a-fA-F]{4})\s+(.*)$", body)
-		if m:
-			body = f"{m.group(1)}{m.group(2)} {m.group(3)} {m.group(4)}"
-	elif body.startswith("\t"):
-		m = re.match(r"^(\t)([0-9a-fA-F]{4})\s+(.*)$", body)
-		if m:
-			body = f"{m.group(1)}{m.group(2)} {m.group(3)}"
-	else:
-		m = re.match(r"^([0-9a-fA-F]{4})\s+(.*)$", body)
-		if m:
-			body = f"{m.group(1)} {m.group(2)}"
-	out.append(body + ("\n" if nl else ""))
-text = "".join(out)
-needle = "\t1101 QCA6390 Wireless Network Adapter\n"
-if needle not in text:
-	text = text.replace(
-		"17cb Qualcomm Technologies, Inc\n",
-		"17cb Qualcomm Technologies, Inc\n" + needle,
-		1,
-	)
-dst.write_text(text)
+p = Path("/usr/share/hwdata/pci.ids")
+lines = p.read_text(errors="replace").splitlines(True)
+out, i = [], 0
+while i < len(lines):
+    out.append(lines[i])
+    if lines[i].startswith("17cb  "):
+        i += 1
+        while i < len(lines) and (lines[i].startswith("\t") or lines[i].startswith("#") or lines[i].strip() == ""):
+            out.append(lines[i]); i += 1
+        out.append("\ta650  Adreno (TM) 650\n")
+        continue
+    i += 1
+p.write_text("".join(out))
 PY
 fi
+
+# Never bind-mount card0/device/uevent. A fake PCI_ID makes libdrm/Chrome
+# drmGetDeviceFromDevId fail and --in-process-gpu aborts the whole browser.
+if mountpoint -q /sys/class/drm/card0/device/uevent; then
+	umount /sys/class/drm/card0/device/uevent || true
+fi
+
+# UFS is not PCI/SATA/USB. Do not invent device/address. Resources Link = N/A
+# is the honest value. Tear down any previous fake sda overlay.
+_dagu_teardown_sda_overlay() {
+	real=/sys/devices/platform/soc@0/1d84000.ufshc/host0/target0:0:0/0:0:0:0/block/sda
+	systemctl disable --now dagu-resources-sda-poll.service 2>/dev/null || true
+	pkill -f dagu-resources-sda-poll.sh 2>/dev/null || true
+	if [ -e "$real" ] && mountpoint -q "$real"; then
+		umount -l "$real" 2>/dev/null || true
+	fi
+	for t in $(findmnt -n -o TARGET 2>/dev/null | grep '/run/dagu/block-sda' | sort -r); do
+		umount -l "$t" 2>/dev/null || true
+	done
+}
+_dagu_teardown_sda_overlay
 
 # CPU temp: Resources only knows coretemp/k10temp/cpu-thermal.
 for h in /sys/class/hwmon/hwmon*; do
@@ -117,8 +131,6 @@ E: MEMORY_DEVICE_0_SIZE=8589934592
 E: MEMORY_DEVICE_0_FORM_FACTOR=Row Of Chips
 E: MEMORY_DEVICE_0_TYPE=LPDDR5
 E: MEMORY_DEVICE_0_TYPE_DETAIL=Synchronous
-E: MEMORY_DEVICE_0_SPEED_MTS=3200
-E: MEMORY_DEVICE_0_CONFIGURED_SPEED_MTS=3200
 DMI
 	exit 0
 fi
@@ -167,9 +179,7 @@ rm -rf "$RUN/gpu-hwmon"
 mkdir -p "$RUN/gpu-hwmon/hwmon0"
 printf 'adreno\n' >"$RUN/gpu-hwmon/hwmon0/name"
 printf '305000000\n' >"$RUN/gpu-hwmon/hwmon0/freq1_input"
-printf '1600000000\n' >"$RUN/gpu-hwmon/hwmon0/freq2_input"
 printf '40000\n' >"$RUN/gpu-hwmon/hwmon0/temp1_input"
-printf '0\n' >"$RUN/gpu-hwmon/hwmon0/power1_average"
 chmod 644 "$RUN/gpu-hwmon/hwmon0"/*
 if [ -d /sys/class/drm/card0/device/hwmon ]; then
 	mount --bind "$RUN/gpu-hwmon" /sys/class/drm/card0/device/hwmon
@@ -187,7 +197,6 @@ while true; do
 		break
 	done
 	printf '%s\n' "$freq" >"$H/freq1_input"
-	printf '1600000000\n' >"$H/freq2_input"
 	temp=40000
 	for z in /sys/class/thermal/thermal_zone*; do
 		[ -f "$z/type" ] || continue
@@ -200,12 +209,6 @@ while true; do
 		esac
 	done
 	printf '%s\n' "$temp" >"$H/temp1_input"
-	busy=0
-	[ -f /sys/class/drm/card0/device/gpu_busy_percent ] && \
-		busy=$(cat /sys/class/drm/card0/device/gpu_busy_percent)
-	# µW ≈ busy% × 7 W × freq / 670 MHz
-	uw=$(awk -v b="$busy" -v f="$freq" 'BEGIN{printf "%.0f", b*70000*f/670000000}')
-	printf '%s\n' "$uw" >"$H/power1_average"
 	sleep 1
 done
 EOF
@@ -230,11 +233,119 @@ EOF
 fi
 
 
+# Hide AdwActionRow / graph widgets whose subtitle is N/A (no fake values).
+# This hooks GTK/libadwaita setters only — not sysfs.
+cat >/usr/local/src/dagu-resources-hide-na.c <<'EOF'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <string.h>
+
+struct gtype_instance { void *g_class; };
+struct gtype_class { unsigned long g_type; };
+
+static int is_na(const char *s)
+{
+	if (!s)
+		return 1;
+	while (*s == ' ' || *s == '\t')
+		s++;
+	if (!*s)
+		return 1;
+	if (strcmp(s, "N/A") == 0 || strcmp(s, "n/a") == 0)
+		return 1;
+	if (strcmp(s, "不适用") == 0 || strcmp(s, "不可用") == 0)
+		return 1;
+	if (strcmp(s, "—") == 0 || strcmp(s, "-") == 0)
+		return 1;
+	return 0;
+}
+
+static void set_visible(void *widget, int vis)
+{
+	static void (*fn)(void *, int);
+	if (!fn)
+		fn = dlsym(RTLD_DEFAULT, "gtk_widget_set_visible");
+	if (fn && widget)
+		fn(widget, vis);
+}
+
+static void *widget_parent(void *widget)
+{
+	static void *(*fn)(void *);
+	if (!fn)
+		fn = dlsym(RTLD_DEFAULT, "gtk_widget_get_parent");
+	return fn ? fn(widget) : NULL;
+}
+
+static const char *type_name(void *obj)
+{
+	static const char *(*fn)(unsigned long);
+	struct gtype_instance *inst;
+	struct gtype_class *cls;
+	if (!obj)
+		return "";
+	if (!fn)
+		fn = dlsym(RTLD_DEFAULT, "g_type_name");
+	if (!fn)
+		return "";
+	inst = obj;
+	if (!inst->g_class)
+		return "";
+	cls = inst->g_class;
+	return fn(cls->g_type) ? fn(cls->g_type) : "";
+}
+
+static void hide_graph_if_na(void *label, const char *text)
+{
+	void *w;
+	int i;
+	if (!is_na(text))
+		return;
+	w = label;
+	for (i = 0; i < 8 && w; i++) {
+		const char *n = type_name(w);
+		if (strcmp(n, "ResGraphBox") == 0 ||
+		    strcmp(n, "ResDoubleGraphBox") == 0) {
+			set_visible(w, 0);
+			return;
+		}
+		w = widget_parent(w);
+	}
+}
+
+void adw_action_row_set_subtitle(void *self, const char *subtitle)
+{
+	static void (*real)(void *, const char *);
+	if (!real)
+		real = dlsym(RTLD_NEXT, "adw_action_row_set_subtitle");
+	if (real)
+		real(self, subtitle);
+	set_visible(self, !is_na(subtitle));
+}
+
+void gtk_label_set_label(void *self, const char *str)
+{
+	static void (*real)(void *, const char *);
+	if (!real)
+		real = dlsym(RTLD_NEXT, "gtk_label_set_label");
+	if (real)
+		real(self, str);
+	hide_graph_if_na(self, str);
+}
+EOF
+mkdir -p /usr/local/src /usr/local/lib
+if command -v cc >/dev/null 2>&1; then
+	cc -shared -fPIC -O2 -o /usr/local/lib/libdagu-resources-hide-na.so \
+		/usr/local/src/dagu-resources-hide-na.c -ldl
+elif [ ! -f /usr/local/lib/libdagu-resources-hide-na.so ]; then
+	echo "dagu-resources-hide-na.so missing and no C compiler" >&2
+	exit 1
+fi
+
 cat >/usr/local/bin/dagu-resources <<'EOF'
 #!/bin/sh
-# GPU stats come from kernel sysfs on card0/device (msm_gpu_resources_sysfs).
-# Do not LD_PRELOAD: Resources issues raw syscalls and the hook never fires.
 export PATH="/usr/local/lib/dagu-resources-bin:${PATH}"
+export LD_PRELOAD="/usr/local/lib/libdagu-resources-hide-na.so${LD_PRELOAD:+:$LD_PRELOAD}"
 exec /usr/bin/resources "$@"
 EOF
 chmod 755 /usr/local/bin/dagu-resources

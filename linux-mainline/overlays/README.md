@@ -4,6 +4,7 @@
 
 | 文件 | 作用 |
 |------|------|
+| `drivers/gpu/drm/panel/panel-xiaomi-dagu-l81a.c` | L81A dual-DPHY，120Hz+DSC，双 KTZ8866 `backlight-aux` |
 | `drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c` | 在 DPU `card0/device` 上暴露 `gpu_busy_percent` / VRAM / hwmon，给 GNOME Resources 读 Adreno |
 | `drivers/input/touchscreen/himax-dagu.c` | HX83121 SPI；完整 CAF hxchipset 在 vendor，不入库 |
 | `drivers/usb/misc/ps5169-dagu.c` | PS5169 USB3/DP redriver，CAF 初始化序列 |

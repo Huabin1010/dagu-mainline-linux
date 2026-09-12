@@ -1,11 +1,15 @@
 #!/bin/sh
-# dagu Chrome: native Wayland + GLES (Ozone cannot map Vulkan).
-# Buffer layout: noubwc is not enough — a6xx TILE still snows when
-# mutter imports the dmabuf as LINEAR (modifier 0, pitch=width*4).
+# dagu Chrome: native Wayland + GLES. GPU raster stays on.
+# Ozone tags linux-dmabuf LINEAR; force GBM pixels LINEAR (dagu-linear-mod.c)
+# and load dagu-mesa (unused-depth color sysmem; 3D with depth stays GMEM).
+# Never into gnome-shell.
 export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"
-export TU_DEBUG="${TU_DEBUG:-noubwc}"
-export FD_MESA_DEBUG="${FD_MESA_DEBUG:-noubwc,notile}"
-export MESA_VK_WSI_DEBUG="${MESA_VK_WSI_DEBUG:-linear}"
+if [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
+	export LD_LIBRARY_PATH="/usr/local/lib/dagu-mesa${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
+	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 exec /opt/google/chrome/chrome \
 	--ozone-platform=wayland \
 	--ozone-platform-hint=wayland \
@@ -17,5 +21,5 @@ exec /opt/google/chrome/chrome \
 	--disable-gtk-ime \
 	--wayland-text-input-version=3 \
 	--enable-features=WaylandTextInputV3 \
-	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE \
+	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation \
 	"$@"

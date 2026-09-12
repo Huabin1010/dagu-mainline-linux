@@ -1,0 +1,52 @@
+From: dagu adaptation
+Subject: freedreno: sysmem bypass when depth is unused
+
+Chromium Ozone tags linux-dmabuf LINEAR. dagu-linear-mod.c forces GBM
+pixels LINEAR so the contract matches. a6xx BLIT_EVENT_STORE still
+writes macrotile into those buffers; ANGLE/Skia then sample them as
+LINEAR (backdrop-filter snow).
+
+Electron/Skia RTs are tile_mode 0, no depth test, 1-3 draws, no blend
+bit — GMEM of those batches snows. Bypass GMEM whenever color is
+attached and depth/stencil is not actually used. Three.js with a real
+depth test keeps GMEM binning and does not CCU-hang.
+
+CP_BLIT r2d during BIN_RESOLVE snows the whole window on a650; do not
+use it as the LINEAR store.
+
+Load via LD_LIBRARY_PATH=/usr/local/lib/dagu-mesa for Chrome and
+Mineradio. Never replace gnome-shell Mesa.
+
+Applies on mesa 26.0.8:
+  src/gallium/drivers/freedreno/freedreno_gmem.c
+
+--- a/src/gallium/drivers/freedreno/freedreno_gmem.c
++++ b/src/gallium/drivers/freedreno/freedreno_gmem.c
+@@ -756,6 +756,24 @@ fd_gmem_render_tiles(struct fd_batch *batch)
+    if (batch->tessellation) {
+       assert(ctx->emit_sysmem_prep);
+       sysmem = true;
+    }
+ 
++   /* dagu a650: GMEM BLIT_EVENT_STORE into LINEAR color is sampled as
++    * LINEAR by ANGLE/Skia (backdrop-filter snow). Mineradio/Electron
++    * Skia RTs are tile_mode 0, zs unused, 1-3 draws, no blend bit —
++    * those batches must bypass GMEM. Three.js with a real depth test
++    * keeps GMEM.
++    */
++   if (!sysmem && ctx->emit_sysmem_prep && pfb->nr_cbufs > 0) {
++      bool depth_used = pfb->zsbuf.texture &&
++         (batch->gmem_reason & (FD_GMEM_DEPTH_ENABLED |
++                                FD_GMEM_STENCIL_ENABLED |
++                                FD_GMEM_CLEARS_DEPTH_STENCIL));
++      if (!depth_used) {
++         for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
++            if (pfb->cbufs[i].texture) {
++               sysmem = true;
++               break;
++            }
++         }
++      }
++   }
++
+    fd_reset_wfi(batch);

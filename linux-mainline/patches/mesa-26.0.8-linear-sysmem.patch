@@ -1,58 +1,23 @@
 From: dagu adaptation
-Subject: freedreno: sysmem when color RT is LINEAR
+Subject: freedreno: LINEAR sysmem including FB fetch
 
-a650 BLIT_EVENT_STORE writes macrotile into TILE6_LINEAR. Large solids
-still look like UI; glyphs are high-frequency so they become 1-bit snow,
-and a scroll restores more wrong tiles.
+a650 BLIT_EVENT_STORE and A2D write macrotile into TILE6_LINEAR.
+CSS backdrop-filter snapshots / FB-fetches the LINEAR swapchain
+then blurs. Forcing FD_GMEM_FB_READ through GMEM destile failed
+(shadow also forced LINEAR) and fd6_resolve_linear_tile A2D snowed
+probe cards A–H. filter:blur of an element's own layer is fine.
 
-Do not use the BIN_RESOLVE CP_BLIT destile (random iova, whole-desktop
-snow). Do not force unused-depth sysmem of TILE6_3 (CCU hang 00800005).
+1. LINEAR color RTs always use sysmem, including FB fetch.
+   patch_fb_read_sysmem samples the real LINEAR descriptor.
+   CCU is flushed before the first fb_read draw in a batch.
+2. DAGU_LINEAR_SYSMEM forces 4bpp non-scanout color LINEAR (RGBA/BGRA).
+   R8 glyph atlases stay tiled — forcing those LINEAR deleted all
+   Chrome text. Destile shadows can override via
+   fd_dagu_set_force_tiled() to allocate a real TILE6_3 BO.
+3. A2D is skipped when either end is LINEAR (3D sysmem writes linear).
+4. Small TILE dests of a LINEAR copy are discard-swapped to LINEAR
+   without a nested shadow blit (that asserted in_blit).
+5. Never fall back to fd6_resolve_linear_tile (macrotile / random iova).
 
-Bypass GMEM only when the color RT tile mode is linear. Tiled WebGL
-stays GMEM. DAGU_LINEAR_SYSMEM=0 disables the hook.
-
---- a/src/gallium/drivers/freedreno/freedreno_gmem.c
-+++ b/src/gallium/drivers/freedreno/freedreno_gmem.c
-@@ -6,6 +6,8 @@
-  *    Rob Clark <robclark@freedesktop.org>
-  */
- 
-+#include <stdlib.h>
-+
- #include "pipe/p_state.h"
- #include "util/format/u_format.h"
- #include "util/hash_table.h"
-@@ -753,6 +755,35 @@
-       sysmem = true;
-    }
- 
-+   /* dagu a650: BLIT_EVENT_STORE of TILE6_LINEAR writes macrotile. Large
-+    * solids still look like UI; glyphs are high-frequency so they read as
-+    * 1-bit snow, and a scroll restores more wrong tiles. Per-tile CP_BLIT
-+    * destile in RM6_BIN_RESOLVE writes a random iova — keep that off.
-+    * unused-depth sysmem of TILE6_3 WebGL CCU-hangs (irq 00800005). Only
-+    * bypass when the color RT itself is linear. DAGU_LINEAR_SYSMEM=0
-+    * disables the hook for A/B.
-+    */
-+   if (!sysmem && ctx->emit_sysmem_prep) {
-+      static int linear_sysmem = -1;
-+      if (linear_sysmem < 0) {
-+         const char *e = getenv("DAGU_LINEAR_SYSMEM");
-+         linear_sysmem = (e && atoi(e) != 0);
-+      }
-+      if (linear_sysmem) {
-+         for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
-+            struct pipe_surface *psurf = &pfb->cbufs[i];
-+            if (!psurf->texture)
-+               continue;
-+            if (fd_resource_tile_mode(psurf->texture, psurf->level) == 0) {
-+               sysmem = true;
-+               break;
-+            }
-+         }
-+      }
-+   }
-+
-    fd_reset_wfi(batch);
- 
-    ctx->stats.batch_total++;
+Scanout / depth stay tiled. DAGU_LINEAR_SYSMEM=0 disables all of this.
+Do not set the env in gnome-shell.

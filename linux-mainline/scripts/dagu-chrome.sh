@@ -30,6 +30,15 @@ fi
 if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
 	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
+# LINEAR color must not go through GMEM store: a650 BLIT_EVENT_STORE
+# writes macrotile (glass / WebGL swapchain snow). Sysmem keeps GPU
+# draw, including CSS backdrop-filter FB fetch (patch_fb_read_sysmem).
+# Tiled WebGL stays GMEM. Never set this in gnome-shell
+# (LINEAR+stencil sysmem blacked scanout).
+export DAGU_LINEAR_SYSMEM=1
+# Leftover destile for any remaining GMEM LINEAR. Shadow alloc is
+# force-tiled; do not fall back to fd6_resolve_linear_tile.
+export DAGU_LINEAR_DESTILE=1
 # lcd-text-aa@2 = Disabled in chrome://flags, survives UI chrome paths
 # that do not look at --disable-lcd-text.
 if [ ! -e "$lock" ] && [ -f "$profile/Local State" ]; then
@@ -68,5 +77,6 @@ exec /opt/google/chrome/chrome \
 	--enable-features=WaylandTextInputV3,WaylandFractionalScaleV1 \
 	--disable-lcd-text \
 	--font-render-hinting=none \
+	--disable-partial-swap \
 	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation \
 	"$@"

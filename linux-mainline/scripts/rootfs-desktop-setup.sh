@@ -149,6 +149,8 @@ fi
 if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
 	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
+export DAGU_LINEAR_SYSMEM=1
+export DAGU_LINEAR_DESTILE=1
 if [ ! -e "$lock" ] && [ -f "$profile/Local State" ]; then
 	python3 - "$profile/Local State" <<'PY' 2>/dev/null || true
 import json, sys
@@ -185,6 +187,7 @@ exec /opt/google/chrome/chrome \
 	--enable-features=WaylandTextInputV3,WaylandFractionalScaleV1 \
 	--disable-lcd-text \
 	--font-render-hinting=none \
+	--disable-partial-swap \
 	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation \
 	"$@"
 EOF
@@ -229,6 +232,62 @@ for line in text.splitlines(True):
 p.write_text("".join(out))
 PY
 	fi
+fi
+
+# Mineradio is Electron + Three.js WebGL + CSS backdrop-filter. Same Ozone
+# / LINEAR / grayscale-DPR contract as Chrome. Never notile (WebGL hang).
+if [ -x /opt/Mineradio/mineradio ]; then
+	cat >/usr/local/bin/mineradio <<'EOF'
+#!/bin/sh
+export ELECTRON_OZONE_PLATFORM_HINT=wayland
+export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"
+export FREETYPE_PROPERTIES="${FREETYPE_PROPERTIES:-truetype:interpreter-version=40}"
+if [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
+	export LD_LIBRARY_PATH="/usr/local/lib/dagu-mesa${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
+	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+export DAGU_LINEAR_SYSMEM=1
+export DAGU_LINEAR_DESTILE=1
+exec /opt/Mineradio/mineradio \
+	--ozone-platform=wayland \
+	--ozone-platform-hint=wayland \
+	--in-process-gpu \
+	--use-gl=angle \
+	--use-angle=gles \
+	--start-maximized \
+	--enable-features=WaylandFractionalScaleV1 \
+	--disable-lcd-text \
+	--font-render-hinting=none \
+	--disable-partial-swap \
+	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation \
+	--no-sandbox \
+	"$@"
+EOF
+	chmod 755 /usr/local/bin/mineradio
+	python3 - <<'PY'
+from pathlib import Path
+p = Path("/opt/Mineradio/resources/app/desktop/main.js")
+if not p.exists():
+    raise SystemExit(0)
+text = p.read_text(encoding="utf-8")
+orig = text
+text = text.replace(
+    "process.env.FD_MESA_DEBUG = 'noubwc,notile';",
+    "process.env.FD_MESA_DEBUG = process.env.FD_MESA_DEBUG || 'noubwc';",
+    1,
+)
+needle = "['disable-features', 'Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation'],"
+extra = needle + """
+    ['enable-features', 'WaylandFractionalScaleV1'],
+    ['disable-lcd-text'],
+    ['font-render-hinting', 'none'],"""
+if "['disable-lcd-text']" not in text and needle in text:
+    text = text.replace(needle, extra, 1)
+if text != orig:
+    p.write_text(text, encoding="utf-8")
+PY
 fi
 
 # Default first-boot scale. Fonts must keep working if the user picks

@@ -289,6 +289,21 @@ static uint64_t real_bo_modifier(struct gbm_bo *bo)
 	return (real && bo) ? real(bo) : DRM_FORMAT_MOD_INVALID;
 }
 
+/* Wayland / mutter scanout must stay LINEAR. Backdrop-filter layers are
+ * small GBM BOs; forcing those LINEAR makes a650 event-store write
+ * macrotile (glass snow on the right of the pill).
+ */
+static int should_force_linear(uint32_t width, uint32_t height, uint32_t flags)
+{
+	unsigned long px = (unsigned long)width * (unsigned long)height;
+
+	if (flags & GBM_BO_USE_SCANOUT)
+		return 1;
+	if (px >= 400000ul)
+		return 1;
+	return 0;
+}
+
 static struct gbm_bo *note_created_bo(struct gbm_bo *bo, const char *tag,
 				      uint32_t width, uint32_t height)
 {
@@ -454,7 +469,15 @@ static void *dagu_mesa_eglCreateImageKHR(EGLDisplay dpy, void *ctx, EGLint targe
 			copy[n++] = key;
 			copy[n++] = val;
 		}
-		mod = DRM_FORMAT_MOD_LINEAR;
+		mod = lookup_mod_fd(fd);
+		if (mod == DRM_FORMAT_MOD_INVALID ||
+		    mod == DRM_FORMAT_MOD_LINEAR) {
+			/* Keep the caller's modifier. Forcing LINEAR here
+			 * imported TILED3 glass as linear (right-side snow).
+			 */
+			return real_eglCreateImageKHR(dpy, ctx, target, buffer,
+						      attrib_list);
+		}
 		have_mod = 1;
 		hi = (uint32_t)(mod >> 32);
 		lo = (uint32_t)mod;
@@ -587,11 +610,15 @@ struct gbm_bo *gbm_bo_create_with_modifiers(struct gbm_device *gbm,
 		real = real_gbm("gbm_bo_create_with_modifiers");
 	if (!real)
 		return NULL;
-	dlog_mods("with_modifiers -> SCANOUT LINEAR", width, height, modifiers,
-		  count);
+	/* Always real LINEAR pixels. ANGLE samples backdrop as LINEAR;
+	 * TILED3 pixels + LINEAR sample is the full-card glass snow.
+	 */
+	dlog_mods("with_modifiers -> LINEAR", width, height, modifiers, count);
 	return gbm_bo_create(gbm, width, height, format,
-			     GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING |
-				     GBM_BO_USE_LINEAR);
+			     (should_force_linear(width, height, 0)
+				      ? GBM_BO_USE_SCANOUT
+				      : 0) |
+				     GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
 }
 
 struct gbm_bo *gbm_bo_create_with_modifiers2(struct gbm_device *gbm,
@@ -668,16 +695,13 @@ uint64_t gbm_bo_get_modifier(struct gbm_bo *bo)
 	if (!real)
 		return DRM_FORMAT_MOD_INVALID;
 	mod = real(bo);
-	if (mod != DRM_FORMAT_MOD_LINEAR) {
-		FILE *log = fopen("/tmp/dagu-linear-mod.log", "a");
+	{
+		uint64_t remembered = lookup_bo_mod(bo);
 
-		if (log) {
-			fprintf(log, "pid=%d gbm_bo_get_modifier real=0x%llx -> LINEAR\n",
-				(int)getpid(), (unsigned long long)mod);
-			fclose(log);
-		}
+		if (remembered != DRM_FORMAT_MOD_INVALID)
+			mod = remembered;
 	}
-	return DRM_FORMAT_MOD_LINEAR;
+	return mod;
 }
 
 int gbm_bo_get_fd(struct gbm_bo *bo)

@@ -6,6 +6,7 @@
  */
 
 #include <linux/err.h>
+#include <linux/math64.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -62,6 +63,23 @@ static int dual_fg_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		return dual_fg_sum(fg, psp, &val->intval);
+	case POWER_SUPPLY_PROP_ENERGY_FULL:
+	case POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN: {
+		enum power_supply_property chg =
+			(psp == POWER_SUPPLY_PROP_ENERGY_FULL) ?
+			POWER_SUPPLY_PROP_CHARGE_FULL :
+			POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN;
+
+		ret = dual_fg_sum(fg, psp, &val->intval);
+		if (!ret)
+			return 0;
+		ret = dual_fg_sum(fg, chg, &val->intval);
+		if (ret)
+			return ret;
+		/* µWh = µAh * 3.87 V (BQ design energy uses ~3.87 V). */
+		val->intval = (int)div_u64((u64)val->intval * 3870, 1000);
+		return 0;
+	}
 	case POWER_SUPPLY_PROP_CAPACITY: {
 		union power_supply_propval fm = {}, fs = {};
 
@@ -177,6 +195,8 @@ static const enum power_supply_property dual_fg_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+	POWER_SUPPLY_PROP_ENERGY_FULL,
+	POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN,
 	POWER_SUPPLY_PROP_CYCLE_COUNT,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_MODEL_NAME,

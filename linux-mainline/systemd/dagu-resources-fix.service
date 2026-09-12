@@ -1,0 +1,14 @@
+[Unit]
+Description=dagu: Resources sysfs aliases (CPU temp, one battery, swap)
+After=local-fs.target systemd-udevd.service
+Wants=systemd-udevd.service
+# DRM/Adreno hwmon appears after display probe.
+After=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-resources-fix.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

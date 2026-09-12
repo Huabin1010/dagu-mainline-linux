@@ -1,0 +1,4 @@
+# Internal SM8250 UFS LUNs (sda–sdf): Android partitions, not user disks.
+# Nautilus would list LOGFS/cust/modem/persist as extra "drives".
+# USB storage is not on 1d84000.ufshc and stays visible.
+ACTION=="add|change", SUBSYSTEM=="block", DEVPATH=="*/1d84000.ufshc/*", ENV{UDISKS_IGNORE}="1"

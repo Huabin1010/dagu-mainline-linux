@@ -44,7 +44,7 @@
 | 子系统 | 状态 | 一句话 |
 |--------|------|--------|
 | 启动链 / B 槽 Linux | **已通** | 7.0 Image 站住，g_serial >30s |
-| UFS + Ubuntu 桌面 | **已通** | userdata ext4，GNOME |
+| UFS + Ubuntu 桌面 | **已通** | userdata ext4，GNOME。内部 UFS 其它 LUN 对 Nautilus / Resources 隐藏，只留 userdata（sda）和 USB |
 | USB gadget 串口 | **已通** | `0525:a4a7` / `ttyGS0` |
 | 显示 L81A 120Hz | **已通** | 1600×2560，DSC dual-DPHY |
 | GPU Adreno 650 / Turnip | **已通** | GMU + Mesa，dEQP 冒烟过 |
@@ -106,6 +106,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - zap：本机签名 `qcom/sm8250/xiaomi/dagu/a650_zap.mbn`（不要 elish）
 - SQE：linux-firmware **31964 字节、word1 `0x112`**；dump 旧 0.93 会被拒
 - `gpu-initialized: 1`，`/dev/dri/card0` + `renderD128`，GNOME 走 msm atomic（不是 llvmpipe）
+- GNOME Resources 只扫 `/sys/class/drm/card0/device`（DPU，不是 `3d00000.gpu`）。`linux-mainline/overlays/linux/drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c` 提供 `gpu_busy_percent`、`mem_info_vram_*`、`hwmon/freq1_input` / `freq2_input` / `temp1_input` / `power1_average`（功耗为占用×OPP 估算，无独立 GPU 电表）。Resources 只认 `hwmon?`（个位数），实机是 `hwmon31`，由 `linux-mainline/scripts/dagu-resources-fix.sh` bind 成 `hwmon0`。CPU 名走包装后的 `lscpu`（Kryo 585 / Snapdragon 870）。Wi‑Fi 厂商依赖单空格 `pci.ids`。电池 Design Capacity 读 `energy_full_design`（`xiaomi-dual-fg`）。
 - 用户态：Mesa Turnip，`vkcube` 选中 Adreno 650
 - dEQP 冒烟 / compute / draw 核心组 0 失败（详见 `linux-mainline/docs/dagu-wifi-gpu-turnip-cpu.md`）
 

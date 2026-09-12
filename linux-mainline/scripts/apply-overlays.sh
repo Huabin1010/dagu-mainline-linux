@@ -28,6 +28,7 @@ install_src drivers/power/supply/p9418-dagu.c
 install_src drivers/power/supply/xiaomi-dual-fg.c
 install_src drivers/watchdog/qcom-wdt-early-dagu.c
 install_src drivers/gpu/drm/msm/msm_fbdev.c
+install_src drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c
 install_src drivers/media/i2c/imx596-dagu.c
 
 append_once() {
@@ -76,6 +77,10 @@ append_once "$KERNEL_SRC/drivers/watchdog/Makefile" \
 append_once "$KERNEL_SRC/drivers/media/i2c/Makefile" \
 	'imx596-dagu.o' \
 	'obj-$(CONFIG_VIDEO_IMX596_DAGU) += imx596-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/gpu/drm/msm/Makefile" \
+	'msm_gpu_resources_sysfs.o' \
+	'msm-y += msm_gpu_resources_sysfs.o'
 
 python3 - "$KERNEL_SRC" <<'PY'
 from pathlib import Path
@@ -813,6 +818,36 @@ if needle not in text:
 text = text.replace(needle, repl)
 path.write_text(text)
 print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+hdr = root / "drivers/gpu/drm/msm/msm_drv.h"
+src = root / "drivers/gpu/drm/msm/msm_drv.c"
+decl = "void msm_gpu_resources_sysfs_init(struct device *dev);\n"
+ht = hdr.read_text()
+if "msm_gpu_resources_sysfs_init" not in ht:
+    needle = "bool msm_gpu_no_components(void);\n"
+    if needle not in ht:
+        raise SystemExit(f"{hdr}: msm_gpu_no_components needle missing")
+    hdr.write_text(ht.replace(needle, needle + "\n" + decl, 1))
+    print(f"patched {hdr}: msm_gpu_resources_sysfs_init")
+st = src.read_text()
+if "msm_gpu_resources_sysfs_init" not in st:
+    needle = "\tif (priv->kms_init)\n\t\tmsm_drm_kms_post_init(dev);\n\n\treturn 0;\n"
+    repl = (
+        "\tif (priv->kms_init)\n"
+        "\t\tmsm_drm_kms_post_init(dev);\n\n"
+        "\tmsm_gpu_resources_sysfs_init(dev);\n\n"
+        "\treturn 0;\n"
+    )
+    if needle not in st:
+        raise SystemExit(f"{src}: msm_drm_kms_post_init needle missing")
+    src.write_text(st.replace(needle, repl, 1))
+    print(f"patched {src}: msm_gpu_resources_sysfs_init")
 PY
 
 python3 - "$KERNEL_SRC/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c" <<'PY'

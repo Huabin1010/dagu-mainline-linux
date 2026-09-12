@@ -27,12 +27,14 @@ apt-get install -y --no-install-recommends \
 	e2fsprogs dbus-user-session polkitd pkexec \
 	ubuntu-desktop-minimal gdm3 gnome-session gnome-terminal \
 	gnome-control-center gnome-settings-daemon nautilus \
+	resources gnome-text-editor gnome-calculator gnome-clocks \
+	gnome-characters gnome-disk-utility file-roller eog evince \
 	libgl1-mesa-dri libgbm1 mesa-vulkan-drivers \
 	libinput-bin xserver-xorg-input-libinput \
 	fonts-noto-core fonts-noto-cjk \
 	network-manager onboard \
 	ibus ibus-gtk3 ibus-gtk4 ibus-libpinyin \
-	bluez systemd-timesyncd
+	bluez systemd-timesyncd pci.ids
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -409,6 +411,11 @@ sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
 power-button-action='nothing'
 idle-dim=false
+
+[org/gnome/desktop/media-handling]
+automount=false
+automount-open=false
+autorun-never=true
 EOF
 dconf update 2>/dev/null || true
 
@@ -965,6 +972,12 @@ systemctl start dagu-time-sync.service
 EOF
 chmod 755 /etc/NetworkManager/dispatcher.d/50-dagu-time-sync
 systemctl enable systemd-timesyncd.service 2>/dev/null || true
+
+# Hide internal UFS partitions from Files/Nautilus (USB sticks stay visible).
+mkdir -p /etc/udev/rules.d
+cat >/etc/udev/rules.d/99-dagu-hide-internal-ufs.rules <<'EOF'
+ACTION=="add|change", SUBSYSTEM=="block", DEVPATH=="*/1d84000.ufshc/*", ENV{UDISKS_IGNORE}="1"
+EOF
 
 # Speakers: ACP has no analog-stereo path for Q6 TDM, so PipeWire stayed
 # on Dummy Output. UCM HiFi + mixer oneshot give a 2ch Speaker sink.

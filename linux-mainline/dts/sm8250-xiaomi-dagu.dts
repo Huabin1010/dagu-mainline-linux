@@ -320,6 +320,53 @@
 	};
 
 	/*
+	 * Dual KTZ8866: CAF qupv3_se11 (gpio60/61) + se9 (gpio125/126).
+	 * GENI i2c9/i2c11 would geni_se_init-hang this QHEE. Bit-bang.
+	 * Do not bind enable-gpios (GPIO139): panel owns HWEN.
+	 */
+	ktz_i2c_se11: i2c-gpio-se11 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ktz_i2c_se11_default>;
+		sda-gpios = <&tlmm 60 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 61 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		clock-frequency = <400000>;
+
+		ktz8866_a: backlight@11 {
+			compatible = "kinetic,ktz8866";
+			reg = <0x11>;
+			vddpos-supply = <&bl_vddpos_5p5>;
+			vddneg-supply = <&bl_vddneg_5p5>;
+			current-num-sinks = <5>;
+			kinetic,internal;
+		};
+	};
+
+	ktz_i2c_se9: i2c-gpio-se9 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ktz_i2c_se9_default>;
+		sda-gpios = <&tlmm 125 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 126 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		clock-frequency = <400000>;
+
+		ktz8866_b: backlight@11 {
+			compatible = "kinetic,ktz8866";
+			reg = <0x11>;
+			vddpos-supply = <&bl_vddpos_5p5>;
+			vddneg-supply = <&bl_vddneg_5p5>;
+			current-num-sinks = <5>;
+			kinetic,internal;
+		};
+	};
+
+	/*
 	 * CAF dual-FuelGauge: weighted SoC, max(V), sum(I/charge).
 	 * Do not request fg-master-disable-gpio (117) / fg-slave-disable-gpio
 	 * (91) — CAF uses them to isolate a cell; hogging would drop a pack.
@@ -511,6 +558,20 @@
 
 	wls_i2c_se8_default: wls-i2c-se8-default-state {
 		pins = "gpio24", "gpio25";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	ktz_i2c_se11_default: ktz-i2c-se11-default-state {
+		pins = "gpio60", "gpio61";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	ktz_i2c_se9_default: ktz-i2c-se9-default-state {
+		pins = "gpio125", "gpio126";
 		function = "gpio";
 		drive-strength = <2>;
 		bias-disable;
@@ -864,14 +925,10 @@
 	enn-supply = <&bl_vddneg_5p5>;
 	reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
 	tp-reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
-	/* Dual KTZ HWEN. ABL leaves it high; panel disable must drop it. */
+	/* Dual KTZ HWEN. ABL leaves it high; never drop it this session. */
 	hwen-gpios = <&tlmm 139 GPIO_ACTIVE_HIGH>;
-	/*
-	 * KTZ I2C stays off (i2c9 hang). A phandle to the disabled chip
-	 * would make drm_panel_of_backlight() EPROBE_DEFER forever.
-	 */
-	/delete-property/ backlight;
-	/delete-property/ backlight-aux;
+	backlight = <&ktz8866_a>;
+	backlight-aux = <&ktz8866_b>;
 	/delete-property/ rotation;
 	status = "okay";
 };

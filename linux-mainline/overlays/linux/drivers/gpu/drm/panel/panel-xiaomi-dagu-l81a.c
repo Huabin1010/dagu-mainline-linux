@@ -17,6 +17,8 @@
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/jiffies.h>
+#include <linux/kernel.h>
+#include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
@@ -46,7 +48,7 @@ struct dagu_l81a {
 	struct regulator *vddio;
 	struct regulator *enp;
 	struct regulator *enn;
-	struct backlight_device *backlight_aux;
+	struct i2c_client *ktz[2];
 	struct drm_dsc_config dsc;
 	bool prepared;
 	bool dsc_enabled;
@@ -180,24 +182,23 @@ static void l81a_hwen_on(struct dagu_l81a *ctx)
 		gpiod_set_value_cansleep(ctx->hwen_gpio, 1);
 }
 
-static int l81a_bl_dcs(struct dagu_l81a *ctx, int brightness)
-{
-	/*
-	 * Video-mode cmd DMA for DCS 0x51 always hits -ETIMEDOUT (~200 ms
-	 * per dual-DSI host). Userspace writing l81a-wled then stalling
-	 * the DRM atomic thread: power key "blinks" and the panel stays
-	 * dark. KTZ brightness is ABL+HWEN only; do not poke 0x51 here.
-	 */
-	(void)ctx;
-	(void)brightness;
-	return 0;
-}
+int ktz8866_set_brightness(struct i2c_client *client, unsigned int brightness);
 
 static int l81a_backlight_update(struct backlight_device *bl)
 {
 	struct dagu_l81a *ctx = bl_get_data(bl);
+	int brightness = backlight_get_brightness(bl);
+	unsigned int hw;
 
-	l81a_bl_dcs(ctx, backlight_get_brightness(bl));
+	/*
+	 * Quadratic map: GNOME's linear 0–2047 still looks bright at
+	 * 10–20%. Square so the bottom of the slider is actually dim.
+	 */
+	hw = (unsigned int)(((u64)brightness * (u64)brightness) / 2047);
+	if (hw < 32)
+		hw = 32;
+	ktz8866_set_brightness(ctx->ktz[0], hw);
+	ktz8866_set_brightness(ctx->ktz[1], hw);
 	return 0;
 }
 
@@ -412,7 +413,7 @@ static int l81a_disable(struct drm_panel *panel)
 	 * Leave the Himax programmed. DCS 0x28/0x10 and 0x51=0 both
 	 * ETIMEDOUT on this video-mode link; a later unblank cannot
 	 * replay B9 init (-EINVAL/-ETIMEDOUT) so the tablet stays dark.
-	 * Userspace dims with l81a-wled if it must.
+	 * Userspace dims with l81a-wled → dual KTZ I2C (i2c-gpio).
 	 */
 	(void)panel;
 	return 0;
@@ -581,34 +582,32 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 
 	drm_panel_init(&ctx->panel, dev, &l81a_funcs, DRM_MODE_CONNECTOR_DSI);
 	ctx->panel.prepare_prev_first = true;
-	ret = drm_panel_of_backlight(&ctx->panel);
-	if (ret == -EPROBE_DEFER) {
-		/*
-		 * Dual KTZ used to register the same backlight name, so the
-		 * primary chip never appeared and this deferred forever —
-		 * GPIO 139 stayed with ABL, constant light, no blinks.
-		 * HWEN is on the panel now; attach anyway so enable() can
-		 * blink even if I2C is late or missing.
-		 */
-		dev_warn(dev, "primary backlight not ready, GPIO blinks still run\n");
-		ret = 0;
-	} else if (ret) {
-		return dev_err_probe(dev, ret, "backlight\n");
-	}
 
-	bl_np = of_parse_phandle(dev->of_node, "backlight-aux", 0);
-	if (bl_np) {
-		ctx->backlight_aux = of_find_backlight_by_node(bl_np);
+	for (i = 0; i < 2; i++) {
+		const char *prop = i ? "backlight-aux" : "backlight";
+
+		bl_np = of_parse_phandle(dev->of_node, prop, 0);
+		if (!bl_np)
+			continue;
+		ctx->ktz[i] = of_find_i2c_device_by_node(bl_np);
 		of_node_put(bl_np);
-		if (IS_ERR_OR_NULL(ctx->backlight_aux))
-			ctx->backlight_aux = NULL;
+		if (!ctx->ktz[i]) {
+			int j;
+
+			for (j = 0; j < i; j++) {
+				if (ctx->ktz[j])
+					put_device(&ctx->ktz[j]->dev);
+				ctx->ktz[j] = NULL;
+			}
+			return -EPROBE_DEFER;
+		}
 	}
 
-	if (!ctx->panel.backlight && ctx->hwen_gpio) {
+	if (!ctx->panel.backlight) {
 		const struct backlight_properties props = {
 			.type = BACKLIGHT_RAW,
 			.max_brightness = 2047,
-			.brightness = 1500,
+			.brightness = 400,
 			.power = BACKLIGHT_POWER_ON,
 		};
 
@@ -618,8 +617,15 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 			dev_warn(dev, "l81a-wled register %ld\n",
 				 PTR_ERR(ctx->panel.backlight));
 			ctx->panel.backlight = NULL;
+		} else {
+			backlight_update_status(ctx->panel.backlight);
 		}
 	}
+
+	dev_info(dev, "L81A probe hwen=%d ktz=%d aux=%d bl=%d\n",
+		 ctx->hwen_gpio ? 1 : 0, ctx->ktz[0] ? 1 : 0,
+		 ctx->ktz[1] ? 1 : 0,
+		 ctx->panel.backlight ? 1 : 0);
 
 	drm_panel_add(&ctx->panel);
 
@@ -635,9 +641,6 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 			return dev_err_probe(dev, ret, "attach DSI%d\n", i);
 	}
 
-	dev_info(dev, "L81A probe hwen=%d aux=%d bl=%d\n",
-		 ctx->hwen_gpio ? 1 : 0, ctx->backlight_aux ? 1 : 0,
-		 ctx->panel.backlight ? 1 : 0);
 	return 0;
 }
 
@@ -645,8 +648,10 @@ static void l81a_remove(struct mipi_dsi_device *dsi)
 {
 	struct dagu_l81a *ctx = mipi_dsi_get_drvdata(dsi);
 
-	if (ctx->backlight_aux)
-		put_device(&ctx->backlight_aux->dev);
+	if (ctx->ktz[0])
+		put_device(&ctx->ktz[0]->dev);
+	if (ctx->ktz[1])
+		put_device(&ctx->ktz[1]->dev);
 	drm_panel_remove(&ctx->panel);
 }
 

@@ -109,6 +109,8 @@
 #define SDP_UA					500000
 #define CDP_UA					1500000
 #define DCP_UA					2000000
+/* 5 V wall bricks often APSD as SDP; still allow 2 A (10 W). */
+#define ICL_5V_MAX_UA				2000000
 
 struct pm8150b_chg {
 	struct device *dev;
@@ -184,7 +186,7 @@ static void chg_status_work(struct work_struct *work)
 	struct pm8150b_chg *chg = container_of(work, struct pm8150b_chg,
 					       status_work.work);
 	unsigned int apsd, result;
-	int online = 0, icl = SDP_UA, ret, tries;
+	int online = 0, icl = ICL_5V_MAX_UA, ret, tries;
 
 	ret = chg_usb_online(chg, &online);
 	if (ret || !online) {
@@ -216,13 +218,11 @@ static void chg_status_work(struct work_struct *work)
 		return;
 	result &= APSD_RESULT_STATUS_MASK;
 
-	if (result & CDP_CHARGER_BIT)
-		icl = CDP_UA;
-	else if (result & (DCP_CHARGER_BIT | OCP_CHARGER_BIT |
-			   FLOAT_CHARGER_BIT | QC_2P0_BIT | QC_3P0_BIT))
-		icl = DCP_UA;
-	else
-		icl = SDP_UA;
+	/*
+	 * 5 V path: ICL 2 A. USB51 (500 mA) mode would cap even DCP bricks
+	 * that APSD as SDP. AICL can still fold if the cable collapses.
+	 */
+	icl = ICL_5V_MAX_UA;
 
 	chg_set_icl(chg, icl);
 	dev_info(chg->dev, "apsd=0x%02x icl=%d uA\n", result, icl);

@@ -4,11 +4,10 @@
  *
  * Copyright (C) 2022, 2023 Jianhua Lu <lujianhua000@gmail.com>
  *
- * dagu L81A (dual KTZ8866): CAF dualktz leaves BL_CFG1 PWM_ENABLE=1
- * (I2C × PWM). ABL does the same. Mainline never wrote 0x02, so Himax
- * PWM duty 0 made I2C brightness blinks invisible and the WLED looked
- * stuck on. Force I2C-only, and gate the shared HWEN GPIO for a
- * physical on/off the PWM path cannot hide.
+ * dagu L81A (dual KTZ8866): CAF/ABL leave BL_CFG1 PWM_ENABLE=1
+ * (I2C × PWM). Himax PWM duty is 0, so I2C 0x04/0x05 never shows
+ * unless bit 0 is cleared. Do not drive shared HWEN (GPIO 139):
+ * dropping it resets both chips until the next ABL boot.
  */
 
 #include <linux/backlight.h>
@@ -20,7 +19,9 @@
 #include <linux/of.h>
 #include <linux/regmap.h>
 
-#define DEFAULT_BRIGHTNESS 0
+int ktz8866_set_brightness(struct i2c_client *client, unsigned int brightness);
+
+#define DEFAULT_BRIGHTNESS 1500
 #define MAX_BRIGHTNESS 2047
 #define REG_MAX 0x15
 
@@ -54,7 +55,7 @@
  * brightness is registers 0x04/0x05 only. Rest matches CAF: OVP 31.5V,
  * exponential map.
  */
-#define BL_CFG1_CAF_DUAL 0x53
+#define BL_CFG1_I2C_ONLY 0x52
 /* CAF dual FULL-scale current 0x91. */
 #define BL_IFS_CAF_DUAL 0x91
 
@@ -87,7 +88,7 @@ static void ktz8866_init(struct ktz8866 *ktz)
 {
 	unsigned int val = 0;
 
-	ktz8866_write(ktz, BL_CFG1, BL_CFG1_CAF_DUAL);
+	ktz8866_write(ktz, BL_CFG1, BL_CFG1_I2C_ONLY);
 	/* 1µs current ramp (bits 6:3 = 0): blinks are edges, not 128ms fades. */
 	ktz8866_write(ktz, BL_CFG2, BIT(7) | PWM_HYST);
 	ktz8866_write(ktz, PWM_RAMP_TIME, BL_IFS_CAF_DUAL);
@@ -95,53 +96,52 @@ static void ktz8866_init(struct ktz8866 *ktz)
 
 	if (!of_property_read_u32(ktz->client->dev.of_node, "current-num-sinks",
 				  &val))
-		ktz8866_write(ktz, BL_EN, BIT(val) - 1);
+		ktz8866_write(ktz, BL_EN, (BIT(val) - 1) | BL_EN_BIT);
 	else
-		ktz8866_write(ktz, BL_EN, BIT(6) - 1);
+		ktz8866_write(ktz, BL_EN, (BIT(6) - 1) | BL_EN_BIT);
 
 	if (of_property_read_bool(ktz->client->dev.of_node,
 				  "kinetic,enable-lcd-bias"))
 		ktz8866_write(ktz, LCD_BIAS_CFG1, LCD_BIAS_EN);
 }
 
-static int ktz8866_backlight_update_status(struct backlight_device *backlight_dev)
+#define KTZ_MIN_BRIGHTNESS 32
+
+static int ktz8866_apply(struct ktz8866 *ktz, unsigned int brightness)
 {
-	struct ktz8866 *ktz = bl_get_data(backlight_dev);
-	unsigned int brightness = backlight_dev->props.brightness;
+	if (brightness > MAX_BRIGHTNESS)
+		brightness = MAX_BRIGHTNESS;
+	if (brightness < KTZ_MIN_BRIGHTNESS)
+		brightness = KTZ_MIN_BRIGHTNESS;
 
-	/*
-	 * Do not use backlight_get_brightness(): panel diagnostic blinks
-	 * run inside drm_panel_enable() before backlight_enable(), and
-	 * FBBLANK would force 0 so the KTZ never toggled.
-	 *
-	 * Primary chip owns shared HWEN (GPIO 139). Dropping it kills both
-	 * KTZ even if I2C is dead or still in I2C×PWM from ABL.
-	 */
-	if (ktz->enable_gpio) {
-		if (brightness == 0) {
-			gpiod_set_value_cansleep(ktz->enable_gpio, 0);
-			ktz->led_on = false;
-			return 0;
-		}
-		if (!ktz->led_on) {
-			gpiod_set_value_cansleep(ktz->enable_gpio, 1);
-			usleep_range(2000, 3000);
-			ktz8866_init(ktz);
-		}
-	}
-
-	if (!ktz->led_on && brightness > 0) {
+	/* Never drop HWEN or BL_EN: slider 0 stays a readable glow. */
+	if (!ktz->led_on) {
 		ktz8866_update_bits(ktz, BL_EN, BL_EN_BIT, BL_EN_BIT);
 		ktz->led_on = true;
-	} else if (brightness == 0) {
-		ktz8866_update_bits(ktz, BL_EN, BL_EN_BIT, 0);
-		ktz->led_on = false;
 	}
 
 	ktz8866_write(ktz, BL_BRT_LSB, brightness & 0x7);
 	ktz8866_write(ktz, BL_BRT_MSB, (brightness >> 3) & 0xFF);
-
 	return 0;
+}
+
+int ktz8866_set_brightness(struct i2c_client *client, unsigned int brightness)
+{
+	struct ktz8866 *ktz;
+
+	if (!client)
+		return -ENODEV;
+	ktz = i2c_get_clientdata(client);
+	if (!ktz)
+		return -ENODEV;
+	return ktz8866_apply(ktz, brightness);
+}
+EXPORT_SYMBOL_GPL(ktz8866_set_brightness);
+
+static int ktz8866_backlight_update_status(struct backlight_device *backlight_dev)
+{
+	return ktz8866_apply(bl_get_data(backlight_dev),
+			     backlight_dev->props.brightness);
 }
 
 static const struct backlight_ops ktz8866_backlight_ops = {
@@ -172,15 +172,33 @@ static int ktz8866_probe(struct i2c_client *client)
 	if (ret)
 		return dev_err_probe(&client->dev, ret, "get regulator vddneg failed\n");
 
-	ktz->enable_gpio = devm_gpiod_get_optional(&client->dev, "enable", GPIOD_OUT_HIGH);
-	if (IS_ERR(ktz->enable_gpio))
-		return PTR_ERR(ktz->enable_gpio);
+	/* GPIO139 HWEN is owned by the L81A panel. Do not request it. */
+	ktz->enable_gpio = NULL;
+
+	ktz8866_init(ktz);
+	ktz->led_on = true;
+	i2c_set_clientdata(client, ktz);
 
 	memset(&props, 0, sizeof(props));
 	props.type = BACKLIGHT_RAW;
 	props.max_brightness = MAX_BRIGHTNESS;
-	props.brightness = DEFAULT_BRIGHTNESS;
 	props.scale = BACKLIGHT_SCALE_LINEAR;
+	{
+		unsigned int lsb = 0, msb = 0, cur;
+
+		regmap_read(ktz->regmap, BL_BRT_LSB, &lsb);
+		regmap_read(ktz->regmap, BL_BRT_MSB, &msb);
+		cur = ((msb & 0xff) << 3) | (lsb & 0x7);
+		if (cur == 0)
+			cur = DEFAULT_BRIGHTNESS;
+		props.brightness = cur;
+	}
+
+	/* Dual-KTZ boards expose one l81a-wled; hide per-chip sysfs so
+	 * GNOME cannot dim only one half of the panel.
+	 */
+	if (of_property_read_bool(client->dev.of_node, "kinetic,internal"))
+		return 0;
 
 	backlight_dev = devm_backlight_device_register(&client->dev,
 					dev_name(&client->dev),
@@ -189,24 +207,12 @@ static int ktz8866_probe(struct i2c_client *client)
 		return dev_err_probe(&client->dev, PTR_ERR(backlight_dev),
 				"failed to register backlight device\n");
 
-	ktz8866_init(ktz);
-
-	i2c_set_clientdata(client, backlight_dev);
-	// #region agent log
-	pr_emerg("{\"sessionId\":\"5c27b9\",\"hypothesisId\":\"I\",\"location\":\"ktz8866.c:ktz8866_probe\",\"message\":\"ktz-probe-ok\",\"data\":{\"dev\":\"%s\"},\"timestamp\":0}\n",
-		 dev_name(&client->dev));
-	// #endregion
-	/* I2C-only + ABL leftover codes would keep the WLED on if we skip this. */
-	backlight_update_status(backlight_dev);
-
 	return 0;
 }
 
 static void ktz8866_remove(struct i2c_client *client)
 {
-	struct backlight_device *backlight_dev = i2c_get_clientdata(client);
-	backlight_dev->props.brightness = 0;
-	backlight_update_status(backlight_dev);
+	(void)client;
 }
 
 static const struct i2c_device_id ktz8866_ids[] = {

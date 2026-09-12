@@ -94,7 +94,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 面板：L81A dual-DPHY，**不是** elish NT36523 C-PHY
 - 驱动：`linux-mainline/overlays/linux/drivers/gpu/drm/panel/panel-xiaomi-dagu-l81a.c`
 - `prepare()` 发 CAF `E2=0x00`（120Hz）；`get_modes()` 只登记 120Hz，避免 GNOME 选同名 60Hz
-- 背光：双 KTZ8866。ABL 编程后只能靠 GPIO139 HWEN 维持，**整次开机不要拉低 HWEN**。`l81a_disable()`/`l81a_unprepare()`/`l81a_bl_dcs()` 必须空操作：video-mode 上 DCS `0x51` 每次 `-110`（约 400ms），电源键会闪一下再黑。短按只切 Mutter `PowerSaveMode` 0/3（`linux-mainline/scripts/dagu-power-button.py`）。长按关机。禁止 suspend。
+- 背光：双 KTZ8866。ABL 编程后靠 GPIO139 HWEN 维持，**整次开机不要拉低 HWEN**。GENI `i2c9`/`i2c11` 会 `geni_se_init` 挂死，走 `i2c-gpio`（CAF 焊盘 gpio60/61 + gpio125/126）。GNOME 只看到 `l81a-wled`（两颗 `kinetic,internal` 不进 sysfs，避免只暗一半）；滑条二次方映射后再写 0x04/0x05，**滑条 0 仍保持 11-bit 下限 32 且不清 BL_EN**（否则看不见）。`l81a_disable()`/`l81a_unprepare()` 仍空操作。短按只切 Mutter `PowerSaveMode` 0/3。长按关机。禁止 suspend。
 - 分辨率：1600×2560 扫描（竖屏 framebuffer）
 - 压测脚本：`linux-mainline/scripts/dagu-display-stress.sh`、`linux-mainline/scripts/dagu-refresh-test.py`
 - 滑动窗口花屏 / GNOME 断触：fb0 Himax 测试丝滑。GNOME 主 fb 曾是 **XR30 10bpc**（L81A DSC 是 8bpc），再加 `CLUTTER_PAINT` 全屏重绘会拖死输入。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 `format=XR24` `modifier=0x0`；用户态去掉 `CLUTTER_PAINT`、`GSK_RENDERER=ngl`、关掉 onboard / linger（`linux-mainline/scripts/rootfs-desktop-setup.sh`）
@@ -130,6 +130,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - `&spi4` / `&gpi_dma0` disabled；`# CONFIG_SPI_QCOM_GENI is not set`
 - 滑动断触：IRQ 线程里不要 `dev_info`（`ignore_loglevel` 会堵 fbcon/串口）；DT 用 `IRQ_TYPE_LEVEL_LOW`，坏帧（全 0xff）不当抬手
 - OSK 连打字母：LEVEL_LOW + spi-gpio 会在一次按住里读到校验失败 / n=0 毛刺，tracking ID 被拆成多次点击。驱动排空 IRQ、校验和、连续空帧才抬手，80ms 超时兜底（`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`）
+- Chrome 横屏地址栏不出屏上键盘：`disable-user-extensions=true` 会卸掉 `dagu-osk-focus@dagu`；GNOME OSK 横屏 `_relayout` 的 minHeight 可能超过短边。扩展装到 `/usr/share/gnome-shell/extensions/dagu-osk-focus@dagu/`（`linux-mainline/scripts/dagu-osk-focus@dagu/`、`linux-mainline/scripts/rootfs-desktop-setup.sh`），点地址栏顶栏会弹出并压到约 46% 屏高
 
 ### Wi‑Fi
 
@@ -138,6 +139,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 5GHz 80MHz 2SS PHY 约 866.7 Mbps；iperf3 反向 4 流约 **600–665 Mbps**
 - SSH 示例：`ssh -i linux-mainline/out/id_dagu root@192.168.1.158`（地址随局域网变）
 - SSID/密码只放本机 `tmp/wifi-info.md`，不入库
+- 无可用 RTC 时时钟停在 rootfs 构建日（曾为 2026-07-27）。Chrome 能开 `www.bilibili.com` HTML，但 `static.hdslb.com` CSS 证书 **not yet valid**，页面无样式。开机/连上 Wi-Fi 跑 `linux-mainline/scripts/dagu-time-sync.py`（实机 `/usr/local/sbin/dagu-time-sync.py`、`dagu-time-sync.service`）
 
 ### 麦克风
 
@@ -224,7 +226,7 @@ PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对�
 | 外设 | 硬件 | 说明 |
 |------|------|------|
 | 双电芯 | BQ27Z561 ×2 + `xiaomi,dual-fuel-gauge` | overlay `linux-mainline/overlays/linux/drivers/power/supply/xiaomi-dual-fg.c`；设计 5000 mAh ×2 |
-| 充电（SMB5） | PM8150B `@1000` | overlay `linux-mainline/overlays/linux/drivers/power/supply/pm8150b-charger-dagu.c`；关 charger wdog、清 USBIN suspend、APSD 设 ICL。GPIO74 低电平放行 VBUS |
+| 充电（SMB5） | PM8150B `@1000` | overlay `linux-mainline/overlays/linux/drivers/power/supply/pm8150b-charger-dagu.c`；关 charger wdog、清 USBIN suspend。5 V 路径 ICL **2 A**（墙充常被 APSD 成 SDP，不要 USB51 500 mA）。AICL 仍可折叠。GPIO74 低电平放行 VBUS |
 | 充电泵 | BQ25970 ×2 | `bq2597x-dagu.c`，i2c-gpio；67W PPS，不是 5 V 主路径 |
 | 无线充探测 | P9418 | `p9418-dagu.c` |
 | 霍尔 | GPIO110 lid、GPIO121 tablet | `SW_LID` / `SW_TABLET_MODE`；folio 磁铁拉低 121，空闲应为平板。活 DT 用 `GPIO_ACTIVE_HIGH`。未刷新核前由 `linux-mainline/scripts/dagu-tablet-mode.py` 注入 |

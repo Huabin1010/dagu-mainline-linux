@@ -1,0 +1,54 @@
+From: dagu <dagu@localhost>
+Date: Sat, 12 Sep 2026 16:00:00 +0800
+Subject: [PATCH] media: qcom: venus: stub missing ICC paths on dagu
+
+dagu cannot enable CONFIG_INTERCONNECT_QCOM_SM8250: the BCM voter
+rpmh_write_batch() times out on this QHEE chain. Without a provider,
+devm_of_icc_get("video-mem") / ("cpu-cfg") returns -EPROBE_DEFER and
+qcom-venus never leaves probe.
+
+Treat a missing path as optional. icc_set_bw(NULL, ...) in
+drivers/interconnect/core.c is a documented no-op, and pm_helpers.c
+load_scale_bw() only calls icc_set_bw() on the already-fetched
+video_path — no extra get() lives there.
+
+The board DTS also deletes interconnects / interconnect-names so
+of_icc_get() returns NULL before this branch; the stub is the
+belt if those properties come back.
+
+Do not enable INTERCONNECT_QCOM_SM8250 to "fix" this.
+
+Signed-off-by: dagu <dagu@localhost>
+---
+ drivers/media/platform/qcom/venus/core.c | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+--- a/drivers/media/platform/qcom/venus/core.c
++++ b/drivers/media/platform/qcom/venus/core.c
+@@ -390,13 +390,23 @@ static int venus_probe(struct platform_device *pdev)
+ 	if (IS_ERR(core->base))
+ 		return PTR_ERR(core->base);
+ 
+ 	core->video_path = devm_of_icc_get(dev, "video-mem");
+-	if (IS_ERR(core->video_path))
+-		return PTR_ERR(core->video_path);
++	if (IS_ERR(core->video_path)) {
++		/* dagu: ICC video-mem stubbed — no SM8250 ICC provider.
++		 * icc_set_bw(NULL) is a no-op. Do not EPROBE_DEFER.
++		 */
++		dev_warn(dev, "ICC video-mem stubbed, ignoring bandwidth voting\n");
++		core->video_path = NULL;
++	}
+ 
+ 	core->cpucfg_path = devm_of_icc_get(dev, "cpu-cfg");
+-	if (IS_ERR(core->cpucfg_path))
+-		return PTR_ERR(core->cpucfg_path);
++	if (IS_ERR(core->cpucfg_path)) {
++		/* dagu: ICC cpu-cfg stubbed */
++		dev_warn(dev, "ICC cpu-cfg stubbed, ignoring bandwidth voting\n");
++		core->cpucfg_path = NULL;
++	}
+ 
+ 	core->irq = platform_get_irq(pdev, 0);
+ 	if (core->irq < 0)
+ 		return core->irq;

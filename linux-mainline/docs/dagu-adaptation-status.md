@@ -67,7 +67,7 @@
 | 闪光灯 | **DT 已写** | pm8150l flash；脚本可点 torch |
 | 磁吸键盘 | **未做** | overlay 有，活 DT 没接（QUP I2C 不能开） |
 | IMU / 光线传感器 | **有意关闭** | `&slpi` disabled，不在 AP I2C 上猜 |
-| 视频编解码 Venus | **有意关闭** | 活核 `CONFIG_VIDEO_QCOM_VENUS` 未开，DT disabled。dagu 签名固件已从 `modem_a` 拷出。开 ICC SM8250 **禁止**。见 `linux-mainline/docs/dagu-venus.md` |
+| 视频编解码 Venus | **软件已通（4K60 HEVC dmabuf）** | `#169`：1080p H.264 + **4K60 HEVC** `DMA_DRM`/`NV12` 上 Mutter，无 SMMU/SSR。日常播放器：`gst-play-1.0 --videosink=waylandsink`。mpv 仍是 `v4l2m2m-copy`。**禁止**开 SM8250 ICC。见 `linux-mainline/docs/dagu-venus.md` |
 | CDSP | **有意关闭** | `status = disabled` |
 | 蓝牙音频 / 耳机口 | **未做** | 板子无 3.5mm；控制器已通，A2DP / 耳机听感未测 |
 | RTC | **未做** | 启动后停在 2026-07-27，apt 前需对时 |
@@ -253,10 +253,10 @@ PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对�
 | `CONFIG_SPI_QCOM_GENI` / `&spi4` | `geni_load_se_fw` / `geni_se_init` 写 SE MMIO 挂死这套 QHEE |
 | `CONFIG_I2C_QCOM_GENI` | 同上；喇叭/电量改 i2c-gpio |
 | 给 `&qupv3_id_0` 加 `firmware-name` / 写 wrapper CSR | 会打回兔子；uart6 只把 stock `qupv3fw.elf` 写进 SE6 IRAM |
-| `CONFIG_INTERCONNECT_QCOM_SM8250` | BCM `rpmh_write_batch` 超时，拖死 USB/MDSS/CPU OPP |
+| `CONFIG_INTERCONNECT_QCOM_SM8250` | BCM `rpmh_write_batch` 超时，拖死 USB/MDSS/CPU OPP。Venus 用 ICC stub + 删 DT interconnects，不要靠开 provider |
 | `&usb_1_qmpphy` | P0 只要 HS gadget；SS 未训 |
 | Type-C → DWC3 graph | 等 TCPM 曾让 DWC3 停在 otg、无 UDC；节点本身已 okay 做充电 |
-| `&venus` / `&cdsp` | 活核未编 Venus；缺 SM8250 ICC 时 probe 会 defer。固件已从 `modem_a` 取出，见 `linux-mainline/docs/dagu-venus.md`。**禁止**开 `CONFIG_INTERCONNECT_QCOM_SM8250` |
+| `&cdsp` | 继续 disabled；不要顺手跟 Venus 一起开 |
 | `&slpi` | 未验签名固件前不开 |
 | GENI 触控 / 给 `&qupv3_id_0` 加 `firmware-name` | 与 SPI 同一挂点 |
 
@@ -277,7 +277,7 @@ PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对�
 9. USB3 + DP + PS5169：先保证 HS gadget 不回退
 10. 磁吸键盘：没有安全的 GENI I2C 之前无法走原厂 MCU 总线
 11. RTC / 对时
-12. **Venus 硬解**：先 stub ICC，再开 `CONFIG_VIDEO_QCOM_VENUS` 与 `&venus`。不要开 SM8250 interconnect。底稿 `linux-mainline/docs/dagu-venus.md`
+12. **Venus**：4K60 HEVC dmabuf + Overview 已通（`dagu-venus-4k-ecosystem`）。日常用 `gst-play-1.0 --videosink=waylandsink` / Totem。下一步若要烤电影级高码率 4K 或让 mpv 也零拷贝，再谈 FFmpeg `drm_prime`；不要开 ICC，不要 VA-API，不要 v4l2 request。底稿 `linux-mainline/docs/dagu-venus.md`
 13. Win11 ARM：独立于本表
 
 验收命令备忘：

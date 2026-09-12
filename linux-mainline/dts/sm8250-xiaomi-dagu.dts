@@ -1082,8 +1082,10 @@
 };
 
 &venus {
-	firmware-name = "qcom/sm8250/xiaomi/dagu/venus.mbn";
-	status = "disabled";
+	status = "okay";
+	firmware-name = "qcom/sm8250/xiaomi/dagu/venus.mdt";
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
 };
 
 &camcc { status = "okay"; };

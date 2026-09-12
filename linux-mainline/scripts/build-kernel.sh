@@ -59,6 +59,9 @@ cfg="$KBUILD_OUTPUT/.config"
 need_y() {
 	grep -q "^$1=y" "$cfg" || die "$1 is not =y after olddefconfig (fragment lost?)"
 }
+need_m() {
+	grep -q "^$1=m" "$cfg" || die "$1 is not =m after olddefconfig (fragment lost?)"
+}
 need_y CONFIG_SM_GCC_8250
 need_y CONFIG_ARM64_VA_BITS_39
 need_y CONFIG_QCOM_WDT
@@ -109,9 +112,23 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	need_y CONFIG_QRTR_SMD
 	need_y CONFIG_I2C_QCOM_CCI
 	need_y CONFIG_VIDEO_QCOM_CAMSS
+	need_m CONFIG_VIDEO_QCOM_VENUS
+	need_y CONFIG_SM_VIDEOCC_8250
+	need_y CONFIG_QCOM_MDT_LOADER
+	need_y CONFIG_QCOM_SMEM
+	need_y CONFIG_V4L2_MEM2MEM_DEV
+	need_y CONFIG_VIDEOBUF2_DMA_CONTIG
+	need_y CONFIG_V4L2_H264
+	need_y CONFIG_V4L2_VP9
 	need_y CONFIG_VIDEO_S5KJN1
 	need_y CONFIG_VIDEO_IMX596_DAGU
 	need_y CONFIG_SM_CAMCC_8250
+	grep -q '^CONFIG_INTERCONNECT_QCOM_SM8250=y' "$cfg" && \
+		die "INTERCONNECT_QCOM_SM8250 still on — BCM vote hangs this QHEE"
+	if ! grep -q 'dagu: ICC video-mem stubbed' \
+		"$KERNEL_SRC/drivers/media/platform/qcom/venus/core.c"; then
+		die "venus core.c missing ICC stub — apply-overlays.sh missed the patch"
+	fi
 	need_y CONFIG_BATTERY_BQ27XXX_I2C
 	need_y CONFIG_CHARGER_BQ2597X_DAGU
 	need_y CONFIG_CHARGER_PM8150B_DAGU
@@ -179,6 +196,30 @@ make O="$KBUILD_OUTPUT" -j"$JOBS" Image.gz dtbs
 
 test -f "$KBUILD_OUTPUT/arch/arm64/boot/dts/qcom/$DTB_NAME" \
 	|| die "dtb not built — apply-dts.sh / Makefile?"
+
+if [[ "${DAGU_DISPLAY:-0}" == 1 ]] && grep -q '^CONFIG_VIDEO_QCOM_VENUS=m' "$cfg"; then
+	echo "==> venus modules (not autoloaded)"
+	# Do not use make M= — that is the external-module path and breaks
+	# in-tree linking. Build the three .ko as in-tree targets.
+	[[ -f "$KBUILD_OUTPUT/vmlinux.symvers" ]] \
+		|| die "vmlinux.symvers missing — Image.gz did not finish"
+	cp -f "$KBUILD_OUTPUT/vmlinux.symvers" "$KBUILD_OUTPUT/Module.symvers"
+	make O="$KBUILD_OUTPUT" -j"$JOBS" \
+		drivers/media/platform/qcom/venus/venus-core.ko \
+		drivers/media/platform/qcom/venus/venus-dec.ko \
+		drivers/media/platform/qcom/venus/venus-enc.ko
+	mkdir -p "$OUT/modules/venus"
+	cp -f "$KBUILD_OUTPUT/drivers/media/platform/qcom/venus/"venus-*.ko \
+		"$OUT/modules/venus/"
+	for ko in \
+		"$KBUILD_OUTPUT/drivers/media/common/videobuf2/videobuf2-dma-contig.ko" \
+		"$KBUILD_OUTPUT/drivers/media/v4l2-core/v4l2-mem2mem.ko"
+	do
+		[[ -f "$ko" ]] && cp -f "$ko" "$OUT/modules/venus/"
+	done
+	ls -lh "$OUT/modules/venus"
+	[[ -f "$OUT/modules/venus/venus-core.ko" ]] || die "venus-core.ko missing"
+fi
 
 cp -f "$KBUILD_OUTPUT/arch/arm64/boot/Image.gz" "$OUT/Image.gz"
 cp -f "$KBUILD_OUTPUT/arch/arm64/boot/dts/qcom/$DTB_NAME" "$OUT/$DTB_NAME"

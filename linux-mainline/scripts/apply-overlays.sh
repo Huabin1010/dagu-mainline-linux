@@ -2156,4 +2156,65 @@ if marker not in text:
         raise SystemExit(f"{path}: UFSHCD_CAP_CLK_SCALING needle missing")
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: {marker}")
+
+# dagu: Venus ICC stub. No CONFIG_INTERCONNECT_QCOM_SM8250 on this QHEE.
+# icc_set_bw(NULL) is a no-op; do not EPROBE_DEFER video-mem / cpu-cfg.
+path = root / "drivers/media/platform/qcom/venus/core.c"
+text = path.read_text()
+marker = "dagu: ICC video-mem stubbed"
+if marker not in text:
+    old = """	core->video_path = devm_of_icc_get(dev, "video-mem");
+	if (IS_ERR(core->video_path))
+		return PTR_ERR(core->video_path);
+
+	core->cpucfg_path = devm_of_icc_get(dev, "cpu-cfg");
+	if (IS_ERR(core->cpucfg_path))
+		return PTR_ERR(core->cpucfg_path);
+"""
+    new = """	core->video_path = devm_of_icc_get(dev, "video-mem");
+	if (IS_ERR(core->video_path)) {
+		/* dagu: ICC video-mem stubbed — no SM8250 ICC provider.
+		 * icc_set_bw(NULL) is a no-op. Do not EPROBE_DEFER.
+		 */
+		dev_warn(dev, "ICC video-mem stubbed, ignoring bandwidth voting\\n");
+		core->video_path = NULL;
+	}
+
+	core->cpucfg_path = devm_of_icc_get(dev, "cpu-cfg");
+	if (IS_ERR(core->cpucfg_path)) {
+		/* dagu: ICC cpu-cfg stubbed */
+		dev_warn(dev, "ICC cpu-cfg stubbed, ignoring bandwidth voting\\n");
+		core->cpucfg_path = NULL;
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: Venus ICC get needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+if marker not in path.read_text():
+    raise SystemExit(f"{path}: Venus ICC stub missing after patch")
+
+# dagu: Venus=m cannot select prompt-less helpers to =y. CAMSS is already
+# built-in; pull mem2mem / contig / h264 / vp9 into the Image so Venus
+# modules only link against vmlinux.
+path = root / "drivers/media/platform/qcom/camss/Kconfig"
+text = path.read_text()
+marker = "select V4L2_MEM2MEM_DEV"
+if marker not in text:
+    old = """	select VIDEOBUF2_DMA_SG
+	select V4L2_FWNODE
+"""
+    new = """	select VIDEOBUF2_DMA_SG
+	select VIDEOBUF2_DMA_CONTIG
+	select V4L2_MEM2MEM_DEV
+	select V4L2_H264
+	select V4L2_VP9
+	select V4L2_FWNODE
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: CAMSS select needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+if marker not in path.read_text():
+    raise SystemExit(f"{path}: CAMSS Venus helper selects missing")
 PY

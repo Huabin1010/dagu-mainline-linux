@@ -1,38 +1,25 @@
-# dagu-mesa：Chrome 矢量 icon / 标签条花屏（2026-09-12）
+# dagu-mesa：Chrome GPU 画 SVG（2026-09-12）
 
 活树：`/tmp/mesa-26.0.8`  
 装到：`/usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so`  
 包装：`linux-mainline/scripts/dagu-chrome.sh` → `/usr/local/bin/dagu-chrome`  
-仓库副本：`linux-mainline/out/libgallium-26.0.8-1ubuntu0.3.so`  
-不要覆盖发行版 Mesa。不要把 dagu-mesa 放进 gnome-shell。
+**GPU raster 必须开。** 禁止 `--disable-gpu-rasterization`（CPU 画 tile 滚动不跟手）。
 
-## 根因
+## 合同
 
-页内 SVG / iconfont / 标签条矢量走 **Skia GPU raster**。a650 把这些路径画进 LINEAR 图集时写入仍是 macrotile，ANGLE 按 LINEAR 采 → 花砖。
-
-对照：
-
-- CPU `glTexSubImage` 的头像 / 关闭叉 / 刷新一直锐利
-- 页内汉字（「下载客户端」）走 R8 TILE 字形图集，一直锐利
-- `--disable-gpu-rasterization` 后矢量改走 CPU 栅格再上传，首页小电视、下载箭头、搜索放大镜、登录气泡标全部锐利
-
-8× 金样：`linux-mainline/out/display-stress/chrome-cpuras-shouye-8x.png`、`linux-mainline/out/display-stress/chrome-cpuras-dl-8x.png`
-
-## 现用修复
-
-`linux-mainline/scripts/dagu-chrome.sh` 增加 `--disable-gpu-rasterization`。只影响 Chrome，不进 gnome-shell。合成 / WebGL / 大窗 LINEAR GMEM destile 仍开。
-
-## Mesa 侧仍保留（不要回退）
-
-- `fd_dagu_is_icon_atlas()`：小 RGBA / 短宽条走 LINEAR，staging 先于 icon 钩子
-- 禁止把 `PIPE_USAGE_STAGING` 标 TILE
-- 短 LINEAR（icon_atlas 或 `height<=128`，含 `1819×89` 标签条）强制 GMEM event-store `LAST=2`，不要再走 sysmem
-- dest 任一边 ≤512 或任一端 LINEAR：跳过 A2D
+- 窗口 / Wayland 长条：真 LINEAR（GBM + event-store `LAST=2`）
+- Chrome 窗口（两边 >1024 的 LINEAR 4bpp，如 `2477×1560`）：也强制 GMEM，Views 标签字/工具栏会画在这里
+- Skia OOP raster tile（两边 128–1024 的 4bpp，非 scanout / staging）：**TILE6_3**，不要 UBWC，也不要因为 `BIND_LINEAR` 改 LINEAR
+- **Chrome Views 矢量 icon（≤128²，后退/前进/刷新/网站设置/标签关闭）**：真 **LINEAR + GMEM**。TILE destile 是锐利箭头（`linux-mainline/out/display-stress/ui-icons/dagu-icon-gmem-tile-25x25-4-10x.png`），按 LINEAR 读就是工具栏乱码。Chrome 采样这些 cache 当 LINEAR。
+- **A8 path atlas**（Chrome 153 / Skia `4f574af` `AtlasPathRenderer`）：GPU 用 instanced `MiddleOutShader` 三角形画进 A8（不是 GL TCS/TES）。收 **TILE6_3**，禁止 UBWC；**禁止 autotune sysmem**（CCU 把 TILE 写成行主序条纹）。dump：`linux-mainline/out/display-stress/path-atlas/dagu-path-gmem-tile-512x256-2.png` 是真胶囊/叉/箭头。源码 `/home/huanghuabin/src/chrome153-gpu/`。活树 `/tmp/mesa-26.0.8/src/gallium/drivers/freedreno/freedreno_gmem.c`。
+- staging：LINEAR（CPU `glTexSubImage`）
+- 宽 UI 条（1981×40 / 2240×64）：LINEAR + GMEM
+- R8 字形（CPU 上传的 2048²）：TILE
+- 不要进 gnome-shell
 
 ## 不要再试
 
-- 无差别 4bpp / GBM 全 LINEAR
-- ≤1024 一律 UBWC（`832×576` 绿块）
-- 把 icon 图集逼 TILE + `fdl6_memcpy`（采样器仍按 LINEAR，只改砖纹）
-- 全局 `DAGU_LINEAR_SYSMEM=1` / `DAGU_LINEAR_DESTILE=1`
-- 用软件栅格「修」毛玻璃（那是另一条合同）
+- 关 GPU 栅格「修」icon
+- ≤1024 一律 UBWC（曾把 `832×576` 打绿）
+- 把 staging 标 TILE
+- 全局 `DAGU_LINEAR_SYSMEM` / `DAGU_LINEAR_DESTILE`

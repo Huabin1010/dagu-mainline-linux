@@ -440,7 +440,7 @@ Chrome 毛玻璃（无 `DAGU_LINEAR_SYSMEM` / `DAGU_LINEAR_DESTILE`，hunt `sys=
 
 Chrome 仍 `LD_LIBRARY_PATH=/usr/local/lib/dagu-mesa` + `LD_PRELOAD=libdagu-linear-mod.so`。UBWC 桌面下 hunt：`sys=0 fbread=1` 68 条，`sys=1 fbread=1` 0 条。主 fb 仍是 COMPRESSED。
 
-UBWC 之后 `grim` 的 `wlr-screencopy` 不可用；`linux-mainline/scripts/dagu-kms-land-crop.py` 按 LINEAR mmap 主 fb 会得到压缩噪声，不要当验收图。回退：平板 `/root/dagu-ubwc-revert.sh`（`USE=0` + `systemctl restart gdm`）。
+UBWC 之后 `grim` 的 `wlr-screencopy` 不可用；`linux-mainline/scripts/dagu-kms-land-crop.py` 按 LINEAR mmap 主 fb 会得到压缩噪声，不要当验收图。改走 `linux-mainline/scripts/dagu-gnome-screenshot.sh`（xdg-desktop-portal，Mutter 会 GL blit 成 LINEAR）。回退：平板 `/root/dagu-ubwc-revert.sh`（`USE=0` + `systemctl restart gdm`）。
 
 hangcheck 现场：`linux-mainline/scripts/dagu-gpu-hangwatch.sh --host`（平板 `/usr/local/sbin/dagu-gpu-hangwatch.sh`）。未 hang 时 `hangrd` 是 `EBUSY`。35s 压测（`linux-mainline/scripts/dagu-gpu-stress.sh`）未增加 recover。
 
@@ -536,6 +536,7 @@ aarch64-linux-gnu-strip --strip-unneeded "$DEST"
 | `linux-mainline/patches/mesa-26.0.8-gmem-fbread-sync.patch` | UCHE 说明（非正式 diff） |
 | `linux-mainline/scripts/dagu-gpu-hangwatch.sh` | hangcheck → `/var/log/dagu-gpu/*.rd` |
 | `linux-mainline/scripts/dagu-gpu-stress.sh` | 多玻璃窗 + 可选 videotestsrc |
+| `linux-mainline/scripts/dagu-gnome-screenshot.sh` | UBWC 下 portal 截图（Mutter GL blit） |
 | `linux-mainline/tools/dagu-linear-gmem-probe.c` | 9.4.2 GBM LINEAR mmap 探针 |
 | `linux-mainline/patches/mesa-26.0.8-linear-cbuf-sysmem.patch` | 更早的 LINEAR cbuf 说明 |
 | `linux-mainline/patches/mesa-26.0.8-tex-seqno-rebuild.patch` | layout 变了要重建采样器 |

@@ -17,9 +17,8 @@
  * UBWC/macrotile, so pixels disagree with the LINEAR tag.
  *
  * Force GBM buffers LINEAR so Ozone's LINEAR wayland tag matches pixels.
- * a6xx GMEM BLIT_EVENT_STORE still writes macrotile into those buffers;
- * dagu-mesa sysmem-bypasses color RTs when depth is unused. Load via
- * LD_LIBRARY_PATH, never into gnome-shell. Keep GPU raster. Do NOT
+ * a6xx GMEM store destiles LINEAR per tile in dagu-mesa (not sysmem).
+ * Load via LD_LIBRARY_PATH, never into gnome-shell. Keep GPU raster. Do NOT
  * export EGL symbols (ANGLE).
  */
 

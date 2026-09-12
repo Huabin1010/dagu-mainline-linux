@@ -142,6 +142,10 @@
 			cirrus,gpio2-src-select = <4>;
 			cirrus,gpio2-output-enable;
 			cirrus,subsystem-id = "dagu";
+			/* persist cs35l41_cal_spk3: 6.93 ohm */
+			cirrus,cal-r = <9696>;
+			cirrus,cal-ambient = <23>;
+			cirrus,vpbr-config = <33575690>;
 			sound-name-prefix = "BR";
 			#sound-dai-cells = <1>;
 		};
@@ -162,6 +166,10 @@
 			cirrus,gpio2-output-enable;
 			cirrus,right-channel-amp;
 			cirrus,subsystem-id = "dagu";
+			/* persist cs35l41_cal_spk4: 6.79 ohm */
+			cirrus,cal-r = <9497>;
+			cirrus,cal-ambient = <23>;
+			cirrus,vpbr-config = <33575690>;
 			sound-name-prefix = "BL";
 			#sound-dai-cells = <1>;
 		};
@@ -193,6 +201,10 @@
 			cirrus,gpio2-src-select = <4>;
 			cirrus,gpio2-output-enable;
 			cirrus,subsystem-id = "dagu";
+			/* persist cs35l41_cal_spk1: 6.81 ohm */
+			cirrus,cal-r = <9524>;
+			cirrus,cal-ambient = <23>;
+			cirrus,vpbr-config = <33575689>;
 			sound-name-prefix = "TL";
 			#sound-dai-cells = <1>;
 		};
@@ -212,6 +224,10 @@
 			cirrus,gpio2-src-select = <4>;
 			cirrus,gpio2-output-enable;
 			cirrus,subsystem-id = "dagu";
+			/* persist cs35l41_cal_spk2: 6.89 ohm */
+			cirrus,cal-r = <9632>;
+			cirrus,cal-ambient = <23>;
+			cirrus,vpbr-config = <33575689>;
 			sound-name-prefix = "TR";
 			#sound-dai-cells = <1>;
 		};

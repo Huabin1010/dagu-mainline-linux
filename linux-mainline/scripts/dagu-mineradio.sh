@@ -1,7 +1,7 @@
 #!/bin/sh
 # dagu Mineradio: native Wayland + GLES. GPU raster stays on.
 # Ozone tags linux-dmabuf LINEAR; force GBM pixels LINEAR (dagu-linear-mod.c)
-# and load dagu-mesa (unused-depth color sysmem; 3D with depth stays GMEM).
+# and load dagu-mesa (LINEAR GMEM destile per tile; tiled WebGL stays GMEM).
 # Never into gnome-shell.
 export ELECTRON_OZONE_PLATFORM_HINT=wayland
 if [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then

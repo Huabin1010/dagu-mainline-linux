@@ -362,4 +362,12 @@ Categories=GTK;System;Monitor;
 StartupNotify=true
 EOF
 update-desktop-database /usr/local/share/applications 2>/dev/null || true
+
+# Adreno 650 max is 670 MHz (already the silicon cap). simple_ondemand was
+# bouncing 670↔305 (~2000 drops/session); the first frames after idle miss
+# vsync at 1600x2560@120. Keep a 490 MHz floor and poll every 10 ms.
+if [ -d /sys/class/devfreq/3d00000.gpu ]; then
+	printf '490000000\n' >/sys/class/devfreq/3d00000.gpu/min_freq || true
+	printf '10\n' >/sys/class/devfreq/3d00000.gpu/polling_interval || true
+fi
 exit 0

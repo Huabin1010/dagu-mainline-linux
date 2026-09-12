@@ -990,6 +990,78 @@ if marker not in text:
     path.write_text(text.replace(old, new))
     print(f"patched {path}: {marker}")
 
+# Halo Protection firmware treats missing ReDC as uncalibrated and limits
+# output. Xiaomi persist has factory cal_r; wm_adsp marks CAL_R SYS so ALSA
+# cannot write it. Poke the XM registers after wmfw+bin preload.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: apply persist ReDC after DSP preload"
+if marker not in text:
+    old = """static int cs35l41_dsp_preload_ev(struct snd_soc_dapm_widget *w,
+				  struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(component);
+	int ret;
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		if (cs35l41->dsp.cs_dsp.booted)
+			return 0;
+
+		return wm_adsp_early_event(w, kcontrol, event);
+"""
+    new = """static void cs35l41_dagu_apply_spk_cal(struct cs35l41_private *cs35l41)
+{
+	u32 cal_r, ambient = 23, vpbr;
+	int ret;
+
+	/* dagu: apply persist ReDC after DSP preload */
+	if (device_property_read_u32(cs35l41->dev, "cirrus,cal-r", &cal_r))
+		return;
+	device_property_read_u32(cs35l41->dev, "cirrus,cal-ambient", &ambient);
+
+	if (!device_property_read_u32(cs35l41->dev, "cirrus,vpbr-config", &vpbr)) {
+		ret = regmap_write(cs35l41->regmap, CS35L41_VPBR_CFG, vpbr);
+		if (ret)
+			dev_warn(cs35l41->dev, "dagu: VPBR_CFG write failed: %d\\n", ret);
+	}
+
+	ret = 0;
+	ret |= regmap_write(cs35l41->regmap, 0x0280026c, ambient);
+	ret |= regmap_write(cs35l41->regmap, 0x02800268, cal_r);
+	ret |= regmap_write(cs35l41->regmap, 0x02800270, 1);
+	ret |= regmap_write(cs35l41->regmap, 0x02800274, cal_r + 1);
+	if (ret)
+		dev_warn(cs35l41->dev, "dagu: CAL_R=%u write failed: %d\\n", cal_r, ret);
+	else
+		dev_info(cs35l41->dev, "dagu: applied CAL_R=%u ambient=%u\\n",
+			 cal_r, ambient);
+}
+
+static int cs35l41_dsp_preload_ev(struct snd_soc_dapm_widget *w,
+				  struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(component);
+	int ret;
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		if (cs35l41->dsp.cs_dsp.booted)
+			return 0;
+
+		ret = wm_adsp_early_event(w, kcontrol, event);
+		if (ret)
+			return ret;
+		cs35l41_dagu_apply_spk_cal(cs35l41);
+		return 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: dsp_preload_ev needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
 path = root / "sound/soc/qcom/sm8250.c"
 text = path.read_text()
 marker = "dagu: set I2S fmt on every CS35L41"

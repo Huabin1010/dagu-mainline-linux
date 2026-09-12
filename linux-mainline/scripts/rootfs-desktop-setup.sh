@@ -77,7 +77,7 @@ Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=0
 Environment=MUTTER_DEBUG_PAINT=disable-direct-scanout
 Environment=GSK_RENDERER=ngl
 Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
-UnsetEnvironment=FD_MESA_DEBUG TU_DEBUG LD_PRELOAD MESA_VK_WSI_DEBUG
+UnsetEnvironment=FD_MESA_DEBUG TU_DEBUG LD_PRELOAD MESA_VK_WSI_DEBUG DAGU_LINEAR_DESTILE
 ExecStartPre=/bin/sh -c "rm -f /tmp/.X*-lock; mkdir -p /tmp/.X11-unix; find /tmp/.X11-unix -mindepth 1 -delete || true"
 EOF
 
@@ -110,7 +110,7 @@ Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=0
 Environment=MUTTER_DEBUG_PAINT=disable-direct-scanout
 Environment=GSK_RENDERER=ngl
 Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
-UnsetEnvironment=FD_MESA_DEBUG TU_DEBUG LD_PRELOAD MESA_VK_WSI_DEBUG
+UnsetEnvironment=FD_MESA_DEBUG TU_DEBUG LD_PRELOAD MESA_VK_WSI_DEBUG DAGU_LINEAR_DESTILE
 EOF
 mkdir -p /usr/share/drirc.d
 cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
@@ -124,12 +124,13 @@ cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
 EOF
 
 # Chrome: native Wayland + GLES. Ozone tags linux-dmabuf LINEAR; force GBM
-# pixels LINEAR and load dagu-mesa (unused-depth color sysmem; 3D GMEM).
-# GPU raster on. Never preload either into gnome-shell.
+# pixels LINEAR and load dagu-mesa (LINEAR color → sysmem; tiled WebGL GMEM).
+# Destile stays off. linear-mod is Chrome/Mineradio only — not gnome-shell.
 CHROME_DISABLE_FEATURES='Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation'
 if [ -x /opt/google/chrome/chrome ]; then
 	cat >/usr/local/bin/dagu-chrome <<'EOF'
 #!/bin/sh
+# Fonts at any Mutter scale: fractional DPR + no LCD (270° panel).
 profile="${HOME}/.config/google-chrome"
 lock="$profile/SingletonLock"
 if [ -L "$lock" ]; then
@@ -141,11 +142,35 @@ if [ -L "$lock" ]; then
 	fi
 fi
 export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"
+export FREETYPE_PROPERTIES="${FREETYPE_PROPERTIES:-truetype:interpreter-version=40}"
 if [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
 	export LD_LIBRARY_PATH="/usr/local/lib/dagu-mesa${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
 	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+if [ ! -e "$lock" ] && [ -f "$profile/Local State" ]; then
+	python3 - "$profile/Local State" <<'PY' 2>/dev/null || true
+import json, sys
+p = sys.argv[1]
+with open(p, "r", encoding="utf-8") as f:
+    d = json.load(f)
+labs = d.setdefault("browser", {}).setdefault("enabled_labs_experiments", [])
+if not isinstance(labs, list):
+    labs = []
+    d["browser"]["enabled_labs_experiments"] = labs
+changed = False
+for drop in ("lcd-text-aa@1", "lcd-text-aa@0"):
+    if drop in labs:
+        labs.remove(drop)
+        changed = True
+if "lcd-text-aa@2" not in labs:
+    labs.append("lcd-text-aa@2")
+    changed = True
+if changed:
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(d, f, separators=(",", ":"))
+PY
 fi
 exec /opt/google/chrome/chrome \
 	--ozone-platform=wayland \
@@ -157,7 +182,9 @@ exec /opt/google/chrome/chrome \
 	--enable-wayland-ime \
 	--disable-gtk-ime \
 	--wayland-text-input-version=3 \
-	--enable-features=WaylandTextInputV3 \
+	--enable-features=WaylandTextInputV3,WaylandFractionalScaleV1 \
+	--disable-lcd-text \
+	--font-render-hinting=none \
 	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation \
 	"$@"
 EOF
@@ -193,7 +220,9 @@ for line in text.splitlines(True):
             '# dagu-chrome-gpu\n'
             'exec -a "$0" "$HERE/chrome" --ozone-platform=wayland --ozone-platform-hint=wayland --in-process-gpu'
             ' --use-gl=angle --use-angle=gles --start-maximized --enable-wayland-ime --disable-gtk-ime'
-            f' --wayland-text-input-version=3 --enable-features=WaylandTextInputV3 --disable-features={feat} "$@"\n'
+            ' --wayland-text-input-version=3 --enable-features=WaylandTextInputV3,WaylandFractionalScaleV1'
+            ' --disable-lcd-text --font-render-hinting=none'
+            f' --disable-features={feat} "$@"\n'
         )
         continue
     out.append(line)
@@ -202,8 +231,8 @@ PY
 	fi
 fi
 
-# 12.4" 1600x2560 is ~243 PPI. Scale 1 makes Chrome glyphs tiny/soft; integer
-# 2x matches wl_output and avoids fractional-scale upsampling.
+# Default first-boot scale. Fonts must keep working if the user picks
+# 1.0 / 1.25 / 1.33 / 1.67 / 2.0 — do not treat scale 2 as the only fix.
 mkdir -p /home/dagu/.config
 cat >/home/dagu/.config/monitors.xml <<'EOF'
 <monitors version="2">
@@ -263,111 +292,108 @@ install_dagu_osk() {
 EOF
 	cat >"$d/extension.js" <<'EOF'
 import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-// Chrome never sends show_input_panel. GNOME/IM focus still auto-opens the
-// OSK (NTP search, omnibox). Gate keyboard.open so only an explicit tap that
-// moves the text caret (or the address-bar strip) can show it. Close when
-// the user taps the page or the field loses focus.
+const VERSION = 'osk-gate-7';
+
+// Chrome/GNOME open the OSK via KeyboardActor.open() and the delayed
+// Actor._open() rest timer. Those bypass KeyboardManager.open. Gate both,
+// and only allow a show after a page-content tap plus a caret move.
 export default class DaguOskFocus extends Extension {
     enable() {
         this._im = Main.inputMethod;
         this._openTimeout = 0;
         this._closeTimeout = 0;
-        this._awaitTap = false;
-        this._permitOpen = false;
-        this._visible = false;
+        this._expireTimeout = 0;
+        this._userRequested = false;
+        this._awaitContent = false;
         this._conns = [];
+        this._visId = 0;
         this._winTitleId = 0;
         this._trackedWin = null;
-        this._gateKeyboard();
+        this._log(`${VERSION} enable`);
+        this._gateAllOpens();
         this._connect(this._im, 'notify::current-focus', () => {
+            this._log(`focus=${!!this._im.currentFocus}`);
             if (!this._im.currentFocus)
-                this._close();
+                this._close('im-blur');
         });
         this._connect(this._im, 'cursor-location-changed', () => {
-            if (this._awaitTap)
-                this._openSoon(40);
+            this._log(`caret await=${this._awaitContent}`);
+            if (this._awaitContent)
+                this._requestOpen('caret');
         });
         this._connect(Main.layoutManager, 'monitors-changed', () => {
-            this._patchRelayout();
+            this._gateAllOpens();
         });
         this._connect(global.display, 'notify::focus-window', () => {
             this._trackFocusWindow();
-            if (!this._isChrome())
-                this._close();
+            const chrome = this._isChrome();
+            this._log(`focus chrome=${chrome} ${this._winLabel()}`);
+            if (!chrome)
+                this._close('not-chrome');
         });
         this._connect(global.stage, 'captured-event', (_a, event) => {
             this._onPointer(event);
             return Clutter.EVENT_PROPAGATE;
         });
-        this._patchRelayout();
         this._trackFocusWindow();
+        this._connectVis();
+        this._writeStatus();
+    }
+
+    _log(msg) {
+        const line = `${Math.round(GLib.get_monotonic_time() / 1000)} ${msg}\n`;
+        try {
+            const f = Gio.File.new_for_path('/tmp/dagu-osk.log');
+            const out = f.append_to(Gio.FileCreateFlags.NONE, null);
+            out.write(line, null);
+            out.close(null);
+        } catch (e) {
+        }
+    }
+
+    _writeStatus() {
+        const actor = Main.keyboard?.keyboardActor;
+        const win = global.display.focus_window;
+        const vis = !!(actor && actor.visible);
+        const text = [
+            `ver=${VERSION}`,
+            `visible=${vis}`,
+            `user=${this._userRequested}`,
+            `await=${this._awaitContent}`,
+            `title=${win ? win.get_title() : ''}`,
+            `wm=${win ? win.get_wm_class() : ''}`,
+            `actorOpen=${!!actor?._daguActorOpen}`,
+            `actor_open=${!!actor?._daguInternalOpen}`,
+            `mgrGate=${!!Main.keyboard?._daguOpenGate}`,
+            '',
+        ].join('\n');
+        try {
+            Gio.File.new_for_path('/tmp/dagu-osk.status').replace_contents(
+                new TextEncoder().encode(text),
+                null, false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+        } catch (e) {
+        }
     }
 
     _connect(obj, sig, cb) {
         this._conns.push([obj, obj.connect(sig, cb)]);
     }
 
-    _gateKeyboard() {
-        const kbd = Main.keyboard;
-        if (!kbd || kbd._daguOpenGate)
-            return;
-        kbd._daguOpenGate = true;
-        this._origKbdOpen = kbd.open.bind(kbd);
-        kbd.open = monitor => {
-            if (!this._permitOpen)
-                return;
-            this._origKbdOpen(monitor);
-        };
-        if (typeof kbd.close === 'function')
-            this._origKbdClose = kbd.close.bind(kbd);
-    }
-
-    _ungateKeyboard() {
-        const kbd = Main.keyboard;
-        if (!kbd || !kbd._daguOpenGate)
-            return;
-        if (this._origKbdOpen)
-            kbd.open = this._origKbdOpen;
-        kbd._daguOpenGate = false;
-        this._origKbdOpen = null;
-        this._origKbdClose = null;
-    }
-
-    _patchRelayout() {
+    _connectVis() {
         const actor = Main.keyboard?.keyboardActor;
-        if (!actor || actor._daguRelayout)
+        if (!actor || this._visId)
             return;
-        actor._daguRelayout = true;
-        const orig = actor._relayout.bind(actor);
-        actor._relayout = () => {
-            orig();
-            const mon = Main.layoutManager.keyboardMonitor;
-            if (!mon)
-                return;
-            actor.width = mon.width;
-            if (mon.width > mon.height)
-                actor.height = Math.round(Math.min(mon.height * 0.46, 380));
-        };
-        if (typeof actor.open === 'function') {
-            actor._daguActorOpen = actor.open.bind(actor);
-            actor.open = immediate => {
-                if (!this._permitOpen)
-                    return;
-                actor._daguActorOpen(immediate);
-            };
-        }
-    }
-
-    _isChrome() {
-        const win = global.display.focus_window;
-        if (!win)
-            return false;
-        const wm = `${win.get_wm_class() || ''} ${win.get_title() || ''}`;
-        return /chrome|chromium|google-chrome/i.test(wm);
+        this._visId = actor.connect('visibility-changed', () => {
+            this._log(`vis=${actor.visible} user=${this._userRequested} chrome=${this._isChrome()}`);
+            if (actor.visible && this._isChrome() && !this._userRequested)
+                this._close('vis-unrequested');
+            this._writeStatus();
+        });
     }
 
     _trackFocusWindow() {
@@ -382,10 +408,55 @@ export default class DaguOskFocus extends Extension {
         if (!this._trackedWin)
             return;
         this._winTitleId = this._trackedWin.connect('notify::title', () => {
-            // Navigation / new tab: hide unless a tap just requested the OSK.
-            if (!this._awaitTap)
-                this._close();
+            this._log(`title=${this._trackedWin.get_title()}`);
+            this._close('title');
         });
+    }
+
+    _winLabel() {
+        const win = global.display.focus_window;
+        if (!win)
+            return 'none';
+        const bits = [
+            win.get_wm_class?.(),
+            win.get_wm_class_instance?.(),
+            win.get_gtk_application_id?.(),
+            win.get_sandboxed_app_id?.(),
+            win.get_title?.(),
+        ].filter(Boolean);
+        try {
+            const pid = win.get_pid();
+            bits.push(`pid=${pid}`);
+            const [ok, data] = Gio.File.new_for_path(`/proc/${pid}/comm`)
+                .load_contents(null);
+            if (ok)
+                bits.push(new TextDecoder().decode(data).trim());
+        } catch (e) {
+        }
+        return bits.join('|');
+    }
+
+    _isChrome() {
+        return /chrome|chromium/i.test(this._winLabel());
+    }
+
+    _chromeZone(event) {
+        const win = global.display.focus_window;
+        if (!win || !this._isChrome())
+            return 'other';
+        const [x, y] = this._eventXY(event);
+        const rect = win.get_frame_rect();
+        if (x < rect.x || x > rect.x + rect.width ||
+            y < rect.y || y > rect.y + rect.height)
+            return 'other';
+        // Tab strip / close-tab (~36-48px). Omnibox sits in the next band.
+        const tabH = Math.max(64, Math.round(rect.height * 0.055));
+        if (y <= rect.y + tabH)
+            return 'toolbar';
+        const boxH = Math.max(170, Math.round(rect.height * 0.15));
+        if (y <= rect.y + boxH)
+            return 'omnibox';
+        return 'content';
     }
 
     _eventXY(event) {
@@ -400,107 +471,201 @@ export default class DaguOskFocus extends Extension {
         return [0, 0];
     }
 
-    _inOmniboxBand(event) {
-        if (!this._isChrome())
-            return false;
-        const win = global.display.focus_window;
-        const [x, y] = this._eventXY(event);
-        const rect = win.get_frame_rect();
-        const tabs = Math.max(36, Math.round(rect.height * 0.06));
-        const bar = tabs + Math.max(48, Math.round(rect.height * 0.08));
-        if (x < rect.x || x > rect.x + rect.width)
-            return false;
-        // Skip the tab strip; only the address-bar row counts as an input tap.
-        return y >= rect.y + tabs && y <= rect.y + bar;
-    }
-
     _onPointer(event) {
         const type = event.type();
         if (type !== Clutter.EventType.TOUCH_BEGIN &&
             type !== Clutter.EventType.BUTTON_PRESS)
             return;
-        if (this._inOmniboxBand(event)) {
-            this._awaitTap = true;
-            this._openSoon(60);
+        const zone = this._chromeZone(event);
+        const [x, y] = this._eventXY(event);
+        this._log(`tap zone=${zone} xy=${Math.round(x)},${Math.round(y)}`);
+        this._awaitContent = false;
+        if (zone === 'omnibox') {
+            this._requestOpen('omnibox-tap');
             return;
         }
-        // Any other tap: wait briefly for a caret move (real text field).
-        // If none, this was a page/button tap — hide the OSK.
-        this._awaitTap = true;
+        if (zone !== 'content') {
+            this._close(`tap-${zone}`);
+            return;
+        }
+        this._awaitContent = true;
         if (this._closeTimeout)
             GLib.source_remove(this._closeTimeout);
-        this._closeTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 220, () => {
+        this._closeTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 450, () => {
             this._closeTimeout = 0;
-            this._awaitTap = false;
-            this._close();
+            if (this._awaitContent) {
+                this._awaitContent = false;
+                this._close('content-miss');
+            }
             return GLib.SOURCE_REMOVE;
         });
     }
 
-    _openSoon(ms) {
+    _requestOpen(why) {
         if (this._closeTimeout) {
             GLib.source_remove(this._closeTimeout);
             this._closeTimeout = 0;
         }
+        this._awaitContent = false;
         if (this._openTimeout)
             GLib.source_remove(this._openTimeout);
-        this._openTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+        this._log(`request ${why}`);
+        this._openTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 30, () => {
             this._openTimeout = 0;
-            this._awaitTap = false;
             this._open();
             return GLib.SOURCE_REMOVE;
         });
     }
 
+    _wrapFn(obj, key, flag, fn) {
+        if (!obj || obj[flag])
+            return;
+        obj[flag] = obj[key].bind(obj);
+        obj[key] = fn;
+    }
+
+    _gateAllOpens() {
+        const mgr = Main.keyboard;
+        if (mgr && !mgr._daguOpenGate) {
+            mgr._daguOpenGate = true;
+            this._origMgrOpen = mgr.open.bind(mgr);
+            mgr.open = monitor => {
+                if (this._isChrome() && !this._userRequested) {
+                    this._log('block mgr.open');
+                    return;
+                }
+                this._origMgrOpen(monitor);
+            };
+            if (typeof mgr.close === 'function')
+                this._origMgrClose = mgr.close.bind(mgr);
+        }
+        const actor = mgr?.keyboardActor;
+        if (!actor)
+            return;
+        this._wrapFn(actor, 'open', '_daguActorOpen', immediate => {
+            if (this._isChrome() && !this._userRequested) {
+                this._log('block actor.open');
+                return;
+            }
+            actor._daguActorOpen(immediate);
+        });
+        this._wrapFn(actor, '_open', '_daguInternalOpen', () => {
+            if (this._isChrome() && !this._userRequested) {
+                this._log('block actor._open');
+                return;
+            }
+            actor._daguInternalOpen();
+        });
+        if (!actor._daguRelayout) {
+            const origRelayout = actor._relayout.bind(actor);
+            actor._daguRelayout = true;
+            actor._relayout = () => {
+                origRelayout();
+                const mon = Main.layoutManager.keyboardMonitor;
+                if (!mon)
+                    return;
+                actor.width = mon.width;
+                if (mon.width > mon.height)
+                    actor.height = Math.round(Math.min(mon.height * 0.46, 380));
+            };
+        }
+        this._connectVis();
+    }
+
     _open() {
-        this._patchRelayout();
-        this._permitOpen = true;
+        this._gateAllOpens();
+        this._userRequested = true;
+        this._log('open');
         try {
             const idx = Main.layoutManager.focusIndex;
             Main.layoutManager.keyboardIndex = idx;
-            Main.keyboard?.open(idx);
+            if (this._origMgrOpen)
+                this._origMgrOpen(idx);
+            else
+                Main.keyboard?.open(idx);
             const actor = Main.keyboard?.keyboardActor;
             actor?._relayout?.();
-            if (actor?._daguActorOpen)
-                actor._daguActorOpen(true);
-            else
-                actor?.open?.(true);
-        } finally {
-            this._permitOpen = false;
+            actor?._daguInternalOpen?.();
+        } catch (e) {
+            this._log(`open-err ${e}`);
         }
-        this._visible = true;
+        if (this._expireTimeout)
+            GLib.source_remove(this._expireTimeout);
+        this._expireTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 180, () => {
+            this._expireTimeout = 0;
+            this._userRequested = false;
+            this._writeStatus();
+            return GLib.SOURCE_REMOVE;
+        });
+        this._writeStatus();
     }
 
-    _close() {
+    _cancelActorTimers() {
+        const actor = Main.keyboard?.keyboardActor;
+        try {
+            actor?._clearKeyboardRestTimer?.();
+        } catch (e) {
+        }
+        try {
+            actor?._clearShowIdle?.();
+        } catch (e) {
+        }
+    }
+
+    _close(why) {
         if (this._openTimeout) {
             GLib.source_remove(this._openTimeout);
             this._openTimeout = 0;
         }
-        this._awaitTap = false;
-        this._visible = false;
+        this._awaitContent = false;
+        this._userRequested = false;
+        this._cancelActorTimers();
         const actor = Main.keyboard?.keyboardActor;
+        const was = !!(actor && actor.visible);
         try {
-            actor?.close?.();
+            actor?.close?.(true);
         } catch (e) {
         }
         try {
-            if (this._origKbdClose)
-                this._origKbdClose();
+            if (this._origMgrClose)
+                this._origMgrClose();
             else
                 Main.keyboard?.close?.();
         } catch (e) {
         }
+        if (was || why)
+            this._log(`close ${why || ''} was=${was}`);
+        this._writeStatus();
     }
 
     disable() {
-        if (this._openTimeout) {
+        if (this._openTimeout)
             GLib.source_remove(this._openTimeout);
-            this._openTimeout = 0;
-        }
-        if (this._closeTimeout) {
+        if (this._closeTimeout)
             GLib.source_remove(this._closeTimeout);
-            this._closeTimeout = 0;
+        if (this._expireTimeout)
+            GLib.source_remove(this._expireTimeout);
+        this._openTimeout = 0;
+        this._closeTimeout = 0;
+        this._expireTimeout = 0;
+        const actor = Main.keyboard?.keyboardActor;
+        if (actor) {
+            if (this._visId) {
+                try {
+                    actor.disconnect(this._visId);
+                } catch (e) {
+                }
+            }
+            if (actor._daguActorOpen) {
+                actor.open = actor._daguActorOpen;
+                delete actor._daguActorOpen;
+            }
+            if (actor._daguInternalOpen) {
+                actor._open = actor._daguInternalOpen;
+                delete actor._daguInternalOpen;
+            }
         }
+        this._visId = 0;
         if (this._trackedWin && this._winTitleId) {
             try {
                 this._trackedWin.disconnect(this._winTitleId);
@@ -509,15 +674,15 @@ export default class DaguOskFocus extends Extension {
         }
         this._winTitleId = 0;
         this._trackedWin = null;
-        const actor = Main.keyboard?.keyboardActor;
-        if (actor?._daguActorOpen) {
-            actor.open = actor._daguActorOpen;
-            delete actor._daguActorOpen;
+        const mgr = Main.keyboard;
+        if (mgr?._daguOpenGate && this._origMgrOpen) {
+            mgr.open = this._origMgrOpen;
+            mgr._daguOpenGate = false;
         }
-        this._ungateKeyboard();
         for (const [obj, id] of this._conns)
             obj.disconnect(id);
         this._conns = [];
+        this._log(`${VERSION} disable`);
     }
 }
 
@@ -548,8 +713,13 @@ sources=[('xkb', 'us'), ('ibus', 'libpinyin')]
 
 [org/gnome/desktop/interface]
 toolkit-accessibility=true
-scaling-factor=uint32 2
+scaling-factor=uint32 0
+font-antialiasing='grayscale'
+font-hinting='none'
 color-scheme='default'
+
+[org/gnome/mutter]
+experimental-features=['scale-monitor-framebuffer']
 
 [org/gnome/desktop/background]
 picture-uri='file:///usr/share/backgrounds/warty-final-ubuntu.png'
@@ -576,6 +746,18 @@ automount-open=false
 autorun-never=true
 EOF
 dconf update 2>/dev/null || true
+mkdir -p /etc/fonts/conf.d
+cat >/etc/fonts/conf.d/99-dagu-gray-fonts.conf <<'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <match target="font">
+    <edit name="rgba" mode="assign"><const>none</const></edit>
+    <edit name="antialias" mode="assign"><bool>true</bool></edit>
+    <edit name="hintstyle" mode="assign"><const>hintslight</const></edit>
+  </match>
+</fontconfig>
+EOF
 
 # Short power key: logind lock is a no-op when already locked, so the
 # tablet cannot unblank. Ignore the key here; dagu-power-button.py toggles.
@@ -1294,6 +1476,29 @@ monitor.alsa.rules = [
       }
     }
   }
+]
+EOF
+# ACP EnumProfile is only Off + pro-audio; disable-pro-audio then Dummy.
+# Direct 2ch sink on hw:0,0. Mixer stays in dagu-speaker-route.sh.
+mkdir -p /etc/pipewire/pipewire.conf.d
+cat >/etc/pipewire/pipewire.conf.d/50-dagu-alsa-sink.conf <<'EOF'
+context.objects = [
+    { factory = adapter
+        args = {
+            factory.name     = api.alsa.pcm.sink
+            node.name        = "alsa_output.dagu.speakers"
+            node.description = "Speakers"
+            media.class      = "Audio/Sink"
+            api.alsa.path    = "hw:0,0"
+            api.alsa.period-size = 1024
+            audio.channels   = 2
+            audio.rate       = 48000
+            audio.format     = "S24_LE"
+            audio.position   = "FL,FR"
+            priority.driver  = 2000
+            priority.session = 2000
+        }
+    }
 ]
 EOF
 

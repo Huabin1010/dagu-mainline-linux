@@ -1,8 +1,17 @@
 #!/bin/sh
 # dagu Chrome: native Wayland + GLES. GPU raster stays on.
 # Ozone tags linux-dmabuf LINEAR; force GBM pixels LINEAR (dagu-linear-mod.c)
-# and load dagu-mesa (unused-depth color sysmem; 3D with depth stays GMEM).
+# and load dagu-mesa (LINEAR GMEM destile per tile; tiled WebGL stays GMEM).
 # Never into gnome-shell.
+#
+# Fonts at any Mutter scale (1.0 / 1.25 / 1.33 / 1.67 / 2.0):
+#  - Enable WaylandFractionalScaleV1 so Skia rasters at the real DPR.
+#    Integer-only raster + mutter up/downscale is what made 1.25 look
+#    like garbled blur.
+#  - --disable-lcd-text: this panel is scanned 1600x2560 and rotated
+#    270°. LCD RGB is on the physical short axis; the logical desktop
+#    is landscape, so subpixel AA becomes color-fringed "乱码" at every
+#    scale (see the Restore-pages photo). Grayscale AA only.
 profile="${HOME}/.config/google-chrome"
 lock="$profile/SingletonLock"
 if [ -L "$lock" ]; then
@@ -14,11 +23,37 @@ if [ -L "$lock" ]; then
 	fi
 fi
 export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"
+export FREETYPE_PROPERTIES="${FREETYPE_PROPERTIES:-truetype:interpreter-version=40}"
 if [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
 	export LD_LIBRARY_PATH="/usr/local/lib/dagu-mesa${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
 	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+# lcd-text-aa@2 = Disabled in chrome://flags, survives UI chrome paths
+# that do not look at --disable-lcd-text.
+if [ ! -e "$lock" ] && [ -f "$profile/Local State" ]; then
+	python3 - "$profile/Local State" <<'PY' 2>/dev/null || true
+import json, sys
+p = sys.argv[1]
+with open(p, "r", encoding="utf-8") as f:
+    d = json.load(f)
+labs = d.setdefault("browser", {}).setdefault("enabled_labs_experiments", [])
+if not isinstance(labs, list):
+    labs = []
+    d["browser"]["enabled_labs_experiments"] = labs
+changed = False
+for drop in ("lcd-text-aa@1", "lcd-text-aa@0"):
+    if drop in labs:
+        labs.remove(drop)
+        changed = True
+if "lcd-text-aa@2" not in labs:
+    labs.append("lcd-text-aa@2")
+    changed = True
+if changed:
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(d, f, separators=(",", ":"))
+PY
 fi
 exec /opt/google/chrome/chrome \
 	--ozone-platform=wayland \
@@ -30,6 +65,8 @@ exec /opt/google/chrome/chrome \
 	--enable-wayland-ime \
 	--disable-gtk-ime \
 	--wayland-text-input-version=3 \
-	--enable-features=WaylandTextInputV3 \
+	--enable-features=WaylandTextInputV3,WaylandFractionalScaleV1 \
+	--disable-lcd-text \
+	--font-render-hinting=none \
 	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation \
 	"$@"

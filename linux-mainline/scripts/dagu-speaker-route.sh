@@ -2,6 +2,8 @@
 # Match stock Android speaker path (mixer_paths_overlay_static.xml):
 #   DSP1 Firmware=Protection, Preload on, PCM Source=DSP, DRE on,
 #   AMP PCM Gain=18, Digital PCM=0 dB, Soft Ramp=4ms.
+# Factory ReDC (CAL_R) is applied by the kernel after preload — do not try
+# to write it from ALSA (wm_adsp flags those coeffs SYS).
 # Mainline wm_adsp only auto-loads cirrus/cs35l41-dsp1-spk-prot.bin (no
 # prefix). Stage each amp's Xiaomi *.bin there, then preload that amp.
 set -eu

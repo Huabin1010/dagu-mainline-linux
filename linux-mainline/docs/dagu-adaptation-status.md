@@ -51,7 +51,7 @@
 | CPU 调频 + 温度 | **已通** | EPSS LUT，stress-ng 8/8 |
 | 触控 Himax | **已通** | `spi-gpio`，不要 GENI SPI |
 | Wi‑Fi QCA6390 | **已通** | ath11k，iperf 约 600–665 Mbps |
-| 扬声器 CS35L41 | **软件已通** | 硬件 TDM 已通；桌面曾走 Dummy/8ch Pro 无声。已加 UCM HiFi + mixer 开机路由；听感待口头确认 |
+| 扬声器 CS35L41 | **软件已通** | GDM 重启后 ACP 只有 Off（`disable-pro-audio` 再把 Pro 掐掉）→ Dummy Output 无声。已加 `linux-mainline/alsa/50-dagu-alsa-sink.conf` 直开 `hw:0,0` 2ch；重启 PW 后 UCM `HiFi__Speaker__sink` 也会出现。播时四颗 AMP/SPK=On。 |
 | 麦克风 | **已通** | `/tmp/mic.wav` 非空（约 192 KB / 2s） |
 | 后摄 s5kjn1 | **部分** | probe + C-PHY 寄存器对，STREAMON CCI NACK，0 帧 |
 | 前摄 imx596 | **部分** | chip id 读到，开流，0 帧 |
@@ -98,7 +98,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 分辨率：1600×2560 扫描（竖屏 framebuffer）
 - 压测脚本：`linux-mainline/scripts/dagu-display-stress.sh`、`linux-mainline/scripts/dagu-refresh-test.py`
 - 滑动窗口花屏 / GNOME 断触：fb0 Himax 测试丝滑。GNOME 主 fb 曾是 **XR30 10bpc**（L81A DSC 是 8bpc），再加 `CLUTTER_PAINT` 全屏重绘会拖死输入。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机 `format=XR24` `modifier=0x0`；用户态去掉 `CLUTTER_PAINT`、`GSK_RENDERER=ngl`、关掉 onboard / linger（`linux-mainline/scripts/rootfs-desktop-setup.sh`）
-- Chrome / Electron 组件花屏：Ozone 把 `LINEAR + QCOM_COMPRESSED + QCOM_TILED3 + INVALID` 交给 `gbm_bo_create_with_modifiers`，但 `zwp_linux_buffer_params_v1.add` **永远标 modifier 0,0**。客户端 `linux-mainline/scripts/dagu-linear-mod.c`（`/usr/local/lib/libdagu-linear-mod.so`）把隐式/窗口 GBM 做成真 `GBM_BO_USE_LINEAR`，像素与 LINEAR 标签一致。**不要**关 GPU 栅格。a6xx `BLIT_EVENT_STORE` 仍会把这些缓冲写成 macrotile。Chrome 与 Mineradio 用 `LD_LIBRARY_PATH=/usr/local/lib/dagu-mesa` 加载补丁版 `libgallium`（`linux-mainline/patches/mesa-26.0.8-linear-cbuf-sysmem.patch`）：没有真实 depth/stencil 测试的 color RT 走 sysmem（Electron/Skia 1–3 draw LINEAR 也算）；带 depth 的 Three.js 继续 GMEM。禁止 `CP_BLIT` r2d 在 BIN_RESOLVE 里 store LINEAR（整窗花屏）。禁止 interpose ANGLE 的 `eglCreateImageKHR`。禁止把 `.so` / dagu-mesa preload 进 gnome-shell。合成器保持 `SEND_KMS_MODIFIERS=1`、`USE_KMS_MODIFIERS=0`、`disable-direct-scanout`。实机：Chrome `file:///tmp/dagu-points-glass.html` 与 Mineradio 首页玻璃均干净，无 CCU hangcheck。
+- Chrome / Electron 组件花屏：Ozone 把 `LINEAR + QCOM_COMPRESSED + QCOM_TILED3 + INVALID` 交给 `gbm_bo_create_with_modifiers`，但 `zwp_linux_buffer_params_v1.add` **永远标 modifier 0,0**。客户端 `linux-mainline/scripts/dagu-linear-mod.c`（`/usr/local/lib/libdagu-linear-mod.so`）把隐式/窗口 GBM 做成真 `GBM_BO_USE_LINEAR`，像素与 LINEAR 标签一致。**不要**关 GPU 栅格。a6xx `BLIT_EVENT_STORE` 仍会把这些缓冲写成 macrotile。Chrome / Mineradio 用 `LD_LIBRARY_PATH=/usr/local/lib/dagu-mesa`（`linux-mainline/patches/mesa-26.0.8-linear-cbuf-sysmem.patch` + `linux-mainline/patches/mesa-26.0.8-linear-sysmem.patch` + `linux-mainline/patches/mesa-26.0.8-tex-seqno-rebuild.patch`）。**不要**把 dagu-mesa / linear-mod 进 gnome-shell。字体花、界面不花：a650 `BLIT_EVENT_STORE` 把 LINEAR 写成 macrotile；大色块还能认，顶栏字形变成 1-bit 块（`linux-mainline/out/display-stress/dagu-fb0-now.ppm`，`font_unique=3` `font_tile32=0.81`），滚动再 store 损坏 tile。GSK 字形带 stencil，unused-depth sysmem 罩不住；LINEAR+stencil 整段 sysmem 会把 mutter scanout 写成全黑。destile 须跳过 event store，在 `RM6_BLIT2DSCALE` 下用上游 scissored `fd6_resolve_tile`（`DAGU_LINEAR_DESTILE=1` 才开）。量化：`linux-mainline/scripts/dagu-fb-score.py` 的 `font_unique>=20` `font_aa>=40` `font_tile32<0.35`。测试页 `linux-mainline/scripts/dagu-font-probe.html`。KMS 特写 `linux-mainline/out/display-stress/probe-glyph-3x.png` 笔画完整，不是 1-bit 砖。任意 Mutter 缩放（本机 `1.0 / 1.25 / 1.333 / 1.667 / 2.0 / 2.5 / 2.667`，无 1.5）：**不要**锁死 scale 2，也**不要**关 `WaylandFractionalScaleV1`（关了之后 Chrome 只按整数 DPR 栅格，mutter 再二次缩放，1.25 会糊成「乱码」）。270° 扫出上 LCD RGB 在逻辑横屏上是错轴，必须灰度：`--disable-lcd-text`、`--font-render-hinting=none`、`linux-mainline/scripts/99-dagu-gray-fonts.conf`（`rgba=none`）、gsettings `font-antialiasing=grayscale`。实机 DPR 跟随缩放（1.25 时 `DPR=1.250`，见 `linux-mainline/out/display-stress/scale-sweep-dpr/unlocked-ui.png`）。扫描脚本 `linux-mainline/scripts/dagu-scale-font-sweep.py`，裁剪 `linux-mainline/scripts/dagu-kms-land-crop.py`。计分读 KMS，不要信 GDM 后的 `/dev/fb0`。锁屏/PowerSave 会挡住窗口，扫图前要 `PowerSaveMode=0` 且 `ScreenSaver.SetActive(false)`。
 
 ### GPU（Adreno 650）
 
@@ -108,6 +108,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - `gpu-initialized: 1`，`/dev/dri/card0` + `renderD128`，GNOME 走 msm atomic（不是 llvmpipe）
 - GNOME Resources 只扫 `/sys/class/drm/card0/device`（DPU，不是 `3d00000.gpu`）。`linux-mainline/overlays/linux/drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c` 提供 `gpu_busy_percent`、`mem_info_vram_*`、`hwmon/freq1_input` / `temp1_input`（来自 devfreq / thermal）。Resources 只认 `hwmon?`，由 `linux-mainline/scripts/dagu-resources-fix.sh` bind 成 `hwmon0`。禁止伪造：UFS 不是 PCIe，硬盘 Link / GPU Slot / Max Power Cap 等没有真实值的项由 `linux-mainline/scripts/dagu-resources-hide-na.c` 藏行。禁止 bind 覆盖 `/sys/class/drm/card0/device/uevent`（假 PCI_ID 会让 Chrome `drmGetDeviceFromDevId` 失败、`--in-process-gpu` 整进程退出）。`linux-mainline/scripts/dagu-chrome.sh` 会清掉已死进程的 Singleton 锁。Wi‑Fi Manufacturer 用发行版 `/usr/share/misc/pci.ids` 复制到 `/usr/share/hwdata/pci.ids`（须双空格）。CPU 名走包装 `lscpu`（Kryo 585 / Snapdragon 870）。
 - 用户态：Mesa Turnip，`vkcube` 选中 Adreno 650
+- **卡顿（2026-09-12）**：OPP 上限已是硅片 670 MHz，忙时 `simple_ondemand` 会到顶；空闲掉到 305 MHz 后再抬，1600×2560@120 + LINEAR 合成会丢帧。`linux-mainline/scripts/dagu-resources-fix.sh` / `linux-mainline/scripts/dagu-gpu-perf.sh` 把 `min_freq=490M`、`polling_interval=10ms`。不要 `governor=performance`（合成时 ~75°C）。面板目前只有 120Hz 一种 mode。
 - dEQP 冒烟 / compute / draw 核心组 0 失败（详见 `linux-mainline/docs/dagu-wifi-gpu-turnip-cpu.md`）
 
 ### CPU 调频与温度
@@ -131,7 +132,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - `&spi4` / `&gpi_dma0` disabled；`# CONFIG_SPI_QCOM_GENI is not set`
 - 滑动断触：IRQ 线程里不要 `dev_info`（`ignore_loglevel` 会堵 fbcon/串口）；DT 用 `IRQ_TYPE_LEVEL_LOW`，坏帧（全 0xff）不当抬手
 - OSK 连打字母：LEVEL_LOW + spi-gpio 会在一次按住里读到校验失败 / n=0 毛刺，tracking ID 被拆成多次点击。驱动排空 IRQ、校验和、连续空帧才抬手，80ms 超时兜底（`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`）
-- Chrome 屏上键盘：`dagu-osk-focus@dagu` 拦住 GNOME 自动 `keyboard.open`，只在点地址栏或点按后光标移动时打开；点页面/失焦/切标题则收起。扩展：`linux-mainline/scripts/dagu-osk-focus@dagu/`、`linux-mainline/scripts/rootfs-desktop-setup.sh`。
+- Chrome 屏上键盘：`linux-mainline/scripts/dagu-osk-focus@dagu/` 同时闸 `KeyboardManager.open`、`KeyboardActor.open` 和延迟的 `Actor._open`（GNOME 300ms rest timer 会绕过 `open()`）。点标签栏/关标签立刻收起；点地址栏立刻弹出；点网页只在随后有光标时才弹。`linux-mainline/scripts/dagu-snap@local/` 只截屏，禁止再调 `Main.keyboard.open`。改扩展 JS 后 gnome-shell 会缓存模块，需要重新登录才生效；`disable-user-extensions` 必须为 false。
 
 ### Wi‑Fi
 
@@ -164,12 +165,15 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - DAPM：四颗 `TL/TR/BL/BR Main AMP: On`；`speaker-test -l 3` 完整 3 轮 440 Hz
 - overlay：`linux-mainline/scripts/apply-overlays.sh` 里 TDM `bit_width` 保持 16/24（slot_width=32）；强行 32 会让 AFE `0x100ef` 返回 `ADSP_EBADPARAM`
 - **桌面无声根因（2026-09-12）**：WirePlumber ACP 认不出 Q6 mixer，卡停在 Profile=Off / Dummy Output；临时 `pro-audio` 会把 `hw:0,0` 开成 **8ch**，而 AFE 仍是 2ch。Chrome 看起来在播，喇叭仍可能无声。
+- **GDM 后再无声（2026-09-12 10:32）**：`wpctl` 默认 sink 又是 Dummy；`EnumProfile` 只有 Off + pro-audio，`disable-pro-audio=true` 后卡在 Off。UCM `set _verb HiFi` 本身可用。修复：`linux-mainline/alsa/50-dagu-alsa-sink.conf` → `/etc/pipewire/pipewire.conf.d/` 直开 2ch `hw:0,0`；重启 PW 后也会出现 `alsa_output.platform-sound.HiFi__Speaker__sink`。实机 `pw-play` 440 Hz exit 0，播时四颗 AMP/SPK=On。
 - **修复**：ALSA UCM2 HiFi（`PlaybackChannels 2`）+ 开机打开 `TERT_TDM_RX_0 Audio Mixer MultiMedia1`。文件：
   - `linux-mainline/alsa/ucm2/conf.d/sm8250/Xiaomi-dagu-CS35L41-WCD9385.conf`
   - `linux-mainline/alsa/ucm2/Xiaomi-dagu/HiFi.conf`
   - `linux-mainline/scripts/dagu-speaker-route.sh`
   - `linux-mainline/alsa/50-dagu-speaker.conf`（装到 `/etc/wireplumber/wireplumber.conf.d/`）
-- **听感（对齐安卓，2026-09-12）**：安卓 `mixer_paths_overlay_static.xml` 走 CS35L41 **DSP Protection**（`PCM Source=DSP`、`AMP PCM Gain=18`、`Digital=0 dB`、`DRE=on`、`TL/TR/BL/BR-cs35l41-dsp1-spk-prot.bin`）。Linux 之前切成 ASP 直通，没有 Xiaomi 调音/DRC，所以再加大数字增益也和安卓差一截。`linux-mainline/scripts/dagu-speaker-route.sh` 现按安卓路径 preload 每颗功放的 prot.bin。下一次编核：DTS `cirrus,subsystem-id = "dagu"` + `cs35l41-dsp1-spk-prot-dagu-*.bin` 别名。
+  - `linux-mainline/alsa/50-dagu-alsa-sink.conf`（装到 `/etc/pipewire/pipewire.conf.d/`）
+- **听感（对齐安卓，2026-09-12）**：安卓 `mixer_paths_overlay_static.xml` 走 CS35L41 **DSP Protection**（`PCM Source=DSP`、`AMP PCM Gain=18`、`Digital=0 dB`、`DRE=on`、`TL/TR/BL/BR-cs35l41-dsp1-spk-prot.bin`）。Linux 之前切成 ASP 直通，没有 Xiaomi 调音/DRC，所以再加大数字增益也和安卓差一截。`linux-mainline/scripts/dagu-speaker-route.sh` 现按安卓路径 preload 每颗功放的 prot.bin。
+- **拉满仍然很小声（2026-09-12）**：不是 GNOME 滑条，也不是再加数字增益。实机 DSP XM：`CAL_R=0`、`CAL_STATUS=0`，Halo Protection 按未校准阻抗限幅。安卓 persist 工厂值约 6.8 Ω（`cal_r` 9497–9696）。wm_adsp 把 `CAL_R` 标成 SYS，ALSA 写不进去。编核后由 `linux-mainline/scripts/apply-overlays.sh` 在 preload 完写 XM，DTS `cirrus,cal-r` / `cirrus,vpbr-config` 在 `linux-mainline/dts/sm8250-xiaomi-dagu.dts`。PipeWire 已是 S24_32LE、音量 1.0；模拟增益 18 也对。`*-music.txt` Fast Use Case 还没接（主线没有该 mixer）。
 
 `&adsp` okay，固件 `qcom/sm8250/xiaomi/dagu/adsp.mbn`。需要 `CONFIG_QRTR_SMD=y`（不要 =m），否则 PDR/APR 起不来。
 

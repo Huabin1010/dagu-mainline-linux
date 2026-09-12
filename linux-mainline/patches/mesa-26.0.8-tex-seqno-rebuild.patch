@@ -1,0 +1,56 @@
+From: dagu adaptation
+Subject: freedreno/a6xx: rebuild tex cache on rsc seqno mismatch
+
+Mineradio/Electron backdrop-filter rebinds a color RT as a sampler after
+the BO seqno changes. Mesa 26.0.8 then hits a cached fd6_texture_state
+and assert(view_rsc_seqno == rsc->seqno) aborts the process.
+
+Sync sampler views before the cache lookup, and drop a stale hit instead
+of asserting.
+
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_texture.cc
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_texture.cc
+@@ -812,6 +812,21 @@ fd6_texture_state(struct fd_context *ctx, mesa_shader_stage type)
+    struct fd6_texture_state *state = NULL;
+    struct fd6_texture_key key;
+ 
++   /* Electron/Skia (Mineradio glass) rebinds a color RT as a sampler after
++    * the BO seqno changes, without always setting tex_cache_needs_invalidate.
++    * Sync views first so the cache key moves; otherwise a stale hit asserts
++    * in view_rsc_seqno and the process aborts.
++    */
++   for (unsigned i = 0; i < tex->num_textures; i++) {
++      struct fd6_pipe_sampler_view *so =
++            fd6_pipe_sampler_view(tex->textures[i]);
++      if (so)
++         fd6_sampler_view_update<CHIP>(ctx, so);
++   }
++
+    if (unlikely(fd6_ctx->tex_cache_needs_invalidate))
+       handle_invalidates<CHIP>(ctx);
+ 
+@@ -847,13 +862,22 @@ fd6_texture_state(struct fd_context *ctx, mesa_shader_stage type)
+ 
+    if (entry) {
+       state = (struct fd6_texture_state *)entry->data;
++      bool stale = false;
+       for (unsigned i = 0; i < tex->num_textures; i++) {
+          uint16_t seqno = tex->textures[i] ?
+                fd_resource(tex->textures[i]->texture)->seqno : 0;
+-
+-         assert(state->view_rsc_seqno[i] == seqno);
++         if (state->view_rsc_seqno[i] != seqno) {
++            stale = true;
++            break;
++         }
++      }
++      if (stale) {
++         remove_tex_entry(fd6_ctx, entry);
++         state = NULL;
++      } else {
++         goto out_unlock;
+       }
+-      goto out_unlock;
+    }
+ 
+    state = CALLOC_STRUCT(fd6_texture_state);

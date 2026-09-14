@@ -430,6 +430,132 @@ if "dagu L81A: CAF qcom,mdss-dsi-panel-phy-timings" not in text:
         raise SystemExit("dsi_phy_7nm.c DPHY timing block not found")
     phy.write_text(text.replace(old, new, 1))
 
+# Video-mode idle_pc only drops IRQs (does not gate DSC clocks). That
+# starves Mutter's frame clock (~100-150 ms fallback) and races dual
+# DSC flush (vblank timeout 0x400000). Keep vid IRQs on.
+enc = root / "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c"
+etext = enc.read_text()
+emarker = "dagu: video mode keep IRQs"
+if emarker not in etext:
+    eold = """		if (dpu_crtc_frame_pending(drm_enc->crtc) > 1) {
+			DRM_DEBUG_KMS("id:%d skip schedule work\\n",
+				      DRMID(drm_enc));
+			return 0;
+		}
+
+		queue_delayed_work(priv->kms->wq, &dpu_enc->delayed_off_work,
+				   msecs_to_jiffies(dpu_enc->idle_timeout));
+"""
+    enew = """		if (dpu_crtc_frame_pending(drm_enc->crtc) > 1) {
+			DRM_DEBUG_KMS("id:%d skip schedule work\\n",
+				      DRMID(drm_enc));
+			return 0;
+		}
+
+		/* dagu: video mode keep IRQs. idle_pc only calls
+		 * _dpu_encoder_irq_disable (IDLE_TIMEOUT=58 ms). Panel
+		 * still scans; Mutter then misses vblank and falls back
+		 * to a 100-150 ms frame-clock timeout (Chrome WaitForSwap
+		 * holes). First commit after idle also races dual DSC
+		 * CTL flush (vblank timeout 0x400000).
+		 */
+		if (is_vid_mode)
+			return 0;
+
+		queue_delayed_work(priv->kms->wq, &dpu_enc->delayed_off_work,
+				   msecs_to_jiffies(dpu_enc->idle_timeout));
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: FRAME_DONE idle queue block not found")
+    enc.write_text(etext.replace(eold, enew, 1))
+    print(f"patched {enc}: {emarker}")
+
+# Mainline calls dpu_encoder_prep_dsc() on every kickoff: dsc_config,
+# dsc_bind_pingpong_blk (dsc0→pp0, dsc1→pp1), enable_dsc, and
+# update_pending_flush_dsc (CTL_FLUSH bit 22). L81A dual-DSC then
+# stalls wait_event 107-219 ms. Bind once at enable/hw_reset.
+enc = root / "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c"
+etext = enc.read_text()
+emarker = "dagu: skip redundant DSC prep"
+if emarker not in etext:
+    eold = """	/* DSC configuration */
+	struct drm_dsc_config *dsc;
+};
+"""
+    enew = """	/* DSC configuration */
+	struct drm_dsc_config *dsc;
+	/* dagu: skip redundant DSC prep. Mainline rebinds DSC and
+	 * pending_flush_dsc (CTL bit 22) on every kickoff. L81A 120 Hz
+	 * dual-DSC then stalls CTL_FLUSH wait_event 107-219 ms.
+	 */
+	bool dsc_prepared;
+};
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: dsc field block not found")
+    etext = etext.replace(eold, enew, 1)
+
+    eold = """	if (!dpu_enc->enabled)
+		goto out;
+
+	if (dpu_enc->cur_slave && dpu_enc->cur_slave->ops.restore)
+"""
+    enew = """	if (!dpu_enc->enabled)
+		goto out;
+
+	dpu_enc->dsc_prepared = false;
+
+	if (dpu_enc->cur_slave && dpu_enc->cur_slave->ops.restore)
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: runtime_resume restore block not found")
+    etext = etext.replace(eold, enew, 1)
+
+    eold = """	dpu_enc = to_dpu_encoder_virt(drm_enc);
+	dpu_enc->dsc = dpu_encoder_get_dsc_config(drm_enc);
+"""
+    enew = """	dpu_enc = to_dpu_encoder_virt(drm_enc);
+	dpu_enc->dsc = dpu_encoder_get_dsc_config(drm_enc);
+	dpu_enc->dsc_prepared = false;
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: atomic_enable dsc assign not found")
+    etext = etext.replace(eold, enew, 1)
+
+    eold = """	if (dpu_enc->dsc)
+		dpu_encoder_prep_dsc(dpu_enc, dpu_enc->dsc);
+}
+"""
+    enew = """	if (dpu_enc->dsc && (!dpu_enc->dsc_prepared || needs_hw_reset)) {
+		/* dagu: skip redundant DSC prep. Modeset/enable and
+		 * hw_reset still bind; later kickoffs keep the mux.
+		 */
+		dpu_encoder_prep_dsc(dpu_enc, dpu_enc->dsc);
+		dpu_enc->dsc_prepared = true;
+	}
+}
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: prepare_for_kickoff prep_dsc not found")
+    etext = etext.replace(eold, enew, 1)
+
+    eold = """	if (dpu_enc->dsc) {
+		dpu_encoder_unprep_dsc(dpu_enc);
+		dpu_enc->dsc = NULL;
+	}
+"""
+    enew = """	if (dpu_enc->dsc) {
+		dpu_encoder_unprep_dsc(dpu_enc);
+		dpu_enc->dsc = NULL;
+		dpu_enc->dsc_prepared = false;
+	}
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: unprep_dsc disable block not found")
+    etext = etext.replace(eold, enew, 1)
+    enc.write_text(etext)
+    print(f"patched {enc}: {emarker}")
+
 # DPU INTF DSC active width must match DSI (DIV_ROUND_UP). Upstream
 # truncates 800*8/24=266; CAF and dsi_timing_setup both use 267.
 vid = root / "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c"
@@ -990,6 +1116,30 @@ if marker not in text:
     path.write_text(text.replace(old, new))
     print(f"patched {path}: {marker}")
 
+# POST_PMD runs after TDM clocks drop; PDN_DONE never arrives (-110).
+# Returning the timeout makes ASoC log "Main AMP event failed" four times
+# per PipeWire idle. Same clocks-at-trigger case as PUP — ignore it.
+path = root / "sound/soc/codecs/cs35l41-lib.c"
+text = path.read_text()
+marker = "dagu: CS35L41 PMD timeout is non-fatal"
+if marker not in text:
+    old = """			/* dagu: CS35L41 PUP timeout is non-fatal */
+			dev_warn(dev, "Enable(%d) timed out (%d); clocks may arrive at trigger\\n",
+				 enable, ret);
+			if (enable)
+				ret = 0;
+"""
+    new = """			/* dagu: CS35L41 PUP timeout is non-fatal */
+			/* dagu: CS35L41 PMD timeout is non-fatal */
+			dev_warn(dev, "Enable(%d) timed out (%d); clocks may arrive at trigger\\n",
+				 enable, ret);
+			ret = 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: PMD timeout needle missing")
+    path.write_text(text.replace(old, new))
+    print(f"patched {path}: {marker}")
+
 # Halo Protection firmware treats missing ReDC as uncalibrated and limits
 # output. Xiaomi persist has factory cal_r; wm_adsp marks CAL_R SYS so ALSA
 # cannot write it. Poke the XM registers after wmfw+bin preload.
@@ -1059,6 +1209,211 @@ static int cs35l41_dsp_preload_ev(struct snd_soc_dapm_widget *w,
 """
     if old not in text:
         raise SystemExit(f"{path}: dsp_preload_ev needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Already-applied kernels only wrote CAL_STATUS=1. Android tinymix
+# Protection cd CAL_SET_STATUS is 2 and CAL_R_SELECTED equals CAL_R.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: Halo CAL_SET_STATUS=2"
+if marker not in text:
+    old = """	ret |= regmap_write(cs35l41->regmap, 0x02800268, cal_r);
+	ret |= regmap_write(cs35l41->regmap, 0x02800270, 1);
+	ret |= regmap_write(cs35l41->regmap, 0x02800274, cal_r + 1);
+	if (ret)
+		dev_warn(cs35l41->dev, "dagu: CAL_R=%u write failed: %d\\n", cal_r, ret);
+	else
+		dev_info(cs35l41->dev, "dagu: applied CAL_R=%u ambient=%u\\n",
+			 cal_r, ambient);
+"""
+    new = """	ret |= regmap_write(cs35l41->regmap, 0x02800268, cal_r);
+	ret |= regmap_write(cs35l41->regmap, 0x02800270, 1);
+	ret |= regmap_write(cs35l41->regmap, 0x02800274, cal_r + 1);
+	/* dagu: Halo CAL_SET_STATUS=2 */
+	ret |= regmap_write(cs35l41->regmap, 0x02800278, cal_r);
+	ret |= regmap_write(cs35l41->regmap, 0x0280027c, 2);
+	if (ret)
+		dev_warn(cs35l41->dev, "dagu: CAL_R=%u write failed: %d\\n", cal_r, ret);
+	else
+		dev_info(cs35l41->dev, "dagu: applied CAL_R=%u ambient=%u SET_STATUS=2\\n",
+			 cal_r, ambient);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: CAL_SET_STATUS upgrade needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Hibernate + i2c-gpio: wake -42 then NAK on i2c-20/21. DSP preload makes
+# autosuspend enter hibernate after 3s idle. No-op runtime PM.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: skip CS35L41 hibernate on i2c-gpio"
+if marker not in text:
+    old = """static int cs35l41_runtime_suspend(struct device *dev)
+{
+	struct cs35l41_private *cs35l41 = dev_get_drvdata(dev);
+
+	dev_dbg(cs35l41->dev, "Runtime suspend\\n");
+
+	if (!cs35l41->dsp.preloaded || !cs35l41->dsp.cs_dsp.running)
+		return 0;
+
+	cs35l41_enter_hibernate(dev, cs35l41->regmap, cs35l41->hw_cfg.bst_type);
+
+	regcache_cache_only(cs35l41->regmap, true);
+	regcache_mark_dirty(cs35l41->regmap);
+
+	return 0;
+}
+"""
+    new = """static int cs35l41_runtime_suspend(struct device *dev)
+{
+	/* dagu: skip CS35L41 hibernate on i2c-gpio */
+	return 0;
+}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: runtime_suspend needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: skip CS35L41 hibernate resume"
+if marker not in text:
+    old = """static int cs35l41_runtime_resume(struct device *dev)
+{
+	struct cs35l41_private *cs35l41 = dev_get_drvdata(dev);
+	int ret;
+
+	dev_dbg(cs35l41->dev, "Runtime resume\\n");
+
+	if (!cs35l41->dsp.preloaded || !cs35l41->dsp.cs_dsp.running)
+		return 0;
+
+	regcache_cache_only(cs35l41->regmap, false);
+
+	ret = cs35l41_exit_hibernate(cs35l41->dev, cs35l41->regmap);
+	if (ret)
+		return ret;
+
+	/* Test key needs to be unlocked to allow the OTP settings to re-apply */
+	cs35l41_test_key_unlock(cs35l41->dev, cs35l41->regmap);
+	ret = regcache_sync(cs35l41->regmap);
+	cs35l41_test_key_lock(cs35l41->dev, cs35l41->regmap);
+	if (ret) {
+		dev_err(cs35l41->dev, "Failed to restore register cache: %d\\n", ret);
+		return ret;
+	}
+	cs35l41_init_boost(cs35l41->dev, cs35l41->regmap, &cs35l41->hw_cfg);
+
+	return 0;
+}
+"""
+    new = """static int cs35l41_runtime_resume(struct device *dev)
+{
+	/* dagu: skip CS35L41 hibernate resume */
+	return 0;
+}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: runtime_resume needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/power/supply/bq27xxx_battery_i2c.c"
+text = path.read_text()
+marker = "dagu: wake sleeping BQ27Z561"
+if marker not in text:
+    old = """	do {
+		ret = i2c_transfer(client->adapter, msg, ARRAY_SIZE(msg));
+		if (ret == -EBUSY && ++retry < 3) {
+			/* sleep 10 milliseconds when busy */
+			usleep_range(10000, 11000);
+			continue;
+		}
+		break;
+	} while (1);
+"""
+    new = """	do {
+		/* dagu: wake sleeping BQ27Z561 */
+		ret = i2c_transfer(client->adapter, msg, ARRAY_SIZE(msg));
+		if (ret < 0 && ++retry < 6) {
+			usleep_range(2000, 4000);
+			continue;
+		}
+		break;
+	} while (1);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: bq27xxx read retry needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/power/supply/bq27xxx_battery_i2c.c"
+text = path.read_text()
+marker = "dagu: retry BQ27Z561 I2C write"
+if marker not in text:
+    old = """	msg.buf = data;
+	msg.addr = client->addr;
+	msg.flags = 0;
+
+	ret = i2c_transfer(client->adapter, &msg, 1);
+	if (ret < 0)
+		return ret;
+"""
+    new = """	msg.buf = data;
+	msg.addr = client->addr;
+	msg.flags = 0;
+
+	{
+		int retry = 0;
+
+		/* dagu: retry BQ27Z561 I2C write */
+		do {
+			ret = i2c_transfer(client->adapter, &msg, 1);
+			if (ret < 0 && ++retry < 6) {
+				usleep_range(2000, 4000);
+				continue;
+			}
+			break;
+		} while (1);
+	}
+	if (ret < 0)
+		return ret;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: bq27xxx write retry needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/power/supply/bq27xxx_battery_i2c.c"
+text = path.read_text()
+marker = "dagu: retry BQ27Z561 I2C bulk_read"
+if marker not in text:
+    old = """	ret = i2c_smbus_read_i2c_block_data(client, reg, len, data);
+	if (ret < 0)
+		return ret;
+"""
+    new = """	{
+		int retry = 0;
+
+		/* dagu: retry BQ27Z561 I2C bulk_read */
+		do {
+			ret = i2c_smbus_read_i2c_block_data(client, reg, len, data);
+			if (ret < 0 && ++retry < 6) {
+				usleep_range(2000, 4000);
+				continue;
+			}
+			break;
+		} while (1);
+	}
+	if (ret < 0)
+		return ret;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: bq27xxx bulk_read retry needle missing")
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: {marker}")
 

@@ -124,7 +124,7 @@
 		pinctrl-0 = <&cs35l41_i2c_se1_default>;
 		sda-gpios = <&tlmm 4 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 		scl-gpios = <&tlmm 5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <2>;
+		i2c-gpio,delay-us = <5>;
 		clock-frequency = <400000>;
 
 		cs35l41_br: speaker-amp@40 {
@@ -183,7 +183,7 @@
 		pinctrl-0 = <&cs35l41_i2c_se3_default>;
 		sda-gpios = <&tlmm 119 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 		scl-gpios = <&tlmm 120 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <2>;
+		i2c-gpio,delay-us = <5>;
 		clock-frequency = <400000>;
 
 		cs35l41_tl: speaker-amp@41 {
@@ -246,7 +246,7 @@
 		pinctrl-0 = <&fg_i2c_se0_default>;
 		sda-gpios = <&tlmm 28 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 		scl-gpios = <&tlmm 29 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <5>;
+		i2c-gpio,delay-us = <20>;
 		clock-frequency = <100000>;
 
 		fg_slave: fuel-gauge-r@55 {
@@ -264,7 +264,7 @@
 		pinctrl-0 = <&fg_i2c_se13_default>;
 		sda-gpios = <&tlmm 36 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 		scl-gpios = <&tlmm 37 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <5>;
+		i2c-gpio,delay-us = <20>;
 		clock-frequency = <100000>;
 
 		fg_master: fuel-gauge-l@55 {

@@ -1,0 +1,42 @@
+From: dagu
+Subject: [PATCH] kms: do not queue on pending_page_flip when deadline is off
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2).
+
+update_ready() queues the update when pending_page_flip is set,
+even if is_using_deadline_timer() is FALSE (KMS thread
+SCHED_OTHER). schedule_process() in that state only
+g_warning_once() and does not flush pending_update.
+
+Race on identity GTK: handle_update for N+1 runs on the KMS
+thread before drmHandleEvent has cleared pending_page_flip for
+N. The update sits in pending_update until the next maybe_post
+(65-200 ms). drmModeAtomicCommit is then late; dpu_enc_kickoff
+follows immediately. wait_flush in the hole is 0-6 ms.
+
+Live ELF (objdump of /proc/<pid>/map_files):
+  0x1bd7d4  cbnz w0,#pending_page_flip,queue  → nop
+  falls through to do_process_update (0x1bd7d8)
+
+Do not also poke schedule_process 0x1bce48; that flush was worse.
+
+---
+ src/backends/native/meta-kms-impl-device.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/src/backends/native/meta-kms-impl-device.c b/src/backends/native/meta-kms-impl-device.c
+index 0000000..dagu0006 100644
+--- a/src/backends/native/meta-kms-impl-device.c
++++ b/src/backends/native/meta-kms-impl-device.c
+@@ -2034,8 +2034,9 @@ meta_kms_impl_device_update_ready (MetaThreadImpl  *impl,
+ 
+   maybe_set_kms_ready_time (crtc_frame, update);
+ 
+-  if ((want_deadline_timer || crtc_frame->pending_page_flip) &&
+-      !meta_kms_update_get_mode_sets (update))
++  /* Deadline off: pending_page_flip must not queue. schedule_process
++   * will not flush that queue. Kernel serializes the next atomic. */
++  if (want_deadline_timer && !meta_kms_update_get_mode_sets (update))
+     {
+       if (crtc_frame->pending_page_flip)
+         {

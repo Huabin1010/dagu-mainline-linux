@@ -251,7 +251,7 @@ LD_PRELOAD=/usr/local/lib/libdagu-linear-mod.so
 6. destile 影子可用 `fd_dagu_set_force_tiled(1)` 分配真 TILE6_3
 7. **`fd6_resolve_linear_tile` 回退关闭**（`if (false && …)`）
 
-Chrome 额外：`--disable-partial-swap`、`--disable-lcd-text`、`WaylandFractionalScaleV1`（分数 DPR + 灰度字，与毛玻璃正交，见总表字体段）。
+Chrome 额外：`--disable-lcd-text`、`WaylandFractionalScaleV1`（分数 DPR + 灰度字，与毛玻璃正交，见总表字体段）。PartialSwap 保持默认开（LINEAR destile 已修好）；不要 `--in-process-gpu`。
 
 ### 这是妥协
 
@@ -586,3 +586,4 @@ aarch64-linux-gnu-strip --strip-unneeded "$DEST"
 | 2026-09-12 | `dagu-gmem-fbread-sync`：blob 判决 A。UCHE 读 GMEM 用偏移 0。PASS3 GMEM `FETCH_OK`。已撤 FB_READ sysmem 回退和 `DAGU_LINEAR_DESTILE`。 |
 | 2026-09-12 | `dagu-ubwc-reclamation`：Mutter `USE=1`，主 fb `QCOM_COMPRESSED`，Chrome LINEAR GMEM 仍 `sys=0 fbread=1`。正式 patchset 0001/0002。 |
 | 2026-09-12 | 图集放行：`dagu-linear-mod.c` 对 R8 / ≤1024² 原样传递，Wayland 长条仍 LINEAR。dagu-mesa 4bpp 只在宽**和**高都 >1024 时动手（躲开 Skia `3840×360`）。补丁 `linux-mainline/patches/mesa-26.0.8-atlas-passthrough.patch`。 |
+| 2026-09-13 | **撕花屏合同**。official-152 `gbm_bo_get_modifier()` 已报 `QCOM_COMPRESSED`。卸 `libdagu-linear-mod.so` 后窗口 2477×1560 stride=9984 为 UBWC，CDP 大字可读。Turnip `--use-angle=vulkan`：`chrome://gpu` Vulkan=Enabled，WebGL Turnip a650，H.264 仍 `/dev/video14` irq=443。Mutter 去掉 `disable-direct-scanout`，主 fb 仍 UBWC；270° 最大化窗还没有第二块 DPU plane。包装 `linux-mainline/scripts/dagu-chromium-native.sh`，探针 `linux-mainline/scripts/dagu-ubwc-reclaim-probe.sh`。 |

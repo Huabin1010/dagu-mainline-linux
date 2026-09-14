@@ -1,0 +1,13 @@
+[Unit]
+Description=dagu: unbound workqueue affinity=system (DRM commit_work)
+DefaultDependencies=no
+After=sysinit.target
+Before=display-manager.service gdm.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo system > /sys/module/workqueue/parameters/default_affinity_scope'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

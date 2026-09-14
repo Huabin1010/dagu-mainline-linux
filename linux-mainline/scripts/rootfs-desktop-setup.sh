@@ -63,9 +63,9 @@ EOF
 
 # Stale /tmp/.X*-lock makes XWayland fail 50 times and GDM give up the display.
 # Honest KMS modifiers: SEND=1 advertises QCOM_*, USE=1 lets the primary fb
-# be QCOM_COMPRESSED (UBWC). disable-direct-scanout keeps client buffers
-# (Chrome LINEAR) off the DPU. Do not set FD_MESA_DEBUG on mutter —
-# noubwc/notile on the compositor breaks UBWC import.
+# be QCOM_COMPRESSED (UBWC). Chrome windows are native UBWC now, so do not
+# set disable-direct-scanout (that was the LINEAR flower contract).
+# Do not set FD_MESA_DEBUG on mutter — noubwc/notile breaks UBWC import.
 # Onboard on Wayland eats touch (XInput fallback). GNOME OSK is enough.
 mkdir -p /etc/systemd/system/gdm.service.d
 cat >/etc/systemd/system/gdm.service.d/dagu-kms.conf <<'EOF'
@@ -73,10 +73,9 @@ cat >/etc/systemd/system/gdm.service.d/dagu-kms.conf <<'EOF'
 Environment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1
 Environment=MUTTER_DEBUG_SEND_KMS_MODIFIERS=1
 Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=1
-Environment=MUTTER_DEBUG_PAINT=disable-direct-scanout
 Environment=GSK_RENDERER=ngl
 Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
-UnsetEnvironment=FD_MESA_DEBUG TU_DEBUG LD_PRELOAD MESA_VK_WSI_DEBUG DAGU_LINEAR_DESTILE
+UnsetEnvironment=FD_MESA_DEBUG TU_DEBUG LD_PRELOAD MESA_VK_WSI_DEBUG DAGU_LINEAR_DESTILE MUTTER_DEBUG_PAINT
 ExecStartPre=/bin/sh -c "rm -f /tmp/.X*-lock; mkdir -p /tmp/.X11-unix; find /tmp/.X11-unix -mindepth 1 -delete || true"
 EOF
 
@@ -88,14 +87,13 @@ cat >/etc/environment.d/dagu-mutter.conf <<'EOF'
 MUTTER_DEBUG_DISABLE_HW_CURSORS=1
 MUTTER_DEBUG_SEND_KMS_MODIFIERS=1
 MUTTER_DEBUG_USE_KMS_MODIFIERS=1
-MUTTER_DEBUG_PAINT=disable-direct-scanout
 GSK_RENDERER=ngl
 MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
 EOF
 mkdir -p /etc/systemd/user.conf.d
 cat >/etc/systemd/user.conf.d/dagu-mutter.conf <<'EOF'
 [Manager]
-DefaultEnvironment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1 MUTTER_DEBUG_SEND_KMS_MODIFIERS=1 MUTTER_DEBUG_USE_KMS_MODIFIERS=1 MUTTER_DEBUG_PAINT=disable-direct-scanout GSK_RENDERER=ngl MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
+DefaultEnvironment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1 MUTTER_DEBUG_SEND_KMS_MODIFIERS=1 MUTTER_DEBUG_USE_KMS_MODIFIERS=1 GSK_RENDERER=ngl MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
 EOF
 # gnome-shell is org.gnome.Shell@.service under the user manager, which can
 # outlive GDM restarts. Put the compositor contract on that unit so mutter
@@ -106,10 +104,9 @@ cat >/etc/systemd/user/org.gnome.Shell@.service.d/dagu-kms.conf <<'EOF'
 Environment=MUTTER_DEBUG_DISABLE_HW_CURSORS=1
 Environment=MUTTER_DEBUG_SEND_KMS_MODIFIERS=1
 Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=1
-Environment=MUTTER_DEBUG_PAINT=disable-direct-scanout
 Environment=GSK_RENDERER=ngl
 Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
-UnsetEnvironment=FD_MESA_DEBUG TU_DEBUG LD_PRELOAD MESA_VK_WSI_DEBUG DAGU_LINEAR_DESTILE
+UnsetEnvironment=FD_MESA_DEBUG TU_DEBUG LD_PRELOAD MESA_VK_WSI_DEBUG DAGU_LINEAR_DESTILE MUTTER_DEBUG_PAINT
 EOF
 mkdir -p /usr/share/drirc.d
 cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
@@ -145,9 +142,7 @@ export FREETYPE_PROPERTIES="${FREETYPE_PROPERTIES:-truetype:interpreter-version=
 if [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
 	export LD_LIBRARY_PATH="/usr/local/lib/dagu-mesa${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
-if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
-	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
-fi
+# Native UBWC: do not LD_PRELOAD libdagu-linear-mod.so.
 if [ ! -e "$lock" ] && [ -f "$profile/Local State" ]; then
 	python3 - "$profile/Local State" <<'PY' 2>/dev/null || true
 import json, sys
@@ -171,24 +166,108 @@ if changed:
         json.dump(d, f, separators=(",", ":"))
 PY
 fi
+ENABLE_FEAT="WaylandTextInputV3,WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj,AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL"
+DISABLE_FEAT="Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation"
+ANGLE="gles"
+if [ "${DAGU_CHROME_VIDEO_OVERLAY:-0}" = "1" ]; then
+	ENABLE_FEAT="${ENABLE_FEAT},WaylandOverlayDelegation"
+	DISABLE_FEAT="Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
+fi
+if [ "${DAGU_CHROME_VULKAN:-0}" = "1" ]; then
+	ENABLE_FEAT="${ENABLE_FEAT},Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
+	DISABLE_FEAT="WaylandOverlayDelegation"
+	ANGLE="vulkan"
+	set -- --enable-gpu-rasterization --enable-zero-copy "$@"
+fi
 exec /opt/google/chrome/chrome \
 	--ozone-platform=wayland \
 	--ozone-platform-hint=wayland \
-	--in-process-gpu \
 	--use-gl=angle \
-	--use-angle=gles \
+	--use-angle="$ANGLE" \
 	--start-maximized \
 	--enable-wayland-ime \
 	--disable-gtk-ime \
 	--wayland-text-input-version=3 \
-	--enable-features=WaylandTextInputV3,WaylandFractionalScaleV1 \
+	--enable-features="$ENABLE_FEAT" \
 	--disable-lcd-text \
 	--font-render-hinting=none \
-	--disable-partial-swap \
-	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation \
+	--disable-features="$DISABLE_FEAT" \
+	--ignore-gpu-blocklist \
 	"$@"
 EOF
 	chmod 755 /usr/local/bin/dagu-chrome
+	install -m755 /dev/stdin /usr/local/bin/dagu-chromium-native <<'EOF'
+#!/bin/sh
+# Copied from linux-mainline/scripts/dagu-chromium-native.sh at image build.
+# Native UBWC; DAGU_TEAR_CONTRACT=1 enables Turnip + overlay flags.
+profile="${HOME}/.config/chromium"
+lock="$profile/SingletonLock"
+if [ -L "$lock" ]; then
+	hostpid=$(readlink "$lock")
+	pid=${hostpid##*-}
+	if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+		rm -f "$profile/SingletonLock" "$profile/SingletonSocket" "$profile/SingletonCookie"
+	fi
+fi
+export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"
+export FREETYPE_PROPERTIES="${FREETYPE_PROPERTIES:-truetype:interpreter-version=40}"
+STOCK="${DAGU_STOCK_MESA:-0}"
+VULKAN="${DAGU_CHROME_VULKAN:-0}"
+OVERLAY="${DAGU_CHROME_OVERLAY:-0}"
+if [ "${DAGU_TEAR_CONTRACT:-0}" = "1" ]; then
+	STOCK=1
+	VULKAN=1
+	OVERLAY=1
+fi
+unset LD_PRELOAD
+if [ "$STOCK" != "1" ] && [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
+	export LD_LIBRARY_PATH="/usr/local/lib/dagu-mesa${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+CHROME_BIN=/usr/bin/chromium
+[ -x "$CHROME_BIN" ] || CHROME_BIN=/usr/lib/chromium/chromium
+ENABLE_FEAT="WaylandTextInputV3,WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj,AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,AcceleratedVideoEncoder,AcceleratedVideoEncodeLinux,MediaRecorderHEVCSupport"
+DISABLE_FEAT="Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation"
+ANGLE="gles"
+if [ "$OVERLAY" = "1" ]; then
+	ENABLE_FEAT="${ENABLE_FEAT},WaylandOverlayDelegation,HardwareOverlays"
+	DISABLE_FEAT="Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
+fi
+if [ "$VULKAN" = "1" ]; then
+	ENABLE_FEAT="${ENABLE_FEAT},Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
+	if [ "$OVERLAY" = "1" ]; then
+		DISABLE_FEAT=""
+	else
+		DISABLE_FEAT="WaylandOverlayDelegation"
+	fi
+	ANGLE="vulkan"
+	set -- --enable-gpu-rasterization --enable-zero-copy "$@"
+fi
+if [ "${DAGU_CHROME_WAYLAND_BFS:-0}" = "1" ]; then
+	ENABLE_FEAT="${ENABLE_FEAT},WaylandExternalBeginFrameSource"
+fi
+set -- --enable-features="$ENABLE_FEAT" "$@"
+if [ -n "$DISABLE_FEAT" ]; then
+	set -- --disable-features="$DISABLE_FEAT" "$@"
+fi
+exec "$CHROME_BIN" \
+	--ozone-platform=wayland \
+	--ozone-platform-hint=wayland \
+	--use-gl=angle \
+	--use-angle="$ANGLE" \
+	--start-maximized \
+	--enable-wayland-ime \
+	--disable-gtk-ime \
+	--wayland-text-input-version=3 \
+	--disable-lcd-text \
+	--font-render-hinting=none \
+	--ignore-gpu-blocklist \
+	"$@"
+EOF
+	cat >/usr/local/bin/dagu-chromium <<'EOF'
+#!/bin/sh
+exec /usr/local/bin/dagu-chromium-native "$@"
+EOF
+	chmod 755 /usr/local/bin/dagu-chromium /usr/local/bin/dagu-chromium-native
 	mkdir -p /usr/local/share/applications /home/dagu/.local/share/applications
 	if [ -f /usr/share/applications/google-chrome.desktop ]; then
 		sed 's|^Exec=/usr/bin/google-chrome-stable|Exec=/usr/local/bin/dagu-chrome|' \
@@ -197,6 +276,37 @@ EOF
 		cp /usr/local/share/applications/google-chrome.desktop \
 			/home/dagu/.local/share/applications/google-chrome.desktop
 		chown dagu:dagu /home/dagu/.local/share/applications/google-chrome.desktop
+	fi
+	if [ -f /usr/share/applications/chromium.desktop ]; then
+		sed -e 's|^Exec=.*chromium|Exec=/usr/local/bin/dagu-chromium|' \
+			-e 's|^Name=.*|Name=Chromium (Venus)|' \
+			/usr/share/applications/chromium.desktop \
+			>/usr/local/share/applications/chromium.desktop
+		cp /usr/local/share/applications/chromium.desktop \
+			/home/dagu/.local/share/applications/chromium.desktop
+		chown dagu:dagu /home/dagu/.local/share/applications/chromium.desktop
+	fi
+	# Official google-chrome is USE_V4L2=0 (FFmpeg). HTML5 must open
+	# Chromium (Venus /dev/video14). Keep Chrome installed for GLES
+	# LINEAR tests, but do not make it the default handler.
+	if [ -f /usr/local/share/applications/chromium.desktop ]; then
+		mkdir -p /home/dagu/.config /etc/xdg
+		python3 - <<'PY'
+from pathlib import Path
+mime = """[Default Applications]
+text/html=chromium.desktop
+x-scheme-handler/http=chromium.desktop
+x-scheme-handler/https=chromium.desktop
+x-scheme-handler/about=chromium.desktop
+x-scheme-handler/unknown=chromium.desktop
+"""
+for p in (Path("/home/dagu/.config/mimeapps.list"), Path("/etc/xdg/mimeapps.list")):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(mime)
+PY
+		chown dagu:dagu /home/dagu/.config/mimeapps.list
+		sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 HOME=/home/dagu \
+			xdg-settings set default-web-browser chromium.desktop 2>/dev/null || true
 	fi
 	if [ -f /opt/google/chrome/google-chrome ]; then
 		python3 - "$CHROME_DISABLE_FEATURES" <<'PY'
@@ -218,10 +328,10 @@ for line in text.splitlines(True):
         out.append(
             'export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"\n'
             '# dagu-chrome-gpu\n'
-            'exec -a "$0" "$HERE/chrome" --ozone-platform=wayland --ozone-platform-hint=wayland --in-process-gpu'
+            'exec -a "$0" "$HERE/chrome" --ozone-platform=wayland --ozone-platform-hint=wayland'
             ' --use-gl=angle --use-angle=gles --start-maximized --enable-wayland-ime --disable-gtk-ime'
-            ' --wayland-text-input-version=3 --enable-features=WaylandTextInputV3,WaylandFractionalScaleV1'
-            ' --disable-lcd-text --font-render-hinting=none'
+            ' --wayland-text-input-version=3 --enable-features=WaylandTextInputV3,WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL'
+            ' --disable-lcd-text --font-render-hinting=none --ignore-gpu-blocklist'
             f' --disable-features={feat} "$@"\n'
         )
         continue
@@ -242,9 +352,7 @@ export FREETYPE_PROPERTIES="${FREETYPE_PROPERTIES:-truetype:interpreter-version=
 if [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
 	export LD_LIBRARY_PATH="/usr/local/lib/dagu-mesa${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
-if [ -f /usr/local/lib/libdagu-linear-mod.so ]; then
-	export LD_PRELOAD="/usr/local/lib/libdagu-linear-mod.so${LD_PRELOAD:+:$LD_PRELOAD}"
-fi
+# Native UBWC: do not LD_PRELOAD libdagu-linear-mod.so.
 exec /opt/Mineradio/mineradio \
 	--ozone-platform=wayland \
 	--ozone-platform-hint=wayland \
@@ -252,11 +360,11 @@ exec /opt/Mineradio/mineradio \
 	--use-gl=angle \
 	--use-angle=gles \
 	--start-maximized \
-	--enable-features=WaylandFractionalScaleV1 \
+	--enable-features=WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj \
 	--disable-lcd-text \
 	--font-render-hinting=none \
 	--disable-partial-swap \
-	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation \
+	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation,PartialSwap \
 	--no-sandbox \
 	"$@"
 EOF
@@ -273,9 +381,11 @@ text = text.replace(
     "process.env.FD_MESA_DEBUG = process.env.FD_MESA_DEBUG || 'noubwc';",
     1,
 )
-needle = "['disable-features', 'Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation'],"
+needle = "['disable-features', 'Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation,PartialSwap'],"
+if needle not in text:
+    needle = "['disable-features', 'Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation'],"
 extra = needle + """
-    ['enable-features', 'WaylandFractionalScaleV1'],
+    ['enable-features', 'WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj'],
     ['disable-lcd-text'],
     ['font-render-hinting', 'none'],"""
 if "['disable-lcd-text']" not in text and needle in text:
@@ -744,6 +854,120 @@ EOF
 }
 install_dagu_osk /usr/share/gnome-shell/extensions/dagu-osk-focus@dagu
 install_dagu_osk /home/dagu/.local/share/gnome-shell/extensions/dagu-osk-focus@dagu
+install_dagu_present_pump() {
+	local d="$1"
+	mkdir -p "$d"
+	cp -a /dev/null "$d/metadata.json" 2>/dev/null || true
+	cat >"$d/metadata.json" <<'EOF'
+{
+  "uuid": "dagu-present-pump@local",
+  "name": "dagu present pump",
+  "description": "Keep Mutter frame clock alive: schedule_update on touch, 1×1 only while maximized idle. Do not 1×1 during swipe (that destile is a 100–340 ms kickoff hole).",
+  "shell-version": ["50"]
+}
+EOF
+	cat >"$d/extension.js" <<'EOF'
+import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
+import St from 'gi://St';
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+
+const HOLD_US = 800 * 1000;
+const TICK_MS = 8;
+
+export default class DaguPresentPumpExtension extends Extension {
+    enable() {
+        this._until = 0;
+        this._pump = 0;
+        this._nudgeBit = 0;
+        this._stage = global.stage;
+        this._dot = new St.Bin({
+            width: 1,
+            height: 1,
+            opacity: 1,
+            reactive: false,
+            x: 0,
+            y: 0,
+            style: 'background-color: rgba(0,0,0,0.02);',
+        });
+        this._stage.add_child(this._dot);
+        this._handler = this._stage.connect('captured-event', (_s, ev) => {
+            switch (ev.type()) {
+            case Clutter.EventType.TOUCH_BEGIN:
+            case Clutter.EventType.TOUCH_UPDATE:
+            case Clutter.EventType.BUTTON_PRESS:
+            case Clutter.EventType.MOTION:
+                this._until = GLib.get_monotonic_time() + HOLD_US;
+                break;
+            default:
+                break;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+        this._pump = GLib.timeout_add(GLib.PRIORITY_DEFAULT, TICK_MS, () => {
+            const mode = this._pumpMode();
+            if (mode === 'touch')
+                this._tickClock();
+            else if (mode === 'idle')
+                this._nudge();
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _tickClock() {
+        if (typeof this._stage.schedule_update === 'function')
+            this._stage.schedule_update();
+        else
+            this._stage.queue_redraw();
+    }
+
+    _nudge() {
+        this._nudgeBit ^= 1;
+        this._dot.opacity = this._nudgeBit ? 2 : 1;
+        this._dot.set_position(this._nudgeBit, 0);
+    }
+
+    _pumpMode() {
+        if (GLib.get_monotonic_time() < this._until)
+            return 'touch';
+        const win = global.display.focus_window;
+        if (!win)
+            return '';
+        let maxed = false;
+        try {
+            maxed = typeof win.is_maximized === 'function'
+                ? win.is_maximized()
+                : (typeof win.get_maximized === 'function'
+                    ? win.get_maximized() !== Meta.MaximizeFlags.NONE
+                    : false);
+        } catch (_e) {
+            maxed = false;
+        }
+        if (maxed || win.is_fullscreen())
+            return 'idle';
+        return '';
+    }
+
+    disable() {
+        if (this._handler) {
+            this._stage.disconnect(this._handler);
+            this._handler = 0;
+        }
+        if (this._pump) {
+            GLib.source_remove(this._pump);
+            this._pump = 0;
+        }
+        if (this._dot) {
+            this._dot.destroy();
+            this._dot = null;
+        }
+    }
+}
+EOF
+}
+install_dagu_present_pump /usr/share/gnome-shell/extensions/dagu-present-pump@local
+install_dagu_present_pump /home/dagu/.local/share/gnome-shell/extensions/dagu-present-pump@local
 chown -R dagu:dagu /home/dagu/.local/share/gnome-shell
 
 mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
@@ -760,7 +984,7 @@ always-show-universal-access-status=true
 
 [org/gnome/shell]
 disable-user-extensions=false
-enabled-extensions=['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com', 'tiling-assistant@ubuntu.com', 'dagu-osk-focus@dagu']
+enabled-extensions=['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com', 'tiling-assistant@ubuntu.com', 'dagu-osk-focus@dagu', 'dagu-present-pump@local']
 
 [org/gnome/desktop/input-sources]
 sources=[('xkb', 'us'), ('ibus', 'libpinyin')]
@@ -773,7 +997,11 @@ font-hinting='none'
 color-scheme='default'
 
 [org/gnome/mutter]
-experimental-features=['scale-monitor-framebuffer']
+# Do NOT enable scale-monitor-framebuffer on dagu. 270° + 1.25 +
+# that feature empties Mutter unobscured_region, drops Chrome damage,
+# and interlocks Ozone WaitForSwap (80–180 ms kickoff holes).
+# Fractional 1.25 still comes from DisplayConfig scale.
+experimental-features=@as []
 
 [org/gnome/desktop/background]
 picture-uri='file:///usr/share/backgrounds/warty-final-ubuntu.png'
@@ -1137,15 +1365,22 @@ systemctl enable NetworkManager.service || true
 mkdir -p /usr/local/sbin /etc/systemd/system /etc/systemd/system/multi-user.target.wants
 cat >/usr/local/sbin/dagu-resize-root.sh <<'EOF'
 #!/bin/sh
+# Ubuntu puts resize2fs in /usr/sbin, not /sbin.
 dev=$(awk '$2 == "/" { print $1; exit }' /proc/mounts)
-[ -n "$dev" ] && resize2fs "$dev"
+[ -n "$dev" ] || exit 0
+for bin in /usr/sbin/resize2fs /sbin/resize2fs resize2fs; do
+	command -v "$bin" >/dev/null 2>&1 || continue
+	exec "$bin" "$dev"
+done
+exit 1
 EOF
 chmod 755 /usr/local/sbin/dagu-resize-root.sh
 cat >/etc/systemd/system/dagu-resize-root.service <<'EOF'
 [Unit]
 Description=Grow Ubuntu ext4 on userdata
 After=local-fs.target
-ConditionPathExists=/sbin/resize2fs
+ConditionPathExists=|/usr/sbin/resize2fs
+ConditionPathExists=|/sbin/resize2fs
 
 [Service]
 Type=oneshot
@@ -1402,18 +1637,26 @@ SectionVerb {
 		cset "name='TR PCM Source' DSP"
 		cset "name='BL PCM Source' DSP"
 		cset "name='BR PCM Source' DSP"
-		cset "name='TL DRE Switch' on"
-		cset "name='TR DRE Switch' on"
-		cset "name='BL DRE Switch' on"
-		cset "name='BR DRE Switch' on"
-		cset "name='TL Analog PCM Volume' 18"
-		cset "name='TR Analog PCM Volume' 18"
-		cset "name='BL Analog PCM Volume' 18"
-		cset "name='BR Analog PCM Volume' 18"
-		cset "name='TL Digital PCM Volume' 817"
-		cset "name='TR Digital PCM Volume' 817"
-		cset "name='BL Digital PCM Volume' 817"
-		cset "name='BR Digital PCM Volume' 817"
+		cset "name='TL DRE' on"
+		cset "name='TR DRE' on"
+		cset "name='BL DRE' on"
+		cset "name='BR DRE' on"
+		cset "name='TL Analog PCM' 18"
+		cset "name='TR Analog PCM' 18"
+		cset "name='BL Analog PCM' 18"
+		cset "name='BR Analog PCM' 18"
+		cset "name='TL Digital PCM' 817"
+		cset "name='TR Digital PCM' 817"
+		cset "name='BL Digital PCM' 817"
+		cset "name='BR Digital PCM' 817"
+		cset "name='TL ASP TX1 Source' VMON"
+		cset "name='TR ASP TX1 Source' VMON"
+		cset "name='BL ASP TX1 Source' VMON"
+		cset "name='BR ASP TX1 Source' VMON"
+		cset "name='TL ASP TX2 Source' IMON"
+		cset "name='TR ASP TX2 Source' IMON"
+		cset "name='BL ASP TX2 Source' IMON"
+		cset "name='BR ASP TX2 Source' IMON"
 		cset "name='TL PCM Soft Ramp' 4ms"
 		cset "name='TR PCM Soft Ramp' 4ms"
 		cset "name='BL PCM Soft Ramp' 4ms"
@@ -1452,7 +1695,7 @@ cset "TERT_TDM_RX_0 Audio Mixer MultiMedia1" on
 mkdir -p /run/dagu
 if [ ! -f "$STAMP" ]; then
 	for p in TL TR BL BR; do
-		cset "$p DSP1 Preload Switch" off
+		cset "$p DSP1 Preload" off || cset "$p DSP1 Preload Switch" off || true
 	done
 	for p in TL TR BL BR; do
 		bin="$FWDIR/${p}-cs35l41-dsp1-spk-prot.bin"
@@ -1460,7 +1703,9 @@ if [ ! -f "$STAMP" ]; then
 		cset "$p DSP1 Firmware" Protection
 		cset "$p DSP RX1 Source" ASPRX1
 		cset "$p DSP RX2 Source" ASPRX2
-		cset "$p DSP1 Preload Switch" on
+		cset "$p ASP TX1 Source" VMON
+		cset "$p ASP TX2 Source" IMON
+		cset "$p DSP1 Preload" on || cset "$p DSP1 Preload Switch" on || true
 	done
 	date -u +%s >"$STAMP"
 fi
@@ -1468,10 +1713,12 @@ for p in TL TR BL BR; do
 	cset "$p DSP1 Firmware" Protection
 	cset "$p DSP RX1 Source" ASPRX1
 	cset "$p DSP RX2 Source" ASPRX2
+	cset "$p ASP TX1 Source" VMON
+	cset "$p ASP TX2 Source" IMON
 	cset "$p PCM Soft Ramp" 4ms
-	cset "$p DRE Switch" on
-	cset "$p Analog PCM Volume" 18
-	cset "$p Digital PCM Volume" 817
+	cset "$p DRE" on || cset "$p DRE Switch" on || true
+	cset "$p Analog PCM" 18 || cset "$p Analog PCM Volume" 18 || true
+	cset "$p Digital PCM" 817 || cset "$p Digital PCM Volume" 817 || true
 	cset "$p PCM Source" DSP
 done
 exit 0
@@ -1532,29 +1779,84 @@ monitor.alsa.rules = [
   }
 ]
 EOF
-# ACP EnumProfile is only Off + pro-audio; disable-pro-audio then Dummy.
-# Direct 2ch sink on hw:0,0. Mixer stays in dagu-speaker-route.sh.
-mkdir -p /etc/pipewire/pipewire.conf.d
-cat >/etc/pipewire/pipewire.conf.d/50-dagu-alsa-sink.conf <<'EOF'
-context.objects = [
-    { factory = adapter
-        args = {
-            factory.name     = api.alsa.pcm.sink
-            node.name        = "alsa_output.dagu.speakers"
-            node.description = "Speakers"
-            media.class      = "Audio/Sink"
-            api.alsa.path    = "hw:0,0"
-            api.alsa.period-size = 1024
-            audio.channels   = 2
-            audio.rate       = 48000
-            audio.format     = "S24_LE"
-            audio.position   = "FL,FR"
-            priority.driver  = 2000
-            priority.session = 2000
-        }
-    }
-]
+# Do not put hw:0,0 in pipewire context.objects. Opening the PCM
+# before /proc/asound/cards exists exits PipeWire 234 and systemd
+# start-limits the socket for the whole session.
+rm -f /etc/pipewire/pipewire.conf.d/50-dagu-alsa-sink.conf
+install -m755 /usr/local/sbin/dagu-audio-up.sh /usr/local/sbin/dagu-audio-up.sh 2>/dev/null || true
+cat >/usr/local/sbin/dagu-audio-up.sh <<'EOF'
+#!/bin/sh
+set -eu
+CARD="${DAGU_ALSA_CARD:-0}"
+PCM="/dev/snd/pcmC${CARD}D0p"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1001}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+i=0
+while [ ! -e "$PCM" ]; do
+	i=$((i + 1))
+	[ "$i" -gt 60 ] && { echo "dagu-audio-up: no $PCM" >&2; exit 1; }
+	sleep 0.5
+done
+[ -x /usr/local/sbin/dagu-speaker-route.sh ] && /usr/local/sbin/dagu-speaker-route.sh || true
+if [ "$(id -u)" -eq 0 ]; then
+	exec sudo -u dagu env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+		DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+		HOME=/home/dagu USER=dagu LOGNAME=dagu "$0" "$@"
+fi
+systemctl --user reset-failed pipewire.service pipewire.socket \
+	pipewire-pulse.service pipewire-pulse.socket wireplumber.service >/dev/null 2>&1 || true
+systemctl --user start pipewire.socket pipewire.service \
+	pipewire-pulse.socket pipewire-pulse.service wireplumber.service
+j=0
+while [ "$j" -lt 20 ]; do
+	wpctl status >/dev/null 2>&1 && break
+	j=$((j + 1)); sleep 0.25
+done
+id=$(wpctl status 2>/dev/null | awk '
+	$0 ~ /Sinks:/{s=1}
+	s && /Audio\/Source/{exit}
+	s && /\*/ && /Speakers|Speaker/{
+		for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/) {print $i; exit}
+	}
+	s && /Speakers|Speaker/ && $1 ~ /^[0-9]+/{print $1; exit}
+')
+if [ -n "${id:-}" ]; then
+	wpctl set-default "$id" >/dev/null 2>&1 || true
+	wpctl set-mute "$id" 0 >/dev/null 2>&1 || true
+	wpctl set-volume "$id" 1.0 >/dev/null 2>&1 || true
+fi
+exit 0
 EOF
+chmod 755 /usr/local/sbin/dagu-audio-up.sh
+mkdir -p /etc/systemd/user/pipewire.service.d \
+	/etc/systemd/user/graphical-session.target.wants \
+	/etc/systemd/user/default.target.wants
+cat >/etc/systemd/user/pipewire.service.d/dagu-restart.conf <<'EOF'
+[Service]
+Restart=on-failure
+RestartSec=2
+StartLimitBurst=30
+StartLimitIntervalSec=180
+EOF
+cat >/etc/systemd/user/dagu-audio-up.service <<'EOF'
+[Unit]
+Description=dagu: start PipeWire Speakers after ALSA pcm exists
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-audio-up.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=graphical-session.target
+WantedBy=default.target
+EOF
+ln -sf /etc/systemd/user/dagu-audio-up.service \
+	/etc/systemd/user/graphical-session.target.wants/dagu-audio-up.service
+ln -sf /etc/systemd/user/dagu-audio-up.service \
+	/etc/systemd/user/default.target.wants/dagu-audio-up.service
 
 # DSP + analog 18 is the Android path. Do not stack GNOME over-amplification
 # (that is extra digital gain).
@@ -1570,6 +1872,286 @@ cat >/etc/dconf/db/local.d/00-dagu-sound <<'EOF'
 allow-volume-above-100-percent=false
 EOF
 dconf update 2>/dev/null || true
+
+# Hold-drag / Chrome-video clock boost. Idle GPU stays 587 MHz /
+# ondemand; do not set governor=performance. Keep in sync with
+# linux-mainline/scripts/dagu-touch-boost.py
+cat >/usr/local/sbin/dagu-touch-boost.py <<'EOF'
+#!/usr/bin/env python3
+"""Raise GPU/CPU floors while touching or while Chrome is playing video.
+
+Idle stays on simple_ondemand / schedutil (GPU min 587 MHz). A hold-drag
+or a <video> used to bounce 587↔670 and leave the prime core at 845 MHz,
+which is the felt hitch / dropped frame. This does not change Chrome
+CPU vs GPU raster. Do not set governor=performance.
+
+HTML5 Venus is Chromium (`/usr/lib/chromium/chromium`), not official
+Chrome. Signal is an open `/dev/video14` fd, or VideoFrame / V4L2 /
+FFmpeg threads. Do not pin to the big cluster.
+"""
+from __future__ import annotations
+
+import glob
+import os
+import struct
+import time
+
+EV_KEY, EV_ABS = 0x01, 0x03
+ABS_MT_TRACKING_ID = 0x39
+BTN_TOUCH = 0x14A
+EVENT = struct.Struct("llHHi")
+
+GPU_MIN = "/sys/class/devfreq/3d00000.gpu/min_freq"
+GPU_IDLE = "587000000"
+GPU_HOLD = "670000000"
+
+CPU = (
+    ("/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq", "300000", "1248000"),
+    ("/sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq", "710400", "1766400"),
+    ("/sys/devices/system/cpu/cpufreq/policy7/scaling_min_freq", "844800", "1977600"),
+)
+
+HOLD_TAIL_S = 0.18
+VIDEO_SCAN_S = 0.12
+
+
+def write(path: str, value: str) -> None:
+    try:
+        with open(path, "w") as f:
+            f.write(value + "\n")
+    except OSError:
+        pass
+
+
+def find_himax() -> str:
+    for name in sorted(glob.glob("/sys/class/input/event*/device/name")):
+        try:
+            text = open(name, "r", encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        if "Himax" in text or "HX83121" in text:
+            return "/dev/input/" + name.split("/")[4]
+    return "/dev/input/event3"
+
+
+def apply(hold: bool) -> None:
+    write(GPU_MIN, GPU_HOLD if hold else GPU_IDLE)
+    for path, idle, boosted in CPU:
+        write(path, boosted if hold else idle)
+
+
+BROWSER_MARKERS = (
+    b"/opt/google/chrome/chrome",
+    b"/usr/lib/chromium/chromium",
+    b"/usr/bin/chromium",
+)
+
+
+def _is_browser(cmd: bytes) -> bool:
+    return any(m in cmd for m in BROWSER_MARKERS)
+
+
+def _has_venus_fd(pid: str) -> bool:
+    try:
+        fds = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return False
+    for fd in fds:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if target in ("/dev/video14", "/dev/video15", "/dev/video-dec0", "/dev/video-enc0"):
+            return True
+    return False
+
+
+def chrome_video_playing() -> bool:
+    """True while Chromium/Chrome is in a Venus or video-compositor path."""
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return False
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read()
+        except OSError:
+            continue
+        if not _is_browser(cmd):
+            continue
+        if _has_venus_fd(pid):
+            return True
+        if b"--type=" in cmd and b"--type=renderer" not in cmd:
+            continue
+        task = f"/proc/{pid}/task"
+        try:
+            tids = os.listdir(task)
+        except OSError:
+            continue
+        for tid in tids:
+            try:
+                with open(f"{task}/{tid}/comm", "r", encoding="utf-8", errors="ignore") as f:
+                    name = f.read().strip()
+            except OSError:
+                continue
+            if name.startswith(("VideoFrame", "FFmpeg", "VideoDecod", "V4L2", "Media")):
+                return True
+    return False
+
+
+def main() -> None:
+    dev = find_himax()
+    fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
+    apply(False)
+    contacts = 0
+    holding = False
+    drop_at = None
+    video = False
+    last_scan = 0.0
+    while True:
+        now = time.monotonic()
+        try:
+            buf = os.read(fd, EVENT.size * 64)
+        except BlockingIOError:
+            buf = b""
+        if buf:
+            for off in range(0, len(buf) - EVENT.size + 1, EVENT.size):
+                _sec, _usec, typ, code, value = EVENT.unpack_from(buf, off)
+                if typ == EV_ABS and code == ABS_MT_TRACKING_ID:
+                    if value >= 0:
+                        contacts += 1
+                    elif contacts > 0:
+                        contacts -= 1
+                elif typ == EV_KEY and code == BTN_TOUCH:
+                    contacts = 1 if value else 0
+        if now - last_scan >= VIDEO_SCAN_S:
+            video = chrome_video_playing()
+            last_scan = now
+        want = contacts > 0 or video
+        if want:
+            drop_at = None
+            if not holding:
+                holding = True
+                apply(True)
+        elif holding:
+            if drop_at is None:
+                drop_at = now + HOLD_TAIL_S
+            elif now >= drop_at:
+                holding = False
+                drop_at = None
+                apply(False)
+        time.sleep(0.004)
+
+
+if __name__ == "__main__":
+    main()
+EOF
+chmod 755 /usr/local/sbin/dagu-touch-boost.py
+cat >/etc/systemd/system/dagu-touch-boost.service <<'EOF'
+[Unit]
+Description=dagu: raise GPU/CPU floors while touching or Chrome video
+After=dagu-resources-fix.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-touch-boost.py
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/dagu-touch-boost.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-touch-boost.service
+systemctl enable --now dagu-touch-boost.service >/dev/null 2>&1 || true
+
+# Venus is extra/*.ko (not depmod autoload). Chrome/gst need /dev/video14.
+# Keep in sync with linux-mainline/scripts/dagu-venus-load.sh
+cat >/usr/local/sbin/dagu-venus-load.sh <<'EOF'
+#!/bin/sh
+set -eu
+KVER=$(uname -r)
+EXTRA=/lib/modules/$KVER/extra
+[ -f "$EXTRA/venus-core.ko" ] || EXTRA=/root/venus-ko
+log() {
+	echo "dagu-venus-load: $*"
+	echo "dagu-venus-load: $*" >/dev/kmsg 2>/dev/null || true
+}
+insmod_one() {
+	ko=$1
+	if [ ! -f "$ko" ]; then
+		log "missing $ko"
+		return 1
+	fi
+	if insmod "$ko"; then
+		log "insmod $ko"
+		return 0
+	fi
+	log "insmod failed $ko"
+	return 1
+}
+modprobe videobuf2-v4l2 2>/dev/null || true
+modprobe v4l2-mem2mem 2>/dev/null || true
+if [ ! -e /dev/video14 ]; then
+	insmod_one "$EXTRA/venus-core.ko" || true
+	insmod_one "$EXTRA/venus-dec.ko" || true
+	insmod_one "$EXTRA/venus-enc.ko" || true
+fi
+if [ -e /dev/video14 ]; then
+	chgrp video /dev/video14 /dev/video15 2>/dev/null || true
+	chmod 660 /dev/video14 /dev/video15 2>/dev/null || true
+	ln -sfn video14 /dev/video-dec0
+	ln -sfn video15 /dev/video-enc0
+	log "ready /dev/video14 /dev/video15"
+	exit 0
+fi
+log "no /dev/video14 — need matching venus-*.ko for $KVER"
+exit 1
+EOF
+chmod 755 /usr/local/sbin/dagu-venus-load.sh
+install -m644 /dev/null /etc/udev/rules.d/90-dagu-chromium-video.rules
+cat >/etc/udev/rules.d/90-dagu-chromium-video.rules <<'EOF'
+SUBSYSTEM=="video4linux", ATTR{name}=="qcom-venus-decoder", SYMLINK+="video-dec0", GROUP="video", MODE="0660"
+SUBSYSTEM=="video4linux", ATTR{name}=="qcom-venus-encoder", SYMLINK+="video-enc0", GROUP="video", MODE="0660"
+EOF
+cat >/etc/systemd/system/dagu-venus-load.service <<'EOF'
+[Unit]
+Description=dagu: load qcom-venus decoder
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-venus-load.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/dagu-venus-load.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-venus-load.service
+systemctl enable --now dagu-venus-load.service >/dev/null 2>&1 || true
+
+cat >/etc/systemd/system/dagu-wq-affinity.service <<'EOF'
+[Unit]
+Description=dagu: unbound workqueue affinity=system (DRM commit_work)
+DefaultDependencies=no
+After=sysinit.target
+Before=display-manager.service gdm.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo system > /sys/module/workqueue/parameters/default_affinity_scope'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/dagu-wq-affinity.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-wq-affinity.service
+systemctl enable --now dagu-wq-affinity.service >/dev/null 2>&1 || true
 
 rm -f /usr/sbin/policy-rc.d
 echo "==> desktop setup done"

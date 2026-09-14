@@ -214,8 +214,14 @@ EOF
 
 cat >"$ROOTFS/usr/local/sbin/dagu-resize-root.sh" <<'EOF'
 #!/bin/sh
+# Ubuntu puts resize2fs in /usr/sbin, not /sbin.
 dev=$(awk '$2 == "/" { print $1; exit }' /proc/mounts)
-[ -n "$dev" ] && resize2fs "$dev"
+[ -n "$dev" ] || exit 0
+for bin in /usr/sbin/resize2fs /sbin/resize2fs resize2fs; do
+	command -v "$bin" >/dev/null 2>&1 || continue
+	exec "$bin" "$dev"
+done
+exit 1
 EOF
 chmod 755 "$ROOTFS/usr/local/sbin/dagu-resize-root.sh"
 
@@ -223,7 +229,8 @@ cat >"$ROOTFS/etc/systemd/system/dagu-resize-root.service" <<'EOF'
 [Unit]
 Description=Grow Ubuntu ext4 on userdata
 After=local-fs.target
-ConditionPathExists=/sbin/resize2fs
+ConditionPathExists=|/usr/sbin/resize2fs
+ConditionPathExists=|/sbin/resize2fs
 
 [Service]
 Type=oneshot

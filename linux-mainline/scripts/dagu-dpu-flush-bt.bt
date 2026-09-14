@@ -1,0 +1,71 @@
+// CTL Flush around wait_flush. Attach with: bpftrace --unsafe this.bt 25
+kprobe:dpu_hw_ctl_get_flush_register
+{
+	$ctx = (struct dpu_hw_ctl *)arg0;
+	@pend[tid] = $ctx->pending_flush_mask;
+}
+
+kretprobe:dpu_hw_ctl_get_flush_register
+{
+	@hwflush[tid] = (uint32)retval;
+}
+
+kprobe:dpu_encoder_phys_vid_wait_for_commit_done
+{
+	@wstart[tid] = nsecs;
+	@wflush0[tid] = @hwflush[tid];
+	@wpend0[tid] = @pend[tid];
+}
+
+kretprobe:dpu_encoder_phys_vid_wait_for_commit_done
+{
+	$ms = (nsecs - @wstart[tid]) / 1000000;
+	@wait_commit_ms = hist($ms);
+	if ($ms >= 40) {
+		printf("%llu WAIT_COMMIT ms=%llu ret=%d flush_enter=0x%x flush_exit=0x%x pend_enter=0x%x pend_exit=0x%x\n",
+		       nsecs, $ms, retval, @wflush0[tid], @hwflush[tid],
+		       @wpend0[tid], @pend[tid]);
+	}
+	delete(@wstart[tid]);
+}
+
+kprobe:dpu_kms_wait_flush
+{
+	@fstart[tid] = nsecs;
+	@fflush0[tid] = @hwflush[tid];
+	@fpend0[tid] = @pend[tid];
+}
+
+kretprobe:dpu_kms_wait_flush
+{
+	$ms = (nsecs - @fstart[tid]) / 1000000;
+	@wait_flush_ms = hist($ms);
+	if ($ms >= 40) {
+		printf("%llu WAIT_FLUSH ms=%llu flush_enter=0x%x flush_exit=0x%x pend_enter=0x%x pend_exit=0x%x\n",
+		       nsecs, $ms, @fflush0[tid], @hwflush[tid],
+		       @fpend0[tid], @pend[tid]);
+	}
+	delete(@fstart[tid]);
+}
+
+kprobe:msm_atomic_commit_tail
+{
+	@tstart[tid] = nsecs;
+}
+
+kretprobe:msm_atomic_commit_tail
+{
+	$ms = (nsecs - @tstart[tid]) / 1000000;
+	@commit_tail_ms = hist($ms);
+	if ($ms >= 40) {
+		printf("%llu COMMIT_TAIL ms=%llu last_flush=0x%x last_pend=0x%x\n",
+		       nsecs, $ms, @hwflush[tid], @pend[tid]);
+	}
+	delete(@tstart[tid]);
+}
+
+tracepoint:dpu:dpu_hw_ctl_trigger_start
+{
+	@ctl_start_flush[args->ctl_flush] = count();
+	@ctl_start_pend[args->pending_mask] = count();
+}

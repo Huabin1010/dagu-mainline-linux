@@ -1,0 +1,42 @@
+---
+description: 工作区搜索找不到时必须改用命令行精准查找，禁止把空结果当成「代码不存在」
+alwaysApply: true
+---
+
+# 搜索落空必须命令行精准查
+
+Cursor 的 Grep / Glob / 语义搜索默认**跳过 gitignore**。本仓大量活树不在索引里，空结果只说明工具没扫到，**不是**符号不存在。
+
+## 常见漏扫路径
+
+- `linux-mainline/linux/`（内核活树，`.gitignore`）
+- `linux-mainline/out/`（构建产物、实验室 JSON）
+- 板上 / 本机其它活树：Mesa、Mutter、glib、Chromium
+
+## 必须做
+
+1. 工作区 Grep 0 命中、或路径明显在 gitignore 下：立刻用 **Shell + ripgrep**（或 `find` / `ls`）对**绝对路径**再查一遍。
+2. 查内核 / drm / msm / dpu 时，默认从 `linux-mainline/linux/` 起搜，不要只搜仓库已跟踪文件。
+3. 限定类型与文件名，避免整树盲扫：
+
+```bash
+# ✅ 精准：目录 + 类型 + 符号
+rg -n "drm_sched_wakeup|credit_limit" \
+  /home/huanghuabin/Projects/xiaomi-pad870-win11-arm/linux-mainline/linux/drivers/gpu/drm \
+  -g '*.c' -g '*.h'
+
+# ✅ 只找定义
+rg -n "^drm_sched_entity_is_ready|^TRACE_EVENT\(drm_sched" \
+  /home/huanghuabin/Projects/xiaomi-pad870-win11-arm/linux-mainline/linux \
+  -g '*.c' -g '*.h'
+
+# ❌ Grep 工具 0 命中 → 「msm 里没有 credit_limit」然后收工
+```
+
+4. 仍找不到：用 `ls` 确认目录在、用 `rg --files -g '<name>'` 确认文件在，再换关键词。不要改搜工作区跟踪文件来「代替」活树。
+
+## 禁止
+
+- 把 Grep 空结果写成「源码没有 X」
+- 只搜 `linux-mainline/docs/`、`linux-mainline/scripts/` 就对内核行为下结论
+- 为了让 Grep 能搜到而去 `git add` 内核树

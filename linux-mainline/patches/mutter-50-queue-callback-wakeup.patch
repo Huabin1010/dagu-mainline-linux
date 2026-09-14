@@ -1,0 +1,43 @@
+From: dagu
+Subject: [PATCH] dagu: wake the callback GMainContext after queue_callback
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2).
+
+meta_thread_queue_callback() only g_source_set_ready_time(source, 0).
+GLib 2.88 skips the wakeup when ready_time is already 0, or when the
+source is G_SOURCE_BLOCKED. The KMS thread path that pushes impl tasks
+already calls g_main_context_wakeup(); the page-flip closure path does
+not.
+
+On dagu, after the first knife (do_handle_update never waits on the
+Cogl sync_fd), dpu_crtc_complete_flip and flipped_in_impl land within
+a few milliseconds of kickoff, but notify_view_crtc_presented often
+arrives +75-229 ms later. The main thread is in ppoll. The next frame
+is already in onscreen->next_frame; maybe_post cannot run until the
+queued flip closure is dispatched.
+
+Always wake the registered GMainContext after arming the source.
+
+Live A/B on dagu (gnome-shell 128256, first knife still applied),
+identity GTK lab, no Chrome:
+
+  ELF 0x1d6ee4  bl set_ready_time  ->  bl cave
+  cave: set_ready_time; g_main_context_wakeup(source->main_context)
+
+---
+ src/backends/native/meta-thread.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/backends/native/meta-thread.c b/src/backends/native/meta-thread.c
+index 0000000..1111111 100644
+--- a/src/backends/native/meta-thread.c
++++ b/src/backends/native/meta-thread.c
+@@ -1179,6 +1179,7 @@ meta_thread_queue_callback (MetaThread         *thread,
+   callback_source->callbacks = g_list_append (callback_source->callbacks,
+                                               callback_data);
+   g_source_set_ready_time (&callback_source->base, 0);
++  g_main_context_wakeup (main_context);
+   g_mutex_unlock (&callback_source->mutex);
+ }
+ 
+ typedef struct _MetaSyncTaskData

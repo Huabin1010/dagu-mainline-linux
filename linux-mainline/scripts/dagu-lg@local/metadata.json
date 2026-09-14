@@ -1,0 +1,7 @@
+{
+  "uuid": "dagu-lg@local",
+  "name": "dagu Looking Glass KMS dump",
+  "description": "Open Looking Glass, enable Meta.DebugTopic.KMS, dump frame-clock state. Disable to restore.",
+  "shell-version": ["50"],
+  "session-modes": ["user"]
+}

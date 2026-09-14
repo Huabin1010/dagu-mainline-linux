@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dagu video jank</title>
+<style>
+  html, body { margin: 0; background: #111; color: #6f6; font: 700 20px/1.35 ui-monospace, monospace; }
+  #hud { padding: 8px 12px; }
+  video { width: 100%; height: auto; background: #000; }
+</style>
+</head>
+<body>
+<div id="hud">dagu video jank</div>
+<video id="v" playsinline muted autoplay loop controls></video>
+<script>
+(function () {
+  let v = document.getElementById("v");
+  const hud = document.getElementById("hud");
+  const q = new URLSearchParams(location.search);
+  const src = q.get("src") || "/clip.mp4";
+  v.src = src;
+  const rows = [];
+  let t0 = 0;
+
+  function quality() {
+    if (v.getVideoPlaybackQuality) return v.getVideoPlaybackQuality();
+    return { droppedVideoFrames: 0, totalVideoFrames: 0, corruptedVideoFrames: 0 };
+  }
+
+  window.__VIDEO_RESET__ = function () {
+    rows.length = 0;
+    t0 = performance.now();
+    const neu = v.cloneNode(false);
+    neu.id = "v";
+    neu.muted = true;
+    neu.autoplay = true;
+    neu.loop = true;
+    neu.playsInline = true;
+    neu.controls = true;
+    neu.src = src;
+    v.replaceWith(neu);
+    v = neu;
+    return v.play().then(() => true).catch((e) => String(e));
+  };
+
+  window.__VIDEO_DUMP__ = function () {
+    const qv = quality();
+    const dropped = qv.droppedVideoFrames || 0;
+    const total = qv.totalVideoFrames || 0;
+    return {
+      ready: v.readyState,
+      w: v.videoWidth,
+      h: v.videoHeight,
+      t: +v.currentTime.toFixed(2),
+      dropped: dropped,
+      total: total,
+      corrupted: qv.corruptedVideoFrames || 0,
+      drop_pct: total ? +(100 * dropped / total).toFixed(2) : null,
+      webkitDecoded: v.webkitDecodedFrameCount || null,
+      webkitDropped: v.webkitDroppedFrameCount || null,
+      samples: rows.slice(-20),
+    };
+  };
+
+  if (q.get("quiet") === "1") {
+    return;
+  }
+  setInterval(function () {
+    const qv = quality();
+    rows.push({
+      ms: Math.round(performance.now() - t0),
+      t: +v.currentTime.toFixed(2),
+      dropped: qv.droppedVideoFrames || 0,
+      total: qv.totalVideoFrames || 0,
+    });
+    hud.textContent = "drop " + (qv.droppedVideoFrames || 0) + "/" + (qv.totalVideoFrames || 0) +
+      "  " + v.videoWidth + "x" + v.videoHeight + "  t=" + v.currentTime.toFixed(1);
+  }, 500);
+})();
+</script>
+</body>
+</html>

@@ -25,10 +25,10 @@ exec /opt/Mineradio/mineradio \
 	--use-gl=angle \
 	--use-angle=gles \
 	--start-maximized \
-	--enable-features=WaylandFractionalScaleV1 \
+	--enable-features=WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj \
 	--disable-lcd-text \
 	--font-render-hinting=none \
 	--disable-partial-swap \
-	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation \
+	--disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation,PartialSwap \
 	--no-sandbox \
 	"$@"

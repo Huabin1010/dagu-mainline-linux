@@ -1,0 +1,20 @@
+{
+  "folders": [
+    {
+      "name": "dagu",
+      "path": "."
+    },
+    {
+      "name": "linux",
+      "path": "linux-mainline/linux"
+    }
+  ],
+  "settings": {
+    "search.useIgnoreFiles": true,
+    "search.exclude": {
+      "**/linux-mainline/out": true,
+      "**/dumps": true,
+      "**/artifacts": true
+    }
+  }
+}

@@ -1,0 +1,41 @@
+From: dagu
+Subject: [PATCH] REJECTED: dpu vid wait_for_commit_done 50ms -> 8ms
+
+Identity 8 s windows (2026-09-14): hole wait_flush_ms is 0-6 ms,
+msm_atomic_commit_tail_start sits at the END of the hole with
+drmModeAtomicCommit. The 50 ms wait is not the Type B hole.
+Do not apply. Do not flash. Kept only as the rejected note.
+
+On SM8250 / dagu, msm_atomic_commit_tail() calls wait_flush() twice
+per frame (before prepare, after kickoff). Video-mode
+dpu_encoder_phys_vid_wait_for_commit_done() uses wait_event_timeout
+of 50 ms on CTL flush==0.
+
+NONBLOCK drmModeAtomicCommit returns in ~8 ms, but the DRM commit
+worker stays in that wait. The next atomic cannot kickoff until the
+worker is free. Identity GTK 8 s windows then show B-kick-kernel:
+atomic +6-8 ms, dpu_enc_kickoff +98-118 ms, atmerr=0.
+
+50 ms is six 120Hz frames. If the flush bit is sticky, every such
+wait burns a visible hole. Cap the wait at 8 ms (one frame). Timeout
+still logs and returns -ETIMEDOUT; commit_tail already continues.
+
+Do not flash until head.S is checked (DAGU_PRIMARY_ENTRY_PROBE=0).
+
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+index 0000000..dagu0005 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+@@ -542,7 +542,7 @@ static int dpu_encoder_phys_vid_wait_for_commit_done(
+ 
+ 	ret = wait_event_timeout(phys_enc->pending_kickoff_wq,
+ 		(hw_ctl->ops.get_flush_register(hw_ctl) == 0),
+-		msecs_to_jiffies(50));
++		msecs_to_jiffies(8));
+ 	if (ret <= 0) {
+ 		DPU_ERROR("vblank timeout: %x\n", hw_ctl->ops.get_flush_register(hw_ctl));
+ 		return -ETIMEDOUT;

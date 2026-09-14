@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <linux/reboot.h>
 #include <linux/watchdog.h>
@@ -100,6 +101,96 @@ static void die(const char *s)
 static void mkpath(const char *path)
 {
 	mkdir(path, 0755);
+}
+
+static void mkdir_p(const char *path)
+{
+	char tmp[256];
+	size_t n;
+	char *p;
+
+	n = strlen(path);
+	if (n == 0 || n >= sizeof(tmp))
+		return;
+	memcpy(tmp, path, n + 1);
+	for (p = tmp + 1; *p; p++) {
+		if (*p == '/') {
+			*p = '\0';
+			mkdir(tmp, 0755);
+			*p = '/';
+		}
+	}
+	mkdir(tmp, 0755);
+}
+
+static int copy_file(const char *src, const char *dst)
+{
+	char buf[4096];
+	ssize_t n, w;
+	int in, out;
+
+	in = open(src, O_RDONLY);
+	if (in < 0)
+		return -1;
+	out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (out < 0) {
+		close(in);
+		return -1;
+	}
+	while ((n = read(in, buf, sizeof(buf))) > 0) {
+		char *q = buf;
+		ssize_t left = n;
+
+		while (left > 0) {
+			w = write(out, q, (size_t)left);
+			if (w < 0) {
+				close(in);
+				close(out);
+				return -1;
+			}
+			q += w;
+			left -= w;
+		}
+	}
+	close(in);
+	close(out);
+	return n < 0 ? -1 : 0;
+}
+
+/* Pair venus-*.ko with this Image. Userdata extra/ outlives flash and
+ * otherwise keeps an older struct module (ABI reject, no /dev/video14).
+ */
+static void install_venus_kos(void)
+{
+	struct utsname u;
+	char extra[192], dst[256], msg[256], src[64];
+	static const char *const names[] = {
+		"venus-core.ko", "venus-dec.ko", "venus-enc.ko"
+	};
+	unsigned i;
+
+	if (access("/venus-ko/venus-core.ko", R_OK))
+		return;
+	if (uname(&u))
+		return;
+	snprintf(extra, sizeof(extra), "/newroot/lib/modules/%s/extra", u.release);
+	mkdir_p(extra);
+	mkdir_p("/newroot/root/venus-ko");
+	for (i = 0; i < 3; i++) {
+		snprintf(src, sizeof(src), "/venus-ko/%s", names[i]);
+		snprintf(dst, sizeof(dst), "%s/%s", extra, names[i]);
+		if (copy_file(src, dst)) {
+		snprintf(msg, sizeof(msg), "venus copy %s failed", names[i]);
+		kmsg(msg);
+		continue;
+	}
+	snprintf(dst, sizeof(dst), "/newroot/root/venus-ko/%s", names[i]);
+	if (copy_file(src, dst)) {
+		snprintf(msg, sizeof(msg), "venus copy %s (root) failed", names[i]);
+		kmsg(msg);
+	}
+	}
+	kmsg("installed matching venus.ko onto userdata");
 }
 
 static int write_str(const char *path, const char *val)
@@ -545,6 +636,98 @@ static const char *find_userdata(void)
 	return NULL;
 }
 
+static int run_tool(const char *path, const char *arg1, const char *arg2)
+{
+	char *argv[4];
+	char buf[160];
+	pid_t pid;
+	int status;
+
+	if (access(path, X_OK) != 0)
+		return -ENOENT;
+
+	argv[0] = (char *)path;
+	argv[1] = arg1 ? (char *)arg1 : NULL;
+	argv[2] = arg2 ? (char *)arg2 : NULL;
+	argv[3] = NULL;
+
+	snprintf(buf, sizeof(buf), "exec %s %s %s", path,
+		 arg1 ? arg1 : "", arg2 ? arg2 : "");
+	kmsg(buf);
+
+	pid = fork();
+	if (pid < 0) {
+		kmsg("fork failed");
+		return -1;
+	}
+	if (pid == 0) {
+		int fd = open("/dev/kmsg", O_WRONLY);
+
+		if (fd >= 0) {
+			dup2(fd, STDOUT_FILENO);
+			dup2(fd, STDERR_FILENO);
+			if (fd > STDERR_FILENO)
+				close(fd);
+		}
+		execv(path, argv);
+		_exit(127);
+	}
+
+	for (;;) {
+		wdt_pet();
+		if (waitpid(pid, &status, WNOHANG) == pid)
+			break;
+		usleep(250000);
+	}
+	if (WIFEXITED(status))
+		return WEXITSTATUS(status);
+	if (WIFSIGNALED(status)) {
+		snprintf(buf, sizeof(buf), "%s killed signal %d", path,
+			 WTERMSIG(status));
+		kmsg(buf);
+	}
+	return -1;
+}
+
+/* Repair + grow userdata while it is still unmounted. The 8G image is
+ * flashed onto a ~106G partition; noload mounts leave EXT4_ERROR_FS so
+ * userspace resize2fs is refused.
+ */
+static void grow_userdata(const char *dev)
+{
+	const char *e2fsck = NULL;
+	const char *resize = NULL;
+	char buf[96];
+	int rc;
+
+	if (!access("/sbin/e2fsck", X_OK))
+		e2fsck = "/sbin/e2fsck";
+	else if (!access("/usr/sbin/e2fsck", X_OK))
+		e2fsck = "/usr/sbin/e2fsck";
+	if (!access("/sbin/resize2fs", X_OK))
+		resize = "/sbin/resize2fs";
+	else if (!access("/usr/sbin/resize2fs", X_OK))
+		resize = "/usr/sbin/resize2fs";
+	if (!e2fsck || !resize) {
+		kmsg("no e2fsck/resize2fs in ramdisk");
+		return;
+	}
+
+	wdt_stretch(180);
+	rc = run_tool(e2fsck, "-fy", dev);
+	snprintf(buf, sizeof(buf), "e2fsck rc=%d", rc);
+	kmsg(buf);
+	if (rc > 2) {
+		kmsg("e2fsck failed, skip resize");
+		wdt_stretch(30);
+		return;
+	}
+	rc = run_tool(resize, dev, NULL);
+	snprintf(buf, sizeof(buf), "resize2fs rc=%d", rc);
+	kmsg(buf);
+	wdt_stretch(30);
+}
+
 /* Returns 0 if switch_root succeeded (never returns on success). */
 static int try_switch_root(void)
 {
@@ -555,6 +738,7 @@ static int try_switch_root(void)
 		return -1;
 	}
 	kmsg(rootdev);
+	grow_userdata(rootdev);
 	mkpath("/newroot");
 	if (mount(rootdev, "/newroot", "ext4", 0, NULL)) {
 		/*
@@ -574,6 +758,7 @@ static int try_switch_root(void)
 		return -1;
 	}
 
+	install_venus_kos();
 	kmsg("switch_root userdata");
 	mkpath("/newroot/proc");
 	mkpath("/newroot/sys");

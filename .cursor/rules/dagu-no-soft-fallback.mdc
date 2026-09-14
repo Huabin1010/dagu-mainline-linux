@@ -1,0 +1,30 @@
+---
+description: 禁止用 CPU/软解了事；Chrome GPU 与视频必须对齐硬件一线，先查源码和公开资料再动手
+alwaysApply: true
+---
+
+# dagu：禁止软解 / CPU 退路（对齐一线）
+
+适配 GPU、合成、编解码时，**目标是硬件一线**，不是「能播就行」。查不清就继续查，不要改开关把负载推回 CPU。
+
+## 绝对禁止
+
+- **禁止**把 Chrome / Mineradio / 网页视频退回 CPU 栅格或 FFmpeg 软解当作交付。
+- **禁止**`--disable-gpu-rasterization`、`--disable-accelerated-video-decode`、强制 `FFmpegVideoDecoder`、`gsettings … force-software-decoders`。
+- **禁止**用 VA-API 冒充 Venus。Venus 是 `/dev/video14` stateful V4L2 m2m，不是 libva，不是 v4l2 request。
+- **禁止**在只搜了本仓库、`venus_irq_delta=0` 时写「Chrome 没有 V4L2，只能软解」然后收工。
+
+## 必须先做
+
+1. **Search web**：Chromium `USE_V4L2_CODEC`、`V4L2VideoDecoder`、Linux ARM / SM8250 / ChromeOS 直通解码、`AcceleratedVideoDecodeLinuxGL`。
+2. **读源码**：本机 Chrome 树、`/opt/google/chrome/chrome` 字符串、Mesa 活树、`linux-mainline/docs/dagu-venus.md`。
+3. **验收硬路径**：`chrome://gpu` 每一项 Hardware；播片时 `venus_irq` 上升、进程打开 `/dev/video14`。软解数字下降不算过。
+4. **测每一项**再改下一项。截图走 `linux-mainline/scripts/dagu-gnome-screenshot.sh`。
+
+## 错误 / 正确
+
+```text
+# ❌ 官方包 USE_V4L2=0 → 打开 GL flag → 掉帧从 9.6% 降到 7% → 宣称已修
+# ❌ 钉大核 / 抬 CPU 地板来「补」软解
+# ✅ 让 Chrome 的 VideoDecoder 接到 qcom-venus-decoder，再测 chrome://gpu 与掉帧
+```

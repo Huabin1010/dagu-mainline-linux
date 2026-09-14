@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>dagu pipeline lab</title>
+<style>
+  :root { --good:#3dff9a; --warn:#ffd166; --bad:#ff5d7a; --dim:#8b93a7; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; background: #020309; color: #f4f7ff;
+    font: 15px/1.35 "Noto Sans CJK SC", ui-sans-serif, sans-serif;
+  }
+  body { overflow-x: hidden; }
+  #hud {
+    position: sticky; top: 0; z-index: 50;
+    display: grid; grid-template-columns: 1fr auto;
+    gap: 8px; padding: 7px 10px;
+    background: rgba(4,6,12,.92);
+    border-bottom: 1px solid #2a3350;
+    transform: translateZ(0);
+  }
+  #meters { display: flex; flex-wrap: wrap; gap: 5px 12px; }
+  .m { font: 700 12px/1.2 ui-monospace, monospace; color: var(--good); }
+  .m b { color: var(--dim); font-weight: 600; }
+  .m i { font-style: normal; }
+  .m.bad { color: var(--bad); } .m.warn { color: var(--warn); }
+  #btns { display: flex; flex-direction: column; gap: 4px; }
+  #btns button {
+    border: 0; border-radius: 6px; padding: 5px 10px; cursor: pointer;
+    background: #1a2233; color: #e8edf7; font-weight: 800;
+  }
+  #btns button.on { background: #2ad47a; color: #041; }
+  #arena { position: fixed; inset: 88px 0 0 0; z-index: 20; pointer-events: none; }
+  .flyer {
+    position: absolute; overflow: hidden; border-radius: 12px;
+    box-shadow: 0 10px 28px #000a;
+    will-change: transform; backface-visibility: hidden;
+    transform: translateZ(0);
+  }
+  .flyer video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #feed {
+    position: relative; z-index: 10; padding: 8px 10px 24px;
+    will-change: transform; transform: translateZ(0);
+  }
+  .card {
+    position: relative; height: 160px; margin: -18px 0 0;
+    border-radius: 18px; overflow: hidden;
+    box-shadow: 0 12px 28px #0008;
+    transform: translateZ(0);
+  }
+  .card:first-child { margin-top: 8px; }
+  .meta {
+    position: absolute; left: 14px; bottom: 12px; z-index: 2;
+    font-weight: 900; font-size: 20px; text-shadow: 0 2px 12px #000;
+  }
+  #dumpbox {
+    /* Off the compositor path. Rewriting this <pre> every 1s was a
+     * ~100 ms rAF / kickoff hole (layout + destile of a growing JSON). */
+    display: none;
+  }
+  #verdict { font: 800 16px/1.3 ui-monospace, monospace; margin: 8px 10px 0; }
+  #verdict.ok { color: var(--good); } #verdict.bad { color: var(--bad); }
+  #verdict.warn { color: var(--warn); }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="meters">
+    <span class="m" id="m-raf"><b>rAF</b> <i>—</i></span>
+    <span class="m" id="m-fps"><b>FPS</b> <i>—</i></span>
+    <span class="m" id="m-p50"><b>p50</b> <i>—</i></span>
+    <span class="m" id="m-p99"><b>p99</b> <i>—</i></span>
+    <span class="m" id="m-hole"><b>&gt;50</b> <i>0</i></span>
+    <span class="m" id="m-drop"><b>drop</b> <i>—</i></span>
+    <span class="m" id="m-gpu"><b>GPU</b> <i>—</i></span>
+    <span class="m" id="m-venus"><b>venus</b> <i>—</i></span>
+    <span class="m" id="m-v14"><b>v14</b> <i>—</i></span>
+    <span class="m" id="m-mem"><b>mem</b> <i>—</i></span>
+    <span class="m" id="m-vid"><b>vid</b> <i>0</i></span>
+  </div>
+  <div id="btns">
+    <button data-scene="idle">静置</button>
+    <button data-scene="slow" class="on">慢滑</button>
+    <button data-scene="chaos">乱窜</button>
+  </div>
+</div>
+<div id="verdict">等待 /api/dump …</div>
+<pre id="dumpbox">{}</pre>
+<div id="arena"></div>
+<div id="feed"></div>
+<script>
+(function () {
+  /* light=default: 2×720 Venus. ?full=1 is the old 5-clip / 1080 path.
+   * ?novid=1 is CSS-only (isolate destile / WaitForSwap from Venus loop). */
+  const qparams = new URLSearchParams(location.search);
+  const full = qparams.get("full") === "1";
+  const novid = qparams.get("novid") === "1";
+  const SRC = {
+    scroll: "/lab-scroll-720.mp4",
+    hevc: "/lab-hevc-720.mp4",
+    swarm: "/lab-swarm-720.mp4",
+    chaos: "/lab-chaos-1080.mp4",
+    vp9: "/lab-vp9-720.webm",
+  };
+  const FLY = full ? [
+    { key: "chaos", w: 360, h: 200, vx: 6.2, vy: 3.6 },
+    { key: "swarm", w: 300, h: 170, vx: -5.4, vy: 4.4 },
+    { key: "scroll", w: 260, h: 150, vx: 6.8, vy: -3.2 },
+    { key: "hevc", w: 240, h: 140, vx: -4.6, vy: -5.1 },
+    { key: "vp9", w: 220, h: 130, vx: 7.2, vy: 2.0 },
+  ] : [
+    { key: "scroll", w: 280, h: 160, vx: 4.2, vy: 2.6 },
+    { key: "hevc", w: 240, h: 140, vx: -3.6, vy: 3.1 },
+  ];
+  const feed = document.getElementById("feed");
+  const arena = document.getElementById("arena");
+  const dumpbox = document.getElementById("dumpbox");
+  const verdictEl = document.getElementById("verdict");
+  const dts = [];
+  const holes = [];
+  const flock = [];
+  const decoders = {};
+  let last = 0, scene = "slow", auto = 0.7, viewY = 0, aborted = false;
+  let hw = {};
+  let p50Cache = 0, p99Cache = 0;
+
+  function bind(v, src) {
+    v.src = src;
+    v.muted = true;
+    v.loop = true;
+    v.playsInline = true;
+    v.setAttribute("playsinline", "");
+    const p = v.play();
+    if (p) p.catch(() => {});
+    return v;
+  }
+  function pauseAll() {
+    Object.values(decoders).forEach((v) => { try { v.pause(); } catch (_) {} });
+  }
+
+  FLY.forEach((spec, i) => {
+    const el = document.createElement("div");
+    el.className = "flyer";
+    el.style.width = spec.w + "px";
+    el.style.height = spec.h + "px";
+    if (!novid) {
+      const v = document.createElement("video");
+      bind(v, SRC[spec.key]);
+      decoders[spec.key] = v;
+      el.appendChild(v);
+    } else {
+      el.style.background = "linear-gradient(135deg,#0ea5e9,#a21caf 55%,#16a34a)";
+    }
+    arena.appendChild(el);
+    flock.push({
+      el, w: spec.w, h: spec.h,
+      x: 36 + i * 70, y: 24 + i * 50,
+      vx: spec.vx, vy: spec.vy, rot: i * 12, vr: (i % 2 ? 1 : -1) * 0.9,
+    });
+  });
+
+  const cards = full ? 6 : 3;
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < cards; i++) {
+    const c = document.createElement("div");
+    c.className = "card";
+    c.style.background = "linear-gradient(135deg,#1a3a8a,#6a1b4a " + (30 + i * 12) + "%,#14532d)";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = "GPU 图层 " + String(i).padStart(2, "0");
+    c.appendChild(meta);
+    frag.appendChild(c);
+  }
+  feed.appendChild(frag);
+
+  function qualitySum() {
+    let dropped = 0, total = 0;
+    const per = {};
+    Object.keys(decoders).forEach((key) => {
+      const v = decoders[key];
+      const q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : {};
+      dropped += q.droppedVideoFrames || 0;
+      total += q.totalVideoFrames || 0;
+      per[key] = {
+        dropped: q.droppedVideoFrames || 0,
+        total: q.totalVideoFrames || 0,
+        t: +((v.currentTime || 0).toFixed(2)),
+        ready: v.readyState,
+        paused: !!v.paused,
+      };
+    });
+    return { dropped, total, per };
+  }
+  function cls(ms) { return ms > 50 ? "bad" : ms > 8.4 ? "warn" : ""; }
+  function setMeter(id, text, kind) {
+    const root = document.getElementById(id);
+    const i = root && root.querySelector("i");
+    if (i) i.textContent = text;
+    if (root) root.className = "m" + (kind ? " " + kind : "");
+  }
+  let qCache = { dropped: 0, total: 0, per: {} }, tick = 0;
+  function paintMeters(dt) {
+    if ((tick++ & 7) === 0) {
+      qCache = qualitySum();
+      if (dts.length) {
+        const s = dts.slice().sort((a, b) => a - b);
+        p50Cache = s[Math.min(s.length - 1, Math.floor(s.length * 0.5))];
+        p99Cache = s[Math.min(s.length - 1, Math.floor(s.length * 0.99))];
+      }
+    }
+    setMeter("m-raf", dt.toFixed(1) + "ms", cls(dt));
+    setMeter("m-fps", dt > 0 ? (1000 / dt).toFixed(1) : "—");
+    setMeter("m-p50", p50Cache ? p50Cache.toFixed(1) : "—", cls(p50Cache));
+    setMeter("m-p99", p99Cache ? p99Cache.toFixed(1) : "—");
+    setMeter("m-hole", String(holes.length), holes.length ? "bad" : "");
+    setMeter("m-drop", qCache.dropped + "/" + qCache.total);
+    setMeter("m-gpu", (hw.gpu_busy != null ? hw.gpu_busy : "—") + "%");
+    setMeter("m-venus", String(hw.venus_irq != null ? hw.venus_irq : "—"));
+    setMeter("m-v14", String(hw.video14_open != null ? hw.video14_open : hw.video14));
+    const mem = hw.mem_avail_mb;
+    setMeter("m-mem", mem != null ? mem + "M" : "—",
+      hw.pressure === "abort" ? "bad" : hw.pressure === "warn" ? "warn" : "");
+    setMeter("m-vid", String(Object.keys(decoders).length));
+  }
+  function stepFlock(scale) {
+    const maxX = innerWidth - 40, maxY = innerHeight - 120;
+    flock.forEach((f) => {
+      f.x += f.vx * scale;
+      f.y += f.vy * scale;
+      f.rot += f.vr * scale;
+      if (f.x < -20 || f.x > maxX - f.w + 20) f.vx *= -1;
+      if (f.y < -20 || f.y > maxY - f.h + 20) f.vy *= -1;
+      f.x = Math.max(-40, Math.min(maxX - 20, f.x));
+      f.y = Math.max(-40, Math.min(maxY - 20, f.y));
+      f.el.style.transform = "translate3d(" + f.x.toFixed(1) + "px," +
+        f.y.toFixed(1) + "px,0) rotate(" + f.rot.toFixed(1) + "deg)";
+    });
+  }
+  function feedMax() {
+    return Math.max(0, feed.scrollHeight + 88 - innerHeight);
+  }
+  function applyView() {
+    viewY = Math.max(0, Math.min(feedMax(), viewY));
+    feed.style.transform = "translate3d(0," + (-viewY).toFixed(1) + "px,0)";
+  }
+
+  document.querySelectorAll("#btns button").forEach((b) => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll("#btns button").forEach((x) => x.classList.remove("on"));
+      b.classList.add("on");
+      scene = b.dataset.scene;
+      auto = scene === "slow" ? 0.7 : scene === "chaos" ? 1.6 : 0;
+      if (scene === "idle") { viewY = 0; applyView(); }
+    });
+  });
+
+  function snapshot() {
+    const q = qualitySum();
+    const s = dts.slice().sort((a, b) => a - b);
+    const pct = (p) => s.length ? +s[Math.min(s.length - 1, Math.floor(s.length * p))].toFixed(2) : null;
+    const fps = dts.length ? +(1000 / (dts.reduce((a, b) => a + b, 0) / dts.length)).toFixed(1) : null;
+    const p50 = pct(0.5);
+    const verdict = {
+      target_fps: 120,
+      mode: novid ? "novid" : (full ? "full" : "light"),
+      aborted,
+      p50_ok: p50 != null && p50 <= 9,
+      fps_ok: fps != null && fps >= 100,
+      venus_ok: !!(hw.video14 && (hw.video14_open > 0 || (hw.venus_irq || 0) > 0)),
+      mem_ok: hw.pressure !== "abort" && (hw.mem_avail_mb == null || hw.mem_avail_mb > 400),
+      software_decode: false,
+    };
+    verdict.pass = !!(verdict.p50_ok && verdict.fps_ok && verdict.venus_ok && verdict.mem_ok && !aborted);
+    return {
+      scene, n: dts.length, videos: Object.keys(decoders).length,
+      fps, p50, p99: pct(0.99), max: s.length ? +s[s.length - 1].toFixed(2) : null,
+      holes: holes.length, video: q, hw, y: +viewY.toFixed(1),
+      verdict,
+    };
+  }
+  function paintDump() {
+    const snap = snapshot();
+    const v = snap.verdict;
+    verdictEl.textContent = v.aborted
+      ? "ABORT 内存过低，已暂停 Venus"
+      : (v.pass ? "PASS  rAF≈120 且 Venus 硬解在走" : "WAIT  p50=" + snap.p50 +
+        " fps=" + snap.fps + " v14=" + (hw.video14_open) + " mem=" + hw.mem_avail_mb + "M");
+    verdictEl.className = v.aborted ? "bad" : (v.pass ? "ok" : "warn");
+    return snap;
+  }
+
+  async function pullHw() {
+    try { hw = await (await fetch("/api/stats", { cache: "no-store" })).json(); } catch (_) {}
+    if (hw.pressure === "abort" && !aborted) {
+      aborted = true;
+      auto = 0;
+      scene = "idle";
+      pauseAll();
+    }
+  }
+  setInterval(pullHw, 400);
+  pullHw();
+  setInterval(() => {
+    const snap = paintDump();
+    try {
+      fetch("/api/dump", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(snap),
+      });
+    } catch (_) {}
+  }, 1000);
+
+  function raf(ts) {
+    const dt = last ? ts - last : 8.3;
+    if (last) {
+      dts.push(dt);
+      if (dts.length > 180) dts.shift();
+      if (dt > 50) holes.push({ t: +ts.toFixed(0), dt: +dt.toFixed(1) });
+      paintMeters(dt);
+    }
+    last = ts;
+    if (!aborted) {
+      stepFlock(scene === "chaos" ? 1.6 : scene === "idle" ? 0.35 : 0.85);
+      if (auto) {
+        viewY += auto * 8;
+        if (viewY >= feedMax() || viewY <= 0) auto = -auto;
+        applyView();
+      }
+    }
+    requestAnimationFrame(raf);
+  }
+  requestAnimationFrame(raf);
+
+  window.__LAB_DUMP__ = snapshot;
+  window.__LAB_RESET__ = function () {
+    dts.length = 0; holes.length = 0; last = 0; viewY = 0; aborted = false; applyView();
+  };
+})();
+</script>
+</body>
+</html>

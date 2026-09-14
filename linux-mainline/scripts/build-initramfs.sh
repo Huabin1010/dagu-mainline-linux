@@ -46,6 +46,34 @@ if [[ -d "$FW" ]]; then
 	cp -a "$FW/." "$STAGING/lib/firmware/"
 fi
 
+# Pair Venus .ko with this ramdisk/Image. Userdata extra/ is older than
+# struct module after KPROBES/BTF rebuilds; dagu-venus-load.sh insmods
+# extra/ then /root/venus-ko.
+VENUS_KO="$OUT/modules/venus"
+if [[ -f "$VENUS_KO/venus-core.ko" ]]; then
+	mkdir -p "$STAGING/venus-ko"
+	cp -f "$VENUS_KO"/venus-*.ko "$STAGING/venus-ko/"
+	echo "==> staged venus.ko from $VENUS_KO"
+else
+	echo "note: no $VENUS_KO/venus-core.ko — build-kernel.sh DAGU_DISPLAY=1 first" >&2
+fi
+
+# Optional aarch64 e2fsck/resize2fs so PID1 can grow the 8G image to the
+# ~106G userdata partition before mount. Populate with:
+#   linux-mainline/scripts/dagu-pull-e2fsprogs.sh
+E2FS="$OUT/e2fsprogs-aarch64"
+if [[ -x "$E2FS/sbin/e2fsck" && -x "$E2FS/sbin/resize2fs" ]]; then
+	echo "==> staging e2fsck/resize2fs from $E2FS"
+	mkdir -p "$STAGING/sbin" "$STAGING/lib" "$STAGING/usr/lib"
+	cp -a "$E2FS/sbin/." "$STAGING/sbin/"
+	if [[ -d "$E2FS/lib" ]]; then
+		cp -a "$E2FS/lib/." "$STAGING/lib/"
+	fi
+	if [[ -d "$E2FS/usr/lib" ]]; then
+		cp -a "$E2FS/usr/lib/." "$STAGING/usr/lib/"
+	fi
+fi
+
 (
 	cd "$STAGING"
 	find . -print0 | cpio --null -o --format=newc

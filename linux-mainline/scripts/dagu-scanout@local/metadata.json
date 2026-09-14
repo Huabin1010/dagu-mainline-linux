@@ -1,0 +1,7 @@
+{
+  "uuid": "dagu-scanout@local",
+  "name": "dagu scanout probe",
+  "description": "Present-pump plus scanout dump. New UUID so GNOME 50 reloads ESM after get_maximized removal.",
+  "shell-version": ["50"],
+  "session-modes": ["user"]
+}

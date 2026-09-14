@@ -1,0 +1,34 @@
+From: dagu
+Subject: [PATCH] REJECTED: page-flip atomic commit must not be NONBLOCK
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2).
+
+drmModeAtomicCommit() ORs DRM_MODE_ATOMIC_NONBLOCK (0x200) when the
+update has no modeset. msm then queues msm_atomic_commit_tail on a
+DRM worker. On dagu that worker often starts 65-220 ms later
+(B-kick-kernel): ioctl already returned, dpu_enc_kickoff has not.
+
+Drop NONBLOCK so commit_tail / flush_commit run in the KMS-thread
+ioctl. wait_flush on this path is 0-6 ms; do not flash the 8 ms
+wait_for_commit_done kernel patch.
+
+Live ELF (objdump-checked, r-xp 0x7f93450000):
+  0x1b4820  mov w22,#0x200  ->  mov w22,#0
+
+---
+ src/backends/native/meta-kms-impl-device-atomic.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/backends/native/meta-kms-impl-device-atomic.c b/src/backends/native/meta-kms-impl-device-atomic.c
+index 0000000..1111111 100644
+--- a/src/backends/native/meta-kms-impl-device-atomic.c
++++ b/src/backends/native/meta-kms-impl-device-atomic.c
+@@ -1234,7 +1234,7 @@
+   if (meta_kms_update_get_needs_modeset (update))
+     commit_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
+   else
+-    commit_flags |= DRM_MODE_ATOMIC_NONBLOCK;
++    ; /* blocking: commit_tail in ioctl, not a late DRM worker */
+ 
+   if (meta_kms_update_get_page_flip_listeners (update))
+     commit_flags |= DRM_MODE_PAGE_FLIP_EVENT;

@@ -50,6 +50,12 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	"$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m -O "$KBUILD_OUTPUT" \
 		"$KBUILD_OUTPUT/.config" "$ROOT/config/dagu-display.fragment"
 fi
+# After display: Kprobes + BTF for BCC/bpftrace. Needs pahole >= 1.22.
+# Keep FUNCTION_TRACER off — a nop at every function perturbs 120 Hz DSC.
+command -v pahole >/dev/null || die "pahole missing — apt install pahole (v1.22+ for CONFIG_DEBUG_INFO_BTF)"
+echo "==> merge dagu-bpf.fragment (kprobes + BTF, no FUNCTION_TRACER)"
+"$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m -O "$KBUILD_OUTPUT" \
+	"$KBUILD_OUTPUT/.config" "$ROOT/config/dagu-bpf.fragment"
 make O="$KBUILD_OUTPUT" olddefconfig
 
 # Do not embed QUP firmware and do not put firmware-name on &qupv3_id_0.
@@ -76,6 +82,16 @@ grep -q '^CONFIG_ARM64_VA_BITS_52=y' "$cfg" && die "VA_BITS_52 still on — Kryo
 grep -q '^CONFIG_ARM64_VA_BITS_48=y' "$cfg" && die "VA_BITS_48 still on — dump 4.19 is VA_BITS_39 / 3-level"
 grep -q '^CONFIG_KVM=y' "$cfg" && die "KVM still on — dump 4.19 has no hypervisor stub"
 grep -q '^CONFIG_POWER_RESET_MSM=y' "$cfg" && die "POWER_RESET_MSM still on — would bounce to fastboot on panic"
+need_y CONFIG_KPROBES
+need_y CONFIG_KPROBE_EVENTS
+need_y CONFIG_BPF_SYSCALL
+need_y CONFIG_BPF_EVENTS
+need_y CONFIG_DEBUG_INFO_BTF
+need_y CONFIG_IKHEADERS
+grep -q '^CONFIG_DEBUG_INFO_REDUCED=y' "$cfg" && \
+	die "DEBUG_INFO_REDUCED still on — CONFIG_DEBUG_INFO_BTF depends on it being off"
+grep -q '^CONFIG_FUNCTION_TRACER=y' "$cfg" && \
+	die "FUNCTION_TRACER still on — would perturb 120 Hz DSC capture"
 if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	need_y CONFIG_DRM_MSM
 	need_y CONFIG_DRM_PANEL_XIAOMI_DAGU_L81A
@@ -170,6 +186,12 @@ if [[ "${DAGU_MINIMAL:-}" != 1 ]]; then
 	grep -q '^CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED=y' "$cfg" && \
 		die "WATCHDOG_HANDLE_BOOT_ENABLED still on — kernel would pet WDT forever"
 	need_y CONFIG_DRM
+	need_y CONFIG_FTRACE
+	need_y CONFIG_SCHED_TRACER
+	need_y CONFIG_TRACING
+	need_y CONFIG_EVENT_TRACING
+	grep -q '^CONFIG_FUNCTION_TRACER=y' "$cfg" && \
+		die "FUNCTION_TRACER still on — would perturb 120 Hz DSC capture"
 	need_y CONFIG_DRM_KMS_HELPER
 	need_y CONFIG_DRM_MSM
 	need_y CONFIG_DRM_PANEL_XIAOMI_DAGU_L81A
@@ -196,6 +218,8 @@ make O="$KBUILD_OUTPUT" -j"$JOBS" Image.gz dtbs
 
 test -f "$KBUILD_OUTPUT/arch/arm64/boot/dts/qcom/$DTB_NAME" \
 	|| die "dtb not built — apply-dts.sh / Makefile?"
+"${CROSS_COMPILE}readelf" -S "$KBUILD_OUTPUT/vmlinux" | grep -q ' \.BTF' \
+	|| die "vmlinux has no .BTF — pahole failed; /sys/kernel/btf/vmlinux would be missing"
 
 if [[ "${DAGU_DISPLAY:-0}" == 1 ]] && grep -q '^CONFIG_VIDEO_QCOM_VENUS=m' "$cfg"; then
 	echo "==> venus modules (not autoloaded)"

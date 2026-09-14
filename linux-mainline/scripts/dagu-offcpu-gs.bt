@@ -1,0 +1,29 @@
+// gnome-shell off-CPU >= 50ms via sched_switch (no FUNCTION_TRACER / finish_task_switch).
+// Usage: bpftrace -D GS=1187 this.bt 20
+#ifndef GS
+#define GS 0
+#endif
+
+tracepoint:sched:sched_switch
+{
+	if (pid == GS) {
+		@off[tid] = nsecs;
+		@us[tid] = ustack;
+		@ks[tid] = kstack;
+		@st[tid] = args->prev_state;
+	}
+	$n = args->next_pid;
+	if (@off[$n] != 0) {
+		$dt = nsecs - @off[$n];
+		if ($dt >= 50000000) {
+			printf("%llu OFFCPU tid=%d state=%d ms=%llu\nkstack:%s\nustack:%s\n----\n",
+			       nsecs, $n, @st[$n], $dt / 1000000, @ks[$n], @us[$n]);
+			@offcpu_ms = hist($dt / 1000000);
+			@nlong = count();
+		}
+		delete(@off[$n]);
+		delete(@us[$n]);
+		delete(@ks[$n]);
+		delete(@st[$n]);
+	}
+}

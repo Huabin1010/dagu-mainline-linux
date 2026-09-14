@@ -1,0 +1,125 @@
+// Combined interlock: one clock, first-after-T0 vs last-at-T0.
+// No poke. MAIN=gnome-shell, LAB=identity gtk.
+// pre = last event at/before T0 (typically after_update, negative ms).
+// first = first event strictly after T0; 9999 = none in the hole.
+// last = last event after T0 (next-frame after_update sits near gap).
+
+#ifndef MAIN
+#define MAIN 1236
+#endif
+#ifndef LAB
+#define LAB 4958
+#endif
+
+BEGIN {
+  printf("interlock MAIN=%d LAB=%d\n", MAIN, LAB);
+}
+
+tracepoint:dpu:dpu_enc_kickoff {
+  $now = nsecs;
+  $t0 = @last_kick;
+  @n_kick++;
+  if ($t0 != 0) {
+    $gap = ($now - $t0) / 1000000;
+    if ($gap >= 50) {
+      $ps = @at_sendcb == 0 ? 9999 : (@at_sendcb >= $t0 ? (@at_sendcb - $t0) / 1000000 : -(($t0 - @at_sendcb) / 1000000));
+      $pt = @at_thaw == 0 ? 9999 : (@at_thaw >= $t0 ? (@at_thaw - $t0) / 1000000 : -(($t0 - @at_thaw) / 1000000));
+      $pn = @at_npr == 0 ? 9999 : (@at_npr >= $t0 ? (@at_npr - $t0) / 1000000 : -(($t0 - @at_npr) / 1000000));
+      $ph = @at_sch == 0 ? 9999 : (@at_sch >= $t0 ? (@at_sch - $t0) / 1000000 : -(($t0 - @at_sch) / 1000000));
+      $pq = @at_qcb == 0 ? 9999 : (@at_qcb >= $t0 ? (@at_qcb - $t0) / 1000000 : -(($t0 - @at_qcb) / 1000000));
+      $pv = @at_nview == 0 ? 9999 : (@at_nview >= $t0 ? (@at_nview - $t0) / 1000000 : -(($t0 - @at_nview) / 1000000));
+      $pw = @at_gwu == 0 ? 9999 : (@at_gwu >= $t0 ? (@at_gwu - $t0) / 1000000 : -(($t0 - @at_gwu) / 1000000));
+      $fs = @f_sendcb == 0 ? 9999 : (@f_sendcb - $t0) / 1000000;
+      $ft = @f_thaw == 0 ? 9999 : (@f_thaw - $t0) / 1000000;
+      $fn = @f_npr == 0 ? 9999 : (@f_npr - $t0) / 1000000;
+      $fh = @f_sch == 0 ? 9999 : (@f_sch - $t0) / 1000000;
+      $fq = @f_qcb == 0 ? 9999 : (@f_qcb - $t0) / 1000000;
+      $fv = @f_nview == 0 ? 9999 : (@f_nview - $t0) / 1000000;
+      $fw = @f_gwu == 0 ? 9999 : (@f_gwu - $t0) / 1000000;
+      $ls = @l_sendcb > $t0 ? (@l_sendcb - $t0) / 1000000 : 9999;
+      $lt = @l_thaw > $t0 ? (@l_thaw - $t0) / 1000000 : 9999;
+      $ln = @l_npr > $t0 ? (@l_npr - $t0) / 1000000 : 9999;
+      $lh = @l_sch > $t0 ? (@l_sch - $t0) / 1000000 : 9999;
+      $lq = @l_qcb > $t0 ? (@l_qcb - $t0) / 1000000 : 9999;
+      $lv = @l_nview > $t0 ? (@l_nview - $t0) / 1000000 : 9999;
+      $lw = @l_gwu > $t0 ? (@l_gwu - $t0) / 1000000 : 9999;
+      printf("HOLE gap=%lld sendcb(pre/first/last)=%lld/%lld/%lld thaw=%lld/%lld/%lld npr=%lld/%lld/%lld sch=%lld/%lld/%lld qcb=%lld/%lld/%lld nview=%lld/%lld/%lld gwu=%lld/%lld/%lld\n",
+        $gap,
+        $ps, $fs, $ls,
+        $pt, $ft, $lt,
+        $pn, $fn, $ln,
+        $ph, $fh, $lh,
+        $pq, $fq, $lq,
+        $pv, $fv, $lv,
+        $pw, $fw, $lw);
+      @n_hole++;
+    }
+  }
+  @last_kick = $now;
+  @at_sendcb = @l_sendcb;
+  @at_thaw = @l_thaw;
+  @at_npr = @l_npr;
+  @at_sch = @l_sch;
+  @at_qcb = @l_qcb;
+  @at_nview = @l_nview;
+  @at_gwu = @l_gwu;
+  @f_sendcb = 0;
+  @f_thaw = 0;
+  @f_npr = 0;
+  @f_sch = 0;
+  @f_qcb = 0;
+  @f_nview = 0;
+  @f_gwu = 0;
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/libmutter-18.so.0.0.0:0x1673f0
+/tid == MAIN/ {
+  @l_sendcb = nsecs;
+  @n_sendcb++;
+  if (@f_sendcb == 0) { @f_sendcb = nsecs; }
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/libgtk-4.so.1.2200.4:0x5a4da0
+/pid == LAB/ {
+  @l_thaw = nsecs;
+  @n_thaw++;
+  if (@f_thaw == 0) { @f_thaw = nsecs; }
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/mutter-18/libmutter-clutter-18.so.0.0.0:clutter_frame_clock_notify_presented
+/tid == MAIN/ {
+  @l_npr = nsecs;
+  @n_npr++;
+  if (@f_npr == 0) { @f_npr = nsecs; }
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/mutter-18/libmutter-clutter-18.so.0.0.0:clutter_frame_clock_schedule_update
+/tid == MAIN/ {
+  @l_sch = nsecs;
+  @n_sch++;
+  if (@f_sch == 0) { @f_sch = nsecs; }
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/libmutter-18.so.0.0.0:meta_thread_queue_callback {
+  @l_qcb = nsecs;
+  @n_qcb++;
+  if (@f_qcb == 0) { @f_qcb = nsecs; }
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/libmutter-18.so.0.0.0:0x1c4440
+/tid == MAIN/ {
+  @l_nview = nsecs;
+  @n_nview++;
+  if (@f_nview == 0) { @f_nview = nsecs; }
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/libglib-2.0.so.0.8800.0:g_main_context_wakeup
+/pid == MAIN/ {
+  @l_gwu = nsecs;
+  if (@f_gwu == 0) { @f_gwu = nsecs; }
+}
+
+END {
+  printf("END kick=%d hole=%d sendcb=%d thaw=%d npr=%d sch=%d qcb=%d nview=%d\n",
+    @n_kick, @n_hole, @n_sendcb, @n_thaw, @n_npr, @n_sch, @n_qcb, @n_nview);
+}

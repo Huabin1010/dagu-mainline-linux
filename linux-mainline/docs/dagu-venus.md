@@ -336,6 +336,21 @@ gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
 
 `gsettings org.gnome.totem force-software-decoders` 为 **false**。
 
+### 9.4.1 HTML5：官方 Chrome 软解；一线走 Chromium + Venus
+
+官方 Chrome 153.0.8010.36 `USE_V4L2=0`，只能 FFmpeg。**不要**套 VA-API。一线是 xtradeb Chromium 152 + `linux-mainline/scripts/dagu-chromium.sh`。
+
+| 项 | 官方 Chrome 153 | Chromium 152（`dagu-chromium`） |
+|----|-----------------|--------------------------------|
+| `/dev/video14` | 不打开 | H.264 / VP9 / HEVC 都打开 |
+| `venus_irq_delta` | 0 | 418 / 456 / 431（各 8s 1080p30） |
+| 掉帧 | 9.61% 基线 | 2.69% / 1.54% / 4.58% |
+| JSON | `linux-mainline/out/display-stress/video-jank-baseline.json` | `video-jank-h264.json` / `video-jank-vp9.json` / `video-jank-hevc.json` |
+
+Video Encode：`chrome://gpu` 在开了 `AcceleratedVideoEncoder` 后标 Hardware，但是上游 `CreateV4L2VEA()` 只在 ChromeOS 返回真编码器。干净 `MediaRecorder`：`irq_delta=0`、没有 `/dev/video15`。见 `linux-mainline/docs/dagu-chrome-gpu-venus.md`。
+
+时钟：`linux-mainline/scripts/dagu-touch-boost.py` 认 Chromium / `/dev/video14`。不要 `governor=performance`，不要钉大核。
+
 ### 9.5 附带：GStreamer registry 坏目录
 
 `dmesg` 里 `EXT4-fs error … deleted inode referenced: 149213`，对应 `/home/dagu/.cache/gstreamer-1.0/registry.aarch64.bin`（`ls` 全问号，`rm` 报 `Structure needs cleaning`）。已挪到 `/home/dagu/.cache/gstreamer-1.0.bad-1789203410`，新 cache 目录已建。这是 userdata 上的陈旧 dentry，不是 Venus/SMMU。未做在线 `fsck`。

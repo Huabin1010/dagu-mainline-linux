@@ -1,0 +1,98 @@
+// No sys_enter_ppoll. Dump pollfd[] for gnome-shell sleeps >=50ms.
+// card0 fds: 12 13 14 15. KMS thread is usually tid 1253.
+// bpftrace --unsafe this.bt
+#define GS 1236
+
+kprobe:__arm64_sys_ppoll
+/pid == GS/
+{
+	$r = (struct pt_regs *)arg0;
+	@start[tid] = nsecs;
+	@nfds[tid] = (uint32)$r->regs[1];
+	$p = $r->regs[0];
+	@fds[tid] = $p;
+	@tsp[tid] = $r->regs[2];
+	if ($p != 0) {
+		@fd0[tid] = *(int32 *)uptr($p + 0);
+		@fd1[tid] = *(int32 *)uptr($p + 8);
+		@fd2[tid] = *(int32 *)uptr($p + 16);
+		@fd3[tid] = *(int32 *)uptr($p + 24);
+		@fd4[tid] = *(int32 *)uptr($p + 32);
+		@fd5[tid] = *(int32 *)uptr($p + 40);
+		@fd6[tid] = *(int32 *)uptr($p + 48);
+		@fd7[tid] = *(int32 *)uptr($p + 56);
+		@fd8[tid] = *(int32 *)uptr($p + 64);
+		@fd9[tid] = *(int32 *)uptr($p + 72);
+		@fd10[tid] = *(int32 *)uptr($p + 80);
+		@fd11[tid] = *(int32 *)uptr($p + 88);
+		@fd12[tid] = *(int32 *)uptr($p + 96);
+		@fd13[tid] = *(int32 *)uptr($p + 104);
+		@fd14[tid] = *(int32 *)uptr($p + 112);
+		@fd15[tid] = *(int32 *)uptr($p + 120);
+	}
+}
+
+kretprobe:__arm64_sys_ppoll
+/@start[tid] != 0/
+{
+	$lat = (nsecs - @start[tid]) / 1000000;
+	if ($lat >= 50) {
+		$n = @nfds[tid];
+		$has = 0;
+		if ($n > 0 && (@fd0[tid] == 12 || @fd0[tid] == 13 || @fd0[tid] == 14 || @fd0[tid] == 15)) { $has = 1; }
+		if ($n > 1 && (@fd1[tid] == 12 || @fd1[tid] == 13 || @fd1[tid] == 14 || @fd1[tid] == 15)) { $has = 1; }
+		if ($n > 2 && (@fd2[tid] == 12 || @fd2[tid] == 13 || @fd2[tid] == 14 || @fd2[tid] == 15)) { $has = 1; }
+		if ($n > 3 && (@fd3[tid] == 12 || @fd3[tid] == 13 || @fd3[tid] == 14 || @fd3[tid] == 15)) { $has = 1; }
+		if ($n > 4 && (@fd4[tid] == 12 || @fd4[tid] == 13 || @fd4[tid] == 14 || @fd4[tid] == 15)) { $has = 1; }
+		if ($n > 5 && (@fd5[tid] == 12 || @fd5[tid] == 13 || @fd5[tid] == 14 || @fd5[tid] == 15)) { $has = 1; }
+		if ($n > 6 && (@fd6[tid] == 12 || @fd6[tid] == 13 || @fd6[tid] == 14 || @fd6[tid] == 15)) { $has = 1; }
+		if ($n > 7 && (@fd7[tid] == 12 || @fd7[tid] == 13 || @fd7[tid] == 14 || @fd7[tid] == 15)) { $has = 1; }
+		if ($n > 8 && (@fd8[tid] == 12 || @fd8[tid] == 13 || @fd8[tid] == 14 || @fd8[tid] == 15)) { $has = 1; }
+		if ($n > 9 && (@fd9[tid] == 12 || @fd9[tid] == 13 || @fd9[tid] == 14 || @fd9[tid] == 15)) { $has = 1; }
+		if ($n > 10 && (@fd10[tid] == 12 || @fd10[tid] == 13 || @fd10[tid] == 14 || @fd10[tid] == 15)) { $has = 1; }
+		if ($n > 11 && (@fd11[tid] == 12 || @fd11[tid] == 13 || @fd11[tid] == 14 || @fd11[tid] == 15)) { $has = 1; }
+		if ($n > 12 && (@fd12[tid] == 12 || @fd12[tid] == 13 || @fd12[tid] == 14 || @fd12[tid] == 15)) { $has = 1; }
+		if ($n > 13 && (@fd13[tid] == 12 || @fd13[tid] == 13 || @fd13[tid] == 14 || @fd13[tid] == 15)) { $has = 1; }
+		if ($n > 14 && (@fd14[tid] == 12 || @fd14[tid] == 13 || @fd14[tid] == 14 || @fd14[tid] == 15)) { $has = 1; }
+		if ($n > 15 && (@fd15[tid] == 12 || @fd15[tid] == 13 || @fd15[tid] == 14 || @fd15[tid] == 15)) { $has = 1; }
+		printf("[ppoll] tid=%d slept=%llu ms nfds=%u tsp=0x%lx ret=%d card0_in_set=%d fds=",
+		       tid, $lat, $n, @tsp[tid], retval, $has);
+		if ($n > 0) { printf("%d", @fd0[tid]); }
+		if ($n > 1) { printf(",%d", @fd1[tid]); }
+		if ($n > 2) { printf(",%d", @fd2[tid]); }
+		if ($n > 3) { printf(",%d", @fd3[tid]); }
+		if ($n > 4) { printf(",%d", @fd4[tid]); }
+		if ($n > 5) { printf(",%d", @fd5[tid]); }
+		if ($n > 6) { printf(",%d", @fd6[tid]); }
+		if ($n > 7) { printf(",%d", @fd7[tid]); }
+		if ($n > 8) { printf(",%d", @fd8[tid]); }
+		if ($n > 9) { printf(",%d", @fd9[tid]); }
+		if ($n > 10) { printf(",%d", @fd10[tid]); }
+		if ($n > 11) { printf(",%d", @fd11[tid]); }
+		if ($n > 12) { printf(",%d", @fd12[tid]); }
+		if ($n > 13) { printf(",%d", @fd13[tid]); }
+		if ($n > 14) { printf(",%d", @fd14[tid]); }
+		if ($n > 15) { printf(",%d", @fd15[tid]); }
+		printf("\n");
+		@slept_ms = hist($lat);
+		@nfds_tid[tid, $n] = count();
+		@card0_in[tid, $has] = count();
+	}
+	delete(@start[tid]);
+	delete(@nfds[tid]);
+	delete(@fds[tid]);
+	delete(@tsp[tid]);
+	delete(@fd0[tid]); delete(@fd1[tid]); delete(@fd2[tid]); delete(@fd3[tid]);
+	delete(@fd4[tid]); delete(@fd5[tid]); delete(@fd6[tid]); delete(@fd7[tid]);
+	delete(@fd8[tid]); delete(@fd9[tid]); delete(@fd10[tid]); delete(@fd11[tid]);
+	delete(@fd12[tid]); delete(@fd13[tid]); delete(@fd14[tid]); delete(@fd15[tid]);
+}
+
+interval:s:12
+{
+	printf("--- ppoll maps ---\n");
+	print(@slept_ms);
+	print(@nfds_tid);
+	print(@card0_in);
+	exit();
+}

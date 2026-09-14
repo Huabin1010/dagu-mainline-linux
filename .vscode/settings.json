@@ -1,0 +1,27 @@
+{
+  "explorer.excludeGitIgnore": false,
+  "search.useIgnoreFiles": false,
+  "search.useParentIgnoreFiles": false,
+  "search.exclude": {
+    "**/.git": true,
+    "**/linux-mainline/out": true,
+    "**/linux-mainline/firmware/dagu/qca6390": true,
+    "**/linux-mainline/firmware/dagu/bt_firmware": true,
+    "**/linux-mainline/firmware/dagu/persist": true,
+    "**/linux-mainline/firmware/dagu/vendor": true,
+    "**/linux-mainline/firmware/dagu/.extract": true,
+    "**/dumps": true,
+    "**/artifacts": true,
+    "**/tmp": true,
+    "**/vendor": true,
+    "**/edk2-msm": true,
+    "**/tools/downloads": true,
+    "**/tools/platform-tools": true,
+    "**/*.img": true
+  },
+  "files.watcherExclude": {
+    "**/linux-mainline/linux/.git/**": true,
+    "**/linux-mainline/out/**": true,
+    "**/dumps/**": true
+  }
+}

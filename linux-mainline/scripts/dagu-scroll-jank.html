@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dagu scroll jank</title>
+<style>
+  html, body { margin: 0; background: #f2f2f2; }
+  #hud {
+    position: sticky; top: 0; z-index: 3;
+    background: #111; color: #6f6; font: 700 20px/1.35 ui-monospace, monospace;
+    padding: 8px 12px;
+  }
+  #list { padding-bottom: 40px; }
+  .row {
+    height: 88px; display: flex; align-items: center; padding: 0 18px;
+    font: 700 26px/1.2 "Noto Sans CJK SC", sans-serif; color: #111;
+    contain: layout paint;
+  }
+  .row:nth-child(odd) { background: #ececec; }
+  .row:nth-child(even) { background: #4ea3ff; }
+</style>
+</head>
+<body>
+<div id="hud">dagu scroll jank — waiting</div>
+<div id="list"></div>
+<script>
+(function () {
+  const list = document.getElementById("list");
+  const hud = document.getElementById("hud");
+  const N = 260;
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < N; i++) {
+    const d = document.createElement("div");
+    d.className = "row";
+    d.textContent = "行 " + String(i).padStart(3, "0") + "  普通网页滚动探针  ABC xyz 0123456789";
+    frag.appendChild(d);
+  }
+  list.appendChild(frag);
+
+  const raf = [];
+  const scrolls = [];
+  const touches = [];
+  let last = 0;
+  let armed = false;
+
+  function now() { return performance.now(); }
+
+  window.__JANK_RESET__ = function () {
+    raf.length = 0;
+    scrolls.length = 0;
+    touches.length = 0;
+    last = 0;
+    const mid = Math.max(0, (document.documentElement.scrollHeight - window.innerHeight) / 2);
+    window.scrollTo(0, mid);
+    armed = true;
+  };
+
+  window.__JANK_DUMP__ = function () {
+    armed = false;
+    const dts = raf.map((x) => x.dt).filter((x) => x > 0 && x < 250);
+    dts.sort((a, b) => a - b);
+    const pct = (p) => dts.length ? dts[Math.min(dts.length - 1, Math.floor(dts.length * p))] : null;
+    const over = (ms) => dts.length ? +(100 * dts.filter((x) => x > ms).length / dts.length).toFixed(1) : null;
+    const ys = scrolls.map((s) => s.y);
+    let yjerk = 0;
+    for (let i = 2; i < scrolls.length; i++) {
+      const a = scrolls[i - 1].y - scrolls[i - 2].y;
+      const b = scrolls[i].y - scrolls[i - 1].y;
+      yjerk += Math.abs(b - a);
+    }
+    const freezes = [];
+    let fz0 = null;
+    for (let i = 1; i < scrolls.length; i++) {
+      const dy = Math.abs(scrolls[i].y - scrolls[i - 1].y);
+      if (dy < 0.5) {
+        if (fz0 === null) fz0 = scrolls[i - 1];
+      } else if (fz0) {
+        const dur = scrolls[i - 1].t - fz0.t;
+        if (dur >= 24) freezes.push({ t0: +fz0.t.toFixed(1), ms: +dur.toFixed(1), y: fz0.y });
+        fz0 = null;
+      }
+    }
+    const step = Math.max(1, Math.floor(scrolls.length / 80));
+    const series = [];
+    for (let i = 0; i < scrolls.length; i += step) {
+      series.push([+scrolls[i].t.toFixed(1), +scrolls[i].y.toFixed(1)]);
+    }
+    return {
+      start_y: scrolls.length ? scrolls[0].y : window.scrollY,
+      doc_h: document.documentElement.scrollHeight,
+      dpr: window.devicePixelRatio,
+      inner: [window.innerWidth, window.innerHeight],
+      screen: [screen.width, screen.height],
+      raf_n: dts.length,
+      raf_med_ms: pct(0.5),
+      raf_p90_ms: pct(0.9),
+      raf_p99_ms: pct(0.99),
+      raf_max_ms: dts.length ? dts[dts.length - 1] : null,
+      raf_over_10ms_pct: over(10),
+      raf_over_14ms_pct: over(14),
+      raf_over_18ms_pct: over(18),
+      raf_over_25ms_pct: over(25),
+      hz_est: dts.length ? +(1000 / (dts.reduce((a, b) => a + b, 0) / dts.length)).toFixed(2) : null,
+      scroll_n: scrolls.length,
+      scroll_span: ys.length ? Math.max(...ys) - Math.min(...ys) : 0,
+      scroll_jerk: +yjerk.toFixed(1),
+      touch_n: touches.length,
+      freeze_n: freezes.length,
+      freeze_max_ms: freezes.length ? Math.max(...freezes.map((f) => f.ms)) : 0,
+      freezes: freezes.slice(0, 12),
+      series: series,
+      gpuBenchmarking: !!(window.chrome && chrome.gpuBenchmarking),
+    };
+  };
+
+  function tick(t) {
+    if (armed && last) {
+      raf.push({ t, dt: t - last, y: window.scrollY });
+      scrolls.push({ t, y: window.scrollY });
+      if (raf.length > 2400) raf.splice(0, raf.length - 2000);
+      if (scrolls.length > 2400) scrolls.splice(0, scrolls.length - 2000);
+    }
+    last = t;
+    if (armed && raf.length && raf.length % 30 === 0) {
+      const d = __JANK_DUMP__;
+      armed = true;
+      const x = (function () {
+        const dts = raf.map((e) => e.dt).filter((e) => e > 0 && e < 250);
+        const n = dts.length;
+        const avg = n ? dts.reduce((a, b) => a + b, 0) / n : 0;
+        return "rAF " + (avg ? (1000 / avg).toFixed(1) : "?") + "Hz  n=" + n +
+          "  y=" + Math.round(window.scrollY);
+      })();
+      hud.textContent = x;
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  addEventListener("touchstart", (e) => {
+    touches.push({ t: now(), typ: "start", y: e.touches[0] ? e.touches[0].clientY : -1 });
+  }, { passive: true });
+  addEventListener("touchmove", (e) => {
+    touches.push({ t: now(), typ: "move", y: e.touches[0] ? e.touches[0].clientY : -1 });
+  }, { passive: true });
+  addEventListener("touchend", () => {
+    touches.push({ t: now(), typ: "end", y: -1 });
+    try {
+      fetch("/jank-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(window.__JANK_DUMP__()),
+      });
+      armed = true;
+    } catch (e) {}
+  }, { passive: true });
+})();
+</script>
+</body>
+</html>

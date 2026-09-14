@@ -20,8 +20,8 @@ echo ===speaker-route===
 amixer -c 0 cset name="TERT_TDM_RX_0 Audio Mixer MultiMedia1" 1 || true
 for p in TL TR BL BR; do
   amixer -c 0 cset name="$p PCM Source" ASP || true
-  amixer -c 0 cset name="$p Analog PCM Volume" 18 || true
-  amixer -c 0 cset name="$p Digital PCM Volume" 817 || true
+  amixer -c 0 cset name="$p Analog PCM" 18 || amixer -c 0 cset name="$p Analog PCM Volume" 18 || true
+  amixer -c 0 cset name="$p Digital PCM" 817 || amixer -c 0 cset name="$p Digital PCM Volume" 817 || true
   amixer -c 0 cset name="$p PCM Source" DSP || true
   amixer -c 0 cset name="$p Speaker" on || true
 done

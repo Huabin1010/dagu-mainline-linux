@@ -1,0 +1,48 @@
+From: dagu
+Subject: [PATCH] dagu: flush pending KMS update when the deadline timer is off
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2).
+
+update_ready() queues crtc_frame->pending_update when a page flip is
+still in flight. schedule_process() only commits that queue if
+is_using_deadline_timer() is TRUE. On dagu the KMS thread stays
+NORMAL, so the timer is off and schedule_process() only
+g_warning_once() — the atomic never goes out until something else
+merges a later update. maybe_post is on time, dpu_enc_kickoff +100 ms
+(B-kick).
+
+Forcing the deadline timer on was worse (timerfd armed but dispatch
+late). Flush the pending update on the deadline==FALSE path instead.
+
+Live ELF:
+  0x1bce48  cbz w0, warning  →  cbz w0, do_process_update
+
+---
+ src/backends/native/meta-kms-impl-device.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/backends/native/meta-kms-impl-device.c b/src/backends/native/meta-kms-impl-device.c
+index 0000000..dagu0004 100644
+--- a/src/backends/native/meta-kms-impl-device.c
++++ b/src/backends/native/meta-kms-impl-device.c
+@@ -2257,14 +2257,22 @@ meta_kms_impl_device_schedule_process (MetaKmsImplDevice *impl_device,
+                                                   META_KMS_UPDATE_FLAG_NONE);
+         }
+     }
+ 
+   if (crtc_frame->pending_update)
+     {
+       MetaKmsImplDevicePrivate *priv =
+         meta_kms_impl_device_get_instance_private (impl_device);
+ 
+       g_warning_once ("crtc_frame->pending_update=%p, deadline_timer_state=%d",
+                       crtc_frame->pending_update, priv->deadline_timer_state);
++      meta_kms_impl_device_do_process_update (impl_device, crtc_frame,
++                                              crtc_frame->crtc,
++                                              crtc_frame->pending_update,
++                                              META_KMS_UPDATE_FLAG_NONE);
+     }
+ 
+   if (!crtc_frame->submitted_update.kms_update)
+     meta_kms_device_set_needs_flush (meta_kms_crtc_get_device (crtc), crtc);
+ }

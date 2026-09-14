@@ -1,3 +1,10 @@
+# Event tracing for DPU DSC flush (vblank timeout: 400000).
+# FTRACE alone does not select TRACING; SCHED_TRACER pulls GENERIC_TRACER
+# without FUNCTION_TRACER (a nop at every function would perturb 120 Hz).
+CONFIG_FTRACE=y
+CONFIG_SCHED_TRACER=y
+# CONFIG_FUNCTION_TRACER is not set
+
 # Display on top of DAGU_MINIMAL + dagu-usb: hand MDSS to DRM_MSM instead of
 # borrowing ABL's continuous splash.
 #
@@ -55,10 +62,10 @@ CONFIG_TOUCHSCREEN_HIMAX_DAGU=y
 CONFIG_CPU_IDLE=y
 CONFIG_ARM_PSCI_CPUIDLE=y
 
-# No INTERCONNECT_QCOM_SM8250 here, same reason as dagu-usb.fragment: the BCM
-# voter's rpmh_write_batch() times out on this QHEE chain. sm8250-xiaomi-dagu.dts
-# deletes mdss's "interconnects" so of_icc_get() returns NULL and msm_mdss skips
-# the vote — ABL already trained MASTER_MDP_PORT0/1 to run the splash over it.
+# dagu.fragment turns INTERCONNECT on; this QHEE's BCM voter hangs on
+# rpmh_write_batch(). Unset it here (last fragment before bpf) so desktop
+# builds without DAGU_MINIMAL still boot. Venus uses the ICC stub in core.c.
+# CONFIG_INTERCONNECT_QCOM_SM8250 is not set
 
 # GPU + OSM: without these GNOME is llvmpipe at boot freq and feels 60 Hz.
 CONFIG_SM_GPUCC_8250=y

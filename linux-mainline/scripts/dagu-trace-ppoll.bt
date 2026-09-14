@@ -1,0 +1,53 @@
+// gnome-shell ppoll timeout/nfds when sleep >= 50ms.
+// No sys_enter_ppoll (CONFIG_FTRACE_SYSCALLS=n).
+//   bpftrace --unsafe this.bt
+// Edit GS below or sed it before run.
+#define GS 1187
+
+kprobe:__arm64_sys_ppoll
+/pid == GS/
+{
+	$r = (struct pt_regs *)arg0;
+	@start[tid] = nsecs;
+	@nfds[tid] = $r->regs[1];
+	$p = $r->regs[2];
+	@tsp[tid] = $p;
+	if ($p != 0) {
+		@tsec[tid] = *(int64 *)uptr($p);
+		@tnsec[tid] = *(int64 *)(uptr($p) + 8);
+	} else {
+		@tsec[tid] = -1;
+		@tnsec[tid] = 0;
+	}
+}
+
+kretprobe:__arm64_sys_ppoll
+/@start[tid] != 0/
+{
+	$lat = (nsecs - @start[tid]) / 1000000;
+	if ($lat >= 50) {
+		$p = @tsp[tid];
+		printf("[ppoll] tid=%d slept=%llu ms nfds=%d tsp=0x%lx ret=%d\n",
+		       tid, $lat, @nfds[tid], $p, retval);
+		if ($p == 0) {
+			printf("  timeout: NULL (infinite)\n");
+		} else {
+			$ms = @tsec[tid] * 1000 + @tnsec[tid] / 1000000;
+			printf("  requested timeout at enter: %ld s, %ld ns (%lld ms)\n",
+			       @tsec[tid], @tnsec[tid], $ms);
+			@req_ms = hist($ms);
+		}
+		@slept_ms = hist($lat);
+		@nfds_long[@nfds[tid]] = count();
+	}
+	delete(@start[tid]);
+	delete(@nfds[tid]);
+	delete(@tsp[tid]);
+	delete(@tsec[tid]);
+	delete(@tnsec[tid]);
+}
+
+interval:s:15
+{
+	exit();
+}

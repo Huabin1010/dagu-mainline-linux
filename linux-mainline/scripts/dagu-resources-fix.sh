@@ -363,11 +363,12 @@ StartupNotify=true
 EOF
 update-desktop-database /usr/local/share/applications 2>/dev/null || true
 
-# Adreno 650 max is 670 MHz (already the silicon cap). simple_ondemand was
-# bouncing 670↔305 (~2000 drops/session); the first frames after idle miss
-# vsync at 1600x2560@120. Keep a 490 MHz floor and poll every 10 ms.
+# Adreno 650 max is 670 MHz. simple_ondemand still drops 670→490
+# mid hold-drag (Himax inject: ~28% of samples at 490, busy_max=100).
+# Idle floor 587 MHz. Finger-down 670 is dagu-touch-boost.py.
+# Do not use governor=performance.
 if [ -d /sys/class/devfreq/3d00000.gpu ]; then
-	printf '490000000\n' >/sys/class/devfreq/3d00000.gpu/min_freq || true
+	printf '587000000\n' >/sys/class/devfreq/3d00000.gpu/min_freq || true
 	printf '10\n' >/sys/class/devfreq/3d00000.gpu/polling_interval || true
 fi
 exit 0

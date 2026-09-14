@@ -16,3 +16,6 @@
 /firmware/dagu/.extract/
 /firmware/dagu/lib/
 /firmware/dagu/wlan_mac.bin
+
+# Host-built preload objects; sources are dagu-*.c next to them
+/scripts/libdagu-*.so

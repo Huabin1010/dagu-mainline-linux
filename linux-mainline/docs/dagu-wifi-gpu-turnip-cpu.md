@@ -56,6 +56,12 @@ BDF 继续用 dump `bd_l81a.elf` → `linux-mainline/firmware/dagu/lib/firmware/
 
 BLE 鼠标（如 MCHOSE A7 Pro，UUID `00001812` HID）走 BlueZ HOG：GATT 连上不等于能用。必须 `CONFIG_UHID=y`（`/dev/uhid`）和 `CONFIG_BT_LE=y`，否则 `bluetoothd` 报 `input-hog profile accept failed`，GNOME 显示 Connected，指针不动，鼠标一直闪配对灯。经典 BR/EDR HID 另外需要 `CONFIG_BT_HIDP=y`（不要只编成 `=m` 却不装模块）。
 
+经典键盘（Logitech K380，`LegacyPairing: yes`，UUID `00001124` HID）：BlueZ 5.64+ 默认 `ClassicBondedOnly=true`，`hidp_add_connection()` 会 `Rejected connection from !bonded device`。GNOME 设置里能点上、甚至显示 Connected，但 `/proc/bus/input/devices` 没有键盘节点，按键全无。配对 PIN 要在键盘上输入，HID 必须在 bonding 完成前放行。rootfs 写 `linux-mainline/bluetooth/input.conf` → 设备 `/etc/bluetooth/input.conf`：`ClassicBondedOnly=false`，`UserspaceHID=persist`（BlueZ #737：键盘睡醒第一键不被吃掉；不要 `UserspaceHID=false`，会 `br-connection-create-socket`）。配对后应看到 `Paired: yes` `Bonded: yes` 以及 `input: Keyboard K380`。
+
+K380 连上后按键很钝：内核默认 sniff 是 **80–800 slot（50–500 ms）**，那是通用 ACL，不是 HID。标准做法是**继续 sniff**（键鼠电台能睡、也能把平板从 s2idle 唤醒），只把间隔改成 HID 量级 **6–18 slot（3.75–11.25 ms）**：BlueZ `MinSniffInterval` / `MaxSniffInterval`（`linux-mainline/scripts/rootfs-desktop-setup.sh` 写进 `/etc/bluetooth/main.conf`），内核默认同样改在 `linux-mainline/scripts/apply-overlays.sh` → `linux-mainline/linux/net/bluetooth/hci_core.c`。对端发起 sniff 时内核仍保留 `HCI_CONN_POWER_SAVE`，主机 LED/输出报告可以 Exit Sniff，不是关 sniff。**不要**清掉 `HCI_LP_SNIFF`、**不要**把 uart6 `power/control` 钉成 `on`、**不要**关 QCA IBS。
+
+K380 点连接失败、体感比手机慢：鼠标是 BLE 广播，K380 是经典 BR/EDR 寻呼。Linux 默认 `Create Connection` 在 inquiry 缓存 >60 s 后用 **R2 + clock offset 0**，实机 `btmon` 就是这条然后 **Page Timeout (0x04)**。手机把 clock offset 留在配对记录里。正路：ACL 一起来就 `Read Clock Offset` 写入 inquiry 缓存，寻呼在本地 CLKN 连续期间（最长约 15 min）带上真实 offset；HID 主机 `HCI_LM_MASTER`（进来的 Accept 变成 Central）；page scan 用 **交错扫描**，BlueZ `FastConnectable=true`（HCI **Page** Scan Activity `0x0100/0x0012`，不要用 Inquiry Scan 的 OCF `0x1d` 去读）。**不要**把 HID `00001124` 放进 `ReconnectUUIDs`：主机盲寻呼会占住电台、关掉 page scan，键盘按键来连会对不上。GNOME 蓝牙面板开着会一直 INQUIRY，用完关掉。K380 三通道：适配器 power-cycle 后要长按**当初配对的那颗**通道键灯闪再连。`PageTimeout=16384`。不关睡眠。
+
 ## GPU / GMU / Turnip
 
 `&gpu` / `&gmu` / `&adreno_smmu` 为 okay。zap：`qcom/sm8250/xiaomi/dagu/a650_zap.mbn`（本机签名，不要 elish）。

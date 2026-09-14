@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Local dagu compositor/Venus lab. Replaces Bilibili homepage for jank.
+"""dagu compositor/Venus lab HTTP.
 
-On tablet: python3 /usr/local/sbin/dagu-pipeline-lab.py --serve
-From host: python3 linux-mainline/scripts/dagu-pipeline-lab.py --host
+Host (default): serve scripts/ on LAN :8770, stop the tablet copy,
+open Chrome on the tablet to http://<host-lan>:8770/...
+Tablet emergency only: python3 /usr/local/sbin/dagu-pipeline-lab.py --serve
 """
 from __future__ import annotations
 
@@ -19,9 +20,12 @@ from urllib.parse import urlparse
 
 HOST = os.environ.get("DAGU_SSH_HOST", "192.168.1.158")
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = Path(__file__).resolve().parent
 KEY = Path(os.environ.get("DAGU_SSH_KEY", str(ROOT / "out/id_dagu")))
 PORT = int(os.environ.get("DAGU_LAB_PORT", "8770"))
 SHARE = Path("/usr/local/share/dagu-pipeline-lab")
+SSH_CTRL = ROOT / "out" / "dagu-lab-ssh.sock"
+_STATS_CACHE: dict = {"t": 0.0, "s": {}}
 # Persistent clips (root is 100G+). /tmp is tmpfs and dies on reboot.
 CLIPDIR = Path(os.environ.get("DAGU_LAB_CLIPS", "/var/lib/dagu-pipeline-lab"))
 LAST_DUMP: dict = {}
@@ -85,11 +89,26 @@ def is_tablet() -> bool:
 
 
 def ssh_base() -> list[str]:
+    SSH_CTRL.parent.mkdir(parents=True, exist_ok=True)
     return [
         "ssh", "-i", str(KEY), "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=12",
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath={SSH_CTRL}",
+        "-o", "ControlPersist=120",
         f"root@{HOST}",
     ]
+
+
+def lan_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((HOST, 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
 
 
 def port_up(port: int) -> bool:
@@ -247,10 +266,19 @@ def video14_open() -> int:
     return n
 
 
-def stats() -> dict:
+def gpu_hz() -> int:
+    p = Path("/sys/class/devfreq/3d00000.gpu/cur_freq")
+    if p.exists():
+        return read_int(str(p))
+    for g in Path("/sys/class/devfreq").glob("*.gpu/cur_freq"):
+        return read_int(str(g))
+    return -1
+
+
+def local_stats() -> dict:
     s = {
         "gpu_busy": read_int("/sys/class/drm/card0/device/gpu_busy_percent"),
-        "gpu_hz": read_int("/sys/class/devfreq/3d00000.gpu/cur_freq"),
+        "gpu_hz": gpu_hz(),
         "venus_irq": venus_irq(),
         "vblank_fps": vblank_fps(),
         "video14": Path("/dev/video14").exists(),
@@ -258,18 +286,126 @@ def stats() -> dict:
         "video14_open": video14_open(),
         "chrome_rss_mb": chrome_rss_mb(),
         "t": time.monotonic(),
+        "src": "tablet",
     }
     s.update(meminfo())
     return s
 
 
-def start_http() -> ThreadingHTTPServer:
+REMOTE_STATS = r"""
+import json, os, time
+from pathlib import Path
+
+def read_int(path):
+    try:
+        return int(Path(path).read_text().strip())
+    except (OSError, ValueError):
+        return -1
+
+def venus_irq():
+    try:
+        for line in Path("/proc/interrupts").read_text().splitlines():
+            if "venus" not in line.lower() and "aa00000" not in line:
+                continue
+            total = 0
+            for tok in line.split()[1:]:
+                if tok.isdigit():
+                    total += int(tok)
+                else:
+                    break
+            return total
+    except OSError:
+        pass
+    return -1
+
+def vblank_fps():
+    p = Path("/sys/kernel/debug/dri/0/crtc-0/status")
+    if not p.exists():
+        return None
+    try:
+        for line in p.read_text(errors="replace").splitlines():
+            if "vblank" in line:
+                for tok in line.split():
+                    if tok.startswith("fps:"):
+                        return float(tok.split(":", 1)[1])
+    except (OSError, ValueError):
+        return None
+    return None
+
+def gpu_hz():
+    p = Path("/sys/class/devfreq/3d00000.gpu/cur_freq")
+    if p.exists():
+        return read_int(str(p))
+    for g in Path("/sys/class/devfreq").glob("*.gpu/cur_freq"):
+        return read_int(str(g))
+    return -1
+
+s = {
+    "gpu_busy": read_int("/sys/class/drm/card0/device/gpu_busy_percent"),
+    "gpu_hz": gpu_hz(),
+    "venus_irq": venus_irq(),
+    "vblank_fps": vblank_fps(),
+    "video14": Path("/dev/video14").exists(),
+    "video15": Path("/dev/video15").exists(),
+    "t": time.monotonic(),
+    "src": "tablet",
+}
+print(json.dumps(s))
+"""
+
+
+def tablet_stats_via_ssh() -> dict:
+    now = time.monotonic()
+    if now - _STATS_CACHE["t"] < 0.2 and _STATS_CACHE["s"]:
+        return _STATS_CACHE["s"]
+    try:
+        r = subprocess.run(
+            ssh_base() + ["python3", "-"],
+            input=REMOTE_STATS.encode(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+        s = json.loads(r.stdout.decode() or "{}")
+        if not isinstance(s, dict) or not s:
+            raise ValueError("empty stats")
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
+        s = {
+            "gpu_busy": None,
+            "gpu_hz": None,
+            "venus_irq": None,
+            "vblank_fps": None,
+            "t": now,
+            "src": "ssh-miss",
+        }
+    _STATS_CACHE["t"] = now
+    _STATS_CACHE["s"] = s
+    return s
+
+
+def stats() -> dict:
+    if is_tablet():
+        return local_stats()
+    return tablet_stats_via_ssh()
+
+
+def start_http(bind: str = "127.0.0.1", directory: Path | None = None) -> ThreadingHTTPServer:
+    docroot = str(directory or SHARE)
+
     class H(SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
-            super().__init__(*a, directory=str(SHARE), **k)
+            super().__init__(*a, directory=docroot, **k)
 
         def log_message(self, *_a):
             return
+
+        def end_headers(self):
+            path = urlparse(self.path).path
+            if path.endswith(".html") or path.endswith(".js"):
+                self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            super().end_headers()
 
         def _json(self, obj, code=200):
             body = json.dumps(obj).encode()
@@ -297,7 +433,7 @@ def start_http() -> ThreadingHTTPServer:
                 self._json(payload)
                 return
             if path in ("/", "/index.html"):
-                self.path = "/dagu-pipeline-tab.html"
+                self.path = "/dagu-glass-scroll.html"
             return SimpleHTTPRequestHandler.do_GET(self)
 
         def do_POST(self):
@@ -318,7 +454,7 @@ def start_http() -> ThreadingHTTPServer:
                 LAST_DUMP.update(data)
             self._json({"ok": True})
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", PORT), H)
+    httpd = ThreadingHTTPServer((bind, PORT), H)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
 
@@ -356,7 +492,7 @@ def serve(launch: bool) -> int:
     subprocess.run(["/usr/local/sbin/dagu-venus-load.sh"], check=False)
     ensure_all_clips()
     if not port_up(PORT):
-        start_http()
+        start_http("127.0.0.1", SHARE)
     print(f"http://127.0.0.1:{PORT}/dagu-pipeline-tab.html", flush=True)
     if launch:
         launch_chrome()
@@ -366,38 +502,83 @@ def serve(launch: bool) -> int:
         time.sleep(60)
 
 
-def host_main() -> int:
-    ssh = ssh_base()
-    scp = [
-        "scp", "-i", str(KEY), "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
-    ]
-    subprocess.run(scp + [
-        str(ROOT / "scripts/dagu-pipeline-lab.py"),
-        str(ROOT / "scripts/dagu-pipeline-lab.html"),
-        str(ROOT / "scripts/dagu-pipeline-tab.html"),
-        f"root@{HOST}:/tmp/",
-    ], check=True)
-    subprocess.run(ssh + [
-        "install -m755 /tmp/dagu-pipeline-lab.py /usr/local/sbin/dagu-pipeline-lab.py; "
-        "mkdir -p /usr/local/share/dagu-pipeline-lab; "
-        "install -m644 /tmp/dagu-pipeline-lab.html /usr/local/share/dagu-pipeline-lab/; "
-        "install -m644 /tmp/dagu-pipeline-tab.html /usr/local/share/dagu-pipeline-lab/; "
-        "pkill -f '/usr/local/sbin/dagu-pipeline-lab.py' || true; "
-        "nohup python3 /usr/local/sbin/dagu-pipeline-lab.py --serve "
-        ">/tmp/dagu-pipeline-lab.log 2>&1 &"
-    ], check=False)
-    return 0
+STOP_TABLET_LAB = r"""
+import os, signal
+from pathlib import Path
+for p in Path("/proc").iterdir():
+    if not p.name.isdigit():
+        continue
+    try:
+        cmd = (p / "cmdline").read_bytes()
+    except OSError:
+        continue
+    if b"dagu-pipeline-lab.py" in cmd:
+        try:
+            os.kill(int(p.name), signal.SIGTERM)
+        except OSError:
+            pass
+"""
+
+
+def stop_tablet_lab() -> None:
+    subprocess.run(
+        ssh_base() + ["python3", "-"],
+        input=STOP_TABLET_LAB.encode(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=8,
+        check=False,
+    )
+
+
+def launch_tablet_chrome(url: str) -> None:
+    quoted = json.dumps(url)
+    remote = f"""
+bp=$(pgrep -u dagu -f '^/usr/lib/chromium/chromium --ozone' | head -1 || true)
+if [ -n "$bp" ]; then kill "$bp"; sleep 1; fi
+sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 \\
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus HOME=/home/dagu \\
+  /usr/local/bin/dagu-chromium --start-maximized {quoted} \\
+  >/tmp/dagu-glass-open.log 2>&1 &
+"""
+    subprocess.run(ssh_base() + ["bash", "-lc", remote], check=False, timeout=20)
+
+
+def free_host_port(port: int) -> None:
+    subprocess.run(
+        ["fuser", "-k", f"{port}/tcp"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    time.sleep(0.35)
+
+
+def lan_main(launch: bool) -> int:
+    page = os.environ.get("DAGU_LAB_PAGE", "dagu-glass-scroll.html")
+    stop_tablet_lab()
+    free_host_port(PORT)
+    ip = lan_ip()
+    if not port_up(PORT):
+        start_http("0.0.0.0", SCRIPTS)
+    url = f"http://{ip}:{PORT}/{page}"
+    print(url, flush=True)
+    if launch:
+        launch_tablet_chrome(url)
+    if "--once" in sys.argv:
+        return 0
+    while True:
+        time.sleep(60)
 
 
 def main() -> int:
-    if "--host" in sys.argv:
-        return host_main()
     if "--serve" in sys.argv:
-        return serve(launch="--launch" in sys.argv)
+        if is_tablet():
+            return serve(launch="--launch" in sys.argv)
+        return lan_main(launch="--launch" in sys.argv)
     if is_tablet():
         return serve(launch=True)
-    return host_main()
+    return lan_main(launch="--no-launch" not in sys.argv)
 
 
 if __name__ == "__main__":

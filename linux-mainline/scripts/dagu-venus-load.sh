@@ -4,8 +4,6 @@
 # fail with ".gnu.linkonce.this_module section size must match".
 set -eu
 KVER=$(uname -r)
-EXTRA=/lib/modules/$KVER/extra
-[ -f "$EXTRA/venus-core.ko" ] || EXTRA=/root/venus-ko
 
 log() {
 	echo "dagu-venus-load: $*"
@@ -26,12 +24,53 @@ insmod_one() {
 	return 1
 }
 
+# This 7.0.0-dirty vmlinux rejects some rebuilt .ko BTF ("Invalid name", -22).
+# The text/data still match; drop .BTF and retry so userdata venus-new can
+# boot without a reflash.
+insmod_ko() {
+	ko=$1
+	insmod_one "$ko" && return 0
+	objcopy=$(command -v objcopy 2>/dev/null || command -v llvm-objcopy 2>/dev/null || true)
+	[ -n "$objcopy" ] || return 1
+	mkdir -p /run/dagu-venus
+	tmp=/run/dagu-venus/$(basename "$ko")
+	if "$objcopy" --remove-section=.BTF --remove-section=.BTF.ext "$ko" "$tmp" 2>/dev/null \
+		|| "$objcopy" --remove-section=.BTF "$ko" "$tmp" 2>/dev/null; then
+		log "retry stripped BTF $ko"
+		insmod_one "$tmp"
+		return $?
+	fi
+	return 1
+}
+
+core_loaded() {
+	lsmod | grep -q '^venus_core '
+}
+
+load_dir() {
+	dir=$1
+	[ -f "$dir/venus-core.ko" ] || return 1
+	if core_loaded; then
+		return 1
+	fi
+	log "using $dir"
+	insmod_ko "$dir/venus-core.ko" || return 1
+	insmod_ko "$dir/venus-dec.ko" || true
+	insmod_ko "$dir/venus-enc.ko" || true
+	[ -e /dev/video14 ]
+}
+
 modprobe videobuf2-v4l2 2>/dev/null || true
 modprobe v4l2-mem2mem 2>/dev/null || true
 if [ ! -e /dev/video14 ]; then
-	insmod_one "$EXTRA/venus-core.ko" || true
-	insmod_one "$EXTRA/venus-dec.ko" || true
-	insmod_one "$EXTRA/venus-enc.ko" || true
+	# venus-new: iterate without reflashing boot.img. extra/: ramdisk copy
+	# that matches this Image. Must fall back — preferring venus-new alone
+	# left /dev/video14 missing after every reboot (BTF -22).
+	for dir in /root/venus-new /lib/modules/$KVER/extra /root/venus-ko; do
+		if load_dir "$dir"; then
+			break
+		fi
+	done
 fi
 # Chrome / gst as dagu need rw on the decoder.
 if [ -e /dev/video14 ]; then

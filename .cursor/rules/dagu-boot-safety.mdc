@@ -1,40 +1,20 @@
 ---
-description: dagu 主线内核禁止 primary_entry 复位探针，以及会把平板打回兔子的操作
+description: 仅抑制已证实会把平板打回兔子的指令；禁止把抑制扩大成永久关掉硬件
 alwaysApply: true
 ---
 
-# dagu 启动安全（禁止闪退 fastboot）
+# dagu：毁机抑制（不是架构）
 
-## 绝对禁止
+下列是已证实会把飞行计算机打回兔子 `18d1:d00d` 的指令。禁止执行。禁止把本清单理解成「这些子系统以后都不要做」。
 
-- **禁止**把 `DAGU_PRIMARY_ENTRY_PROBE` 设为 `1` 或改回默认开启。
-- **禁止**在 `linux-mainline/linux/arch/arm64/kernel/head.S` 的 `primary_entry` 插入 PSCI `SYSTEM_RESET` / 死循环。那会让内核第一条指令就复位，主机约 25s 只看到兔子 `18d1:d00d`，关 SPI/DRM/UFS 都无效。
-- `linux-mainline/scripts/apply-overlays.sh` 必须默认 `DAGU_PRIMARY_ENTRY_PROBE=0`；`linux-mainline/scripts/build-kernel.sh` 若仍匹配 `dagu bringup: SMC-first primary_entry probe` 必须 `die`。
-- **禁止**对 `apply-overlays.sh` 做 `head|mv` 一类截断（会丢掉可执行位或卸探针逻辑）。
+## 禁止的写法（不是禁止子系统）
 
-## 编完 / 刷完必须查
+- **禁止** `DAGU_PRIMARY_ENTRY_PROBE=1`，禁止在 `linux-mainline/linux/arch/arm64/kernel/head.S` 的 `primary_entry` 插 PSCI `SYSTEM_RESET` / 死循环（调试探针不是飞行件）。
+- `linux-mainline/scripts/apply-overlays.sh` 默认 `DAGU_PRIMARY_ENTRY_PROBE=0`；`linux-mainline/scripts/build-kernel.sh` 若仍匹配 `dagu bringup: SMC-first primary_entry probe` 必须 `die`。禁止 `head|mv` 截断该脚本。
+- **禁止**给 wrapper 节点 `&qupv3_id_0` 加 `firmware-name`，禁止写 QUPV3 **wrapper CSR**。这不是禁止 per-SE IRAM 装固件，也不是禁止把 GENI SPI/I2C 做成产品。
+- **禁止**把 Himax `reset-gpios` 绑 GPIO100（面板 `tp-reset`，接错线）。
+- **禁止**把 `vreg_l3a_0p9` 改成 1.104V（CX 轨过压）。
 
-```text
-# head.S 必须直接 bl record_mmu_state，不能有 SYSTEM_RESET
-# 刷 B 槽后 g_serial 0525:a4a7 须保持 >30s，不能在 ~25s 变回 18d1:d00d
-```
+## 刷写
 
-只刷 B 槽；用 `linux-mainline/scripts/fb-usb.py`，**不要**用 Google `fastboot reboot`。救砖：`linux-mainline/scripts/flash-boot-legacy.sh restore-a`。
-
-## 触控 / QUP（这套 QHEE）
-
-- **禁止** `geni_load_se_fw()`、给 `&qupv3_id_0` 加 `firmware-name`、skip-firmware 后仍 `geni_se_init()` 写 SE MMIO。
-- 保持 `&spi4` / `&gpi_dma0` disabled，且 `# CONFIG_SPI_QCOM_GENI is not set`。
-- Himax 走 `spi-gpio`（CAF gpio8–11 + IRQ39），不要绑 GPIO100 `reset-gpios`（面板 `tp-reset`）。
-- `qcom_geni_serial` 禁止在 proto=INVALID 时 `geni_load_se_firmware()`（与 SPI 同一挂点）。`&qupv3_id_0` 仅作 uart6 父节点，不要加 `firmware-name`。
-
-## 错误示例
-
-```bash
-# ❌ 开机即兔子
-DAGU_PRIMARY_ENTRY_PROBE=1 ./scripts/build-kernel.sh
-
-# ✅
-DAGU_MINIMAL=1 DAGU_DISPLAY=1 ./scripts/build-kernel.sh
-# 确认 head.S 无 probe 后再 ./scripts/flash-boot.sh flash-b
-```
+编完 `head.S` 必须直接 `bl record_mmu_state`。只刷 B 槽；A 槽是救援计算机。用 `linux-mainline/scripts/fb-usb.py`。`g_serial` `0525:a4a7` 须 >30s。救砖：`linux-mainline/scripts/flash-boot-legacy.sh restore-a`。

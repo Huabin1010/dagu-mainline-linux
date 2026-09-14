@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>dagu glass scroll</title>
+<style>
+  html, body {
+    margin: 0; width: 100%; height: 100%; overflow: hidden;
+    background: #0a0a0c;
+    color: #f4f7fb;
+    font: 15px/1.35 "Noto Sans CJK SC", "Noto Sans", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Viewport-sized scene. Daily-like load: a few glass cards,
+     not the 88-layer torture feed. */
+  #scene {
+    position: fixed; inset: 0;
+    overflow: hidden;
+  }
+  #gl { display: none; }
+  .wallpaper {
+    position: absolute; inset: 0; z-index: 1; pointer-events: none;
+    background:
+      repeating-linear-gradient(118deg,
+        #ff2d55 0 28px, #ffcc00 28px 56px, #34c759 56px 84px,
+        #0a84ff 84px 112px, #bf5af2 112px 140px, #ff9f0a 140px 168px),
+      repeating-linear-gradient(28deg, transparent 0 18px, rgba(0,0,0,.22) 18px 36px);
+  }
+  .wallpaper .type {
+    position: absolute; inset: 6vh 3vw;
+    font: 800 40px/1.05 "Noto Sans CJK SC", sans-serif;
+    color: rgba(255,255,255,.55); word-break: break-all;
+  }
+  .wallpaper .checks {
+    position: absolute; right: 6vw; bottom: 12vh; width: 38vw; height: 26vh;
+    background: repeating-conic-gradient(#111 0% 25%, #f2f2f2 0% 50%) 0 0 / 36px 36px;
+    outline: 6px solid #fff;
+  }
+  #hud {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 50;
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
+    padding: 10px 12px; pointer-events: none;
+  }
+  #telem {
+    display: flex; flex-direction: column;
+    width: min(46vw, 760px);
+    height: 50vh;
+    background: rgba(8,10,16,.9);
+    border: 1px solid rgba(126,224,208,.4);
+    border-radius: 14px;
+    padding: 12px 14px 10px;
+    box-sizing: border-box;
+  }
+  #meters {
+    display: flex; flex-wrap: wrap; gap: 8px 18px;
+    font: 700 18px/1.3 ui-monospace, monospace;
+    color: #7ee0d0;
+    flex: 0 0 auto;
+  }
+  #m-fps { font-size: 34px; width: 100%; letter-spacing: .02em; }
+  .m b { color: #8b93a7; font-weight: 600; }
+  .m i { font-style: normal; }
+  .m.bad { color: #ff5d7a; } .m.warn { color: #ffd166; } .m.ok { color: #3dff9a; }
+  #charts {
+    display: grid; grid-template-columns: 1fr; grid-template-rows: 1fr 1fr;
+    gap: 10px; margin-top: 10px; flex: 1; min-height: 0;
+  }
+  #charts figure {
+    margin: 0; min-height: 0;
+    display: grid; grid-template-rows: auto 1fr;
+  }
+  #charts figcaption {
+    font: 700 13px/1.2 ui-monospace, monospace; color: #8b93a7; margin-bottom: 4px;
+  }
+  #charts canvas {
+    display: block; width: 100%; height: 100%; min-height: 0;
+    background: #05070c; border-radius: 8px;
+  }
+  #btns { pointer-events: auto; display: flex; flex-direction: column; gap: 4px; }
+  #btns button {
+    border: 0; border-radius: 6px; padding: 5px 10px; font-weight: 800;
+    background: #1a2233; color: #e8edf7;
+  }
+  #btns button.on { background: #2ad47a; color: #041; }
+  #arena { position: absolute; inset: 0; z-index: 20; pointer-events: none; }
+  .flyer {
+    position: absolute; overflow: hidden; border-radius: 18px;
+    display: grid; place-items: center;
+    font-weight: 800; color: #111;
+    background: rgba(255,255,255,.28);
+    border: 1px solid rgba(255,255,255,.5);
+    backdrop-filter: blur(14px) saturate(1.35);
+    -webkit-backdrop-filter: blur(14px) saturate(1.35);
+  }
+  #feed { position: absolute; left: 0; right: 0; top: 0; z-index: 10; padding: 72px 14px 48px; }
+  .card {
+    min-height: 108px; margin: 18px 0 0; border-radius: 22px;
+    padding: 16px 20px; display: flex; flex-direction: column; justify-content: center;
+    font-weight: 800;
+  }
+  .card small { display: block; font: 700 13px/1.2 monospace; opacity: .8; margin-bottom: 6px; }
+  .card strong { font-size: 26px; }
+  .g-light {
+    color: #111; background: rgba(255,255,255,.28);
+    border: 1px solid rgba(255,255,255,.55);
+    backdrop-filter: blur(8px) saturate(1.2);
+    -webkit-backdrop-filter: blur(8px) saturate(1.2);
+  }
+  .g-mid {
+    color: #111; background: rgba(255,255,255,.2);
+    border: 1px solid rgba(255,255,255,.4);
+    backdrop-filter: blur(10px) saturate(1.2);
+    -webkit-backdrop-filter: blur(10px) saturate(1.2);
+  }
+  .g-heavy {
+    color: #102018; background: rgba(240,248,255,.16);
+    border: 1px solid rgba(255,255,255,.35);
+    backdrop-filter: blur(12px) saturate(1.25);
+    -webkit-backdrop-filter: blur(12px) saturate(1.25);
+  }
+  .g-dark {
+    color: #fff; background: rgba(8,10,16,.42);
+    border: 1px solid rgba(255,255,255,.16);
+    backdrop-filter: blur(8px) saturate(1.15);
+    -webkit-backdrop-filter: blur(8px) saturate(1.15);
+  }
+  .g-radio {
+    color: #fff; background: rgba(12,16,22,.38);
+    border: 1px solid rgba(126,224,208,.35);
+    backdrop-filter: blur(8px) saturate(1.2);
+    -webkit-backdrop-filter: blur(8px) saturate(1.2);
+  }
+  .g-bright {
+    color: #111; background: rgba(255,255,255,.18);
+    border: 1px solid rgba(255,255,255,.5);
+    backdrop-filter: blur(8px) brightness(1.08);
+    -webkit-backdrop-filter: blur(8px) brightness(1.08);
+  }
+  .g-tiny {
+    width: 92px; height: 92px; min-height: 92px; border-radius: 50%;
+    align-items: center; text-align: center; color: #111;
+    background: rgba(255,255,255,.3);
+    backdrop-filter: blur(8px) saturate(1.2);
+    -webkit-backdrop-filter: blur(8px) saturate(1.2);
+  }
+  .g-bar {
+    min-height: 64px; flex-direction: row; align-items: center; gap: 18px;
+    color: #111; background: rgba(255,255,255,.26);
+    border: 1px solid rgba(255,255,255,.5);
+    backdrop-filter: blur(10px) saturate(1.2);
+    -webkit-backdrop-filter: blur(10px) saturate(1.2);
+  }
+  .solid { color: #fff; background: #1a2230; border: 2px solid #7ee0d0; }
+  .noblur { color: #111; background: rgba(255,255,255,.28); border: 1px dashed #111; }
+  .k-wrap { position: relative; overflow: hidden; color: #111; border: 1px solid rgba(0,0,0,.25); }
+  .k-bg {
+    position: absolute; inset: -24px;
+    background: repeating-linear-gradient(118deg,
+      #ff2d55 0 28px, #ffcc00 28px 56px, #34c759 56px 84px,
+      #0a84ff 84px 112px, #bf5af2 112px 140px, #ff9f0a 140px 168px);
+    filter: blur(12px);
+  }
+  .k-wrap small, .k-wrap strong { position: relative; z-index: 1; }
+</style>
+</head>
+<body>
+<div id="scene">
+<canvas id="gl"></canvas>
+<div class="wallpaper" id="wall">
+  <div class="type">小米平板 玻璃滚动 DAGU GLASS 彩虹条 棋盘 你好世界 ABCXYZ 0123456789</div>
+  <div class="checks"></div>
+</div>
+<div id="hud">
+  <div id="telem">
+    <div id="meters">
+      <span class="m" id="m-fps"><b>FPS</b> <i>—</i></span>
+      <span class="m" id="m-mean"><b>mean</b> <i>—</i></span>
+      <span class="m" id="m-raf"><b>rAF</b> <i>—</i></span>
+      <span class="m" id="m-p50"><b>p50</b> <i>—</i></span>
+      <span class="m" id="m-p99"><b>p99</b> <i>—</i></span>
+      <span class="m" id="m-max"><b>max</b> <i>—</i></span>
+      <span class="m" id="m-hole"><b>&gt;16.7</b> <i>0</i></span>
+      <span class="m" id="m-gap"><b>&gt;50</b> <i>0</i></span>
+      <span class="m" id="m-gpu"><b>GPU</b> <i>—</i></span>
+      <span class="m" id="m-vbl"><b>vbl</b> <i>—</i></span>
+      <span class="m" id="m-dpr"><b>DPR</b> <i>—</i></span>
+    </div>
+    <div id="charts">
+      <figure>
+        <figcaption>FPS · 虚线 = 目标帧率 + 帧时</figcaption>
+        <canvas id="c-fps"></canvas>
+      </figure>
+      <figure>
+        <figcaption>帧时 ms · 虚线 = 生成时间 + 对应 fps</figcaption>
+        <canvas id="c-ms"></canvas>
+      </figure>
+    </div>
+  </div>
+  <div id="btns">
+    <button data-scene="idle" class="on">静置</button>
+    <button data-scene="slow">慢滑</button>
+    <button data-scene="chaos">乱窜</button>
+  </div>
+</div>
+<div id="arena"></div>
+<div id="feed"></div>
+</div>
+<script>
+(function () {
+  const SPECS = [
+    { cls: "g-bar", small: "A 搜索条 blur(10)", strong: "玻璃 BLOOM 搜索 小米平板" },
+    { cls: "g-light", small: "B 浅色霜 blur(8)", strong: "浅色玻璃 应透出彩虹条" },
+    { cls: "g-dark", small: "E 深色霜 blur(8)", strong: "深色玻璃 你好世界 0123" },
+    { cls: "g-tiny", small: "H", strong: "圆" },
+    { cls: "solid", small: "I 实色对照", strong: "实色对照 小米平板" },
+    { cls: "noblur", small: "J 半透明无 blur", strong: "无模糊 应能看清底纹" }
+  ];
+  const feed = document.getElementById("feed");
+  const wall = document.getElementById("wall");
+  const frag = document.createDocumentFragment();
+  SPECS.forEach((spec) => {
+    const c = document.createElement("div");
+    c.className = "card " + spec.cls;
+    const small = document.createElement("small");
+    small.textContent = spec.small;
+    const strong = document.createElement("strong");
+    strong.textContent = spec.strong;
+    c.appendChild(small);
+    c.appendChild(strong);
+    frag.appendChild(c);
+  });
+  feed.appendChild(frag);
+
+  const flock = [];
+  const arena = document.getElementById("arena");
+  flock.forEach((f) => {
+    const el = document.createElement("div");
+    el.className = "flyer";
+    el.style.width = f.w + "px";
+    el.style.height = f.h + "px";
+    if (f.w === f.h) el.style.borderRadius = "50%";
+    el.textContent = f.label;
+    arena.appendChild(el);
+    f.el = el;
+  });
+
+  let last = 0, scene = "idle", auto = 0, viewY = 0;
+  document.querySelectorAll("#btns button").forEach((b) => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll("#btns button").forEach((x) => x.classList.remove("on"));
+      b.classList.add("on");
+      scene = b.dataset.scene;
+      auto = scene === "slow" ? 0.22 : scene === "chaos" ? 0.5 : 0;
+      if (scene === "idle") viewY = 0;
+    });
+  });
+  const stage = document.getElementById("scene");
+  function viewH() {
+    const vv = window.visualViewport;
+    return (vv && vv.height) || stage.clientHeight || innerHeight;
+  }
+  function viewW() {
+    const vv = window.visualViewport;
+    return (vv && vv.width) || stage.clientWidth || innerWidth;
+  }
+  function feedMax() { return Math.max(0, feed.offsetHeight - viewH()); }
+
+  const N = 180;
+  const dts = [];
+  let holes16 = 0, holes50 = 0, tick = 0;
+  let p50 = 0, p99 = 0, msMax = 0, meanFps = 0;
+  let hw = {};
+  function setMeter(id, text, kind) {
+    const root = document.getElementById(id);
+    const i = root && root.querySelector("i");
+    if (i) i.textContent = text;
+    if (root) root.className = "m" + (kind ? " " + kind : "");
+  }
+  function pct(arr, q) {
+    if (!arr.length) return 0;
+    const s = arr.slice().sort((a, b) => a - b);
+    return s[Math.min(s.length - 1, Math.floor(s.length * q))];
+  }
+  function fpsKind(v) { return v >= 110 ? "ok" : v >= 90 ? "warn" : "bad"; }
+  function msKind(v) { return v > 50 ? "bad" : v > 8.4 ? "warn" : "ok"; }
+  function sizeChart(el) {
+    const dpr = window.devicePixelRatio || 1;
+    const r = el.getBoundingClientRect();
+    el.width = Math.max(1, Math.floor(r.width * dpr));
+    el.height = Math.max(1, Math.floor(r.height * dpr));
+  }
+  function drawLine(el, values, ymin, ymax, targets) {
+    const ctx = el.getContext("2d");
+    const w = el.width, h = el.height;
+    const dpr = window.devicePixelRatio || 1;
+    ctx.clearRect(0, 0, w, h);
+    ctx.globalAlpha = 0.95;
+    const fontPx = Math.max(12, Math.round(14 * dpr));
+    (targets || []).forEach((tg) => {
+      const y = h - ((tg.y - ymin) / (ymax - ymin)) * h;
+      ctx.strokeStyle = tg.c;
+      ctx.lineWidth = Math.max(1.5, h / 180);
+      ctx.setLineDash([7 * dpr, 5 * dpr]);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (!tg.label) return;
+      ctx.font = "700 " + fontPx + "px ui-monospace, monospace";
+      const padX = 6 * dpr, padY = 3 * dpr;
+      const tw = ctx.measureText(tg.label).width;
+      const th = fontPx + padY * 2;
+      const tx = w - tw - padX * 2 - 6 * dpr;
+      let ty = y - th - 2 * dpr;
+      if (ty < 2) ty = y + 4 * dpr;
+      ctx.fillStyle = "rgba(5,7,12,.82)";
+      ctx.fillRect(tx, ty, tw + padX * 2, th);
+      ctx.fillStyle = tg.c;
+      ctx.textBaseline = "middle";
+      ctx.fillText(tg.label, tx + padX, ty + th / 2);
+    });
+    ctx.setLineDash([]);
+    if (values.length < 2) return;
+    ctx.strokeStyle = "#7ee0d0";
+    ctx.lineWidth = Math.max(2, h / 90);
+    ctx.beginPath();
+    const last = values.length - 1;
+    values.forEach((v, i) => {
+      const x = (i / last) * (w - 1);
+      const y = h - ((Math.min(ymax, Math.max(ymin, v)) - ymin) / (ymax - ymin)) * (h - 1);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  const cFps = document.getElementById("c-fps");
+  const cMs = document.getElementById("c-ms");
+  function pollHw() {
+    fetch("/api/stats").then((r) => r.json()).then((s) => { hw = s || {}; }).catch(() => {});
+  }
+  pollHw();
+  setInterval(pollHw, 250);
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    sizeChart(cFps);
+    sizeChart(cMs);
+    setMeter("m-dpr", dpr.toFixed(2) + " " + Math.round(viewW()) + "x" + Math.round(viewH()) +
+      " css");
+  }
+  window.addEventListener("resize", resize);
+  if (window.visualViewport)
+    window.visualViewport.addEventListener("resize", resize);
+  resize();
+  function raf(ts) {
+    const dt = last ? ts - last : 8.3;
+    last = ts;
+    dts.push(dt);
+    if (dts.length > N) dts.shift();
+    if (dt > 16.7) holes16++;
+    if (dt > 50) holes50++;
+    if ((tick++ & 3) === 0 && dts.length) {
+      const sum = dts.reduce((a, b) => a + b, 0);
+      meanFps = 1000 / (sum / dts.length);
+      p50 = pct(dts, 0.5);
+      p99 = pct(dts, 0.99);
+      msMax = Math.max.apply(null, dts);
+      const inst = 1000 / dt;
+      setMeter("m-fps", inst.toFixed(0), fpsKind(meanFps));
+      setMeter("m-mean", meanFps.toFixed(1), fpsKind(meanFps));
+      setMeter("m-raf", dt.toFixed(1) + "ms", msKind(dt));
+      setMeter("m-p50", p50.toFixed(1), msKind(p50));
+      setMeter("m-p99", p99.toFixed(1), msKind(p99));
+      setMeter("m-max", msMax.toFixed(1), msKind(msMax));
+      setMeter("m-hole", String(holes16), holes16 ? "warn" : "ok");
+      setMeter("m-gap", String(holes50), holes50 ? "bad" : "ok");
+      const busy = hw.gpu_busy;
+      setMeter("m-gpu", (busy != null && busy >= 0) ? busy + "%" : "—",
+        (busy == null || busy < 0) ? "" : busy >= 95 ? "warn" : "ok");
+      const vbl = hw.vblank_fps;
+      setMeter("m-vbl", vbl != null ? Number(vbl).toFixed(0) : "—",
+        vbl == null ? "" : vbl >= 110 ? "ok" : "warn");
+      const fpsSeries = dts.map((x) => x > 0 ? 1000 / x : 0);
+      drawLine(cFps, fpsSeries, 0, 130, [
+        { y: 120, c: "#3dff9a", label: "120 fps · 8.3 ms" },
+        { y: 60, c: "#ffd166", label: "60 fps · 16.7 ms" }
+      ]);
+      drawLine(cMs, dts, 0, 33, [
+        { y: 8.33, c: "#3dff9a", label: "8.3 ms · 120 fps" },
+        { y: 16.7, c: "#ffd166", label: "16.7 ms · 60 fps" }
+      ]);
+    }
+    const scale = scene === "chaos" ? 0.7 : scene === "idle" ? 0 : 0.3;
+    const maxX = viewW() - 40, maxY = viewH() - 90;
+    flock.forEach((f) => {
+      f.x += f.vx * scale; f.y += f.vy * scale; f.rot += f.vr * scale;
+      if (f.x < -20 || f.x > maxX - f.w + 20) f.vx *= -1;
+      if (f.y < -20 || f.y > maxY - f.h + 20) f.vy *= -1;
+      f.el.style.transform = "translate3d(" + f.x.toFixed(1) + "px," +
+        f.y.toFixed(1) + "px,0) rotate(" + f.rot.toFixed(1) + "deg)";
+    });
+    if (auto) {
+      viewY += auto * 4;
+      if (viewY >= feedMax() || viewY <= 0) auto = -auto;
+    }
+    viewY = Math.max(0, Math.min(feedMax(), viewY));
+    feed.style.transform = "translate3d(0," + (-viewY).toFixed(1) + "px,0)";
+    requestAnimationFrame(raf);
+  }
+  requestAnimationFrame(raf);
+})();
+</script>
+</body>
+</html>

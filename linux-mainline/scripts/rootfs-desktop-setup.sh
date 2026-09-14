@@ -29,6 +29,8 @@ apt-get install -y --no-install-recommends \
 	gnome-control-center gnome-settings-daemon nautilus \
 	resources gnome-text-editor gnome-calculator gnome-clocks \
 	gnome-characters gnome-disk-utility file-roller eog evince \
+	gnome-snapshot gstreamer1.0-libcamera libcamera-ipa libspa-0.2-libcamera \
+	gir1.2-gst-plugins-base-1.0 \
 	libgl1-mesa-dri libgbm1 mesa-vulkan-drivers \
 	libinput-bin xserver-xorg-input-libinput \
 	fonts-noto-core fonts-noto-cjk \
@@ -51,6 +53,41 @@ for g in sudo video render input plugdev bluetooth audio; do
 done
 echo 'dagu ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/dagu
 chmod 440 /etc/sudoers.d/dagu
+
+# Classic HID keyboards (K380): BlueZ 5.64+ rejects unbonded HIDP by default,
+# so GNOME can show Connected while hidp_add_connection fails and no evdev
+# node appears. Pairing PIN is typed on the keyboard, so HID must be allowed
+# before bonding. See linux-mainline/bluetooth/input.conf.
+mkdir -p /etc/bluetooth
+cat >/etc/bluetooth/input.conf <<'EOF'
+[General]
+ClassicBondedOnly=false
+UserspaceHID=persist
+EOF
+# HID host (classic keyboard + BLE mouse): keep sniff / UART RPM / QCA IBS.
+# Sniff 6–18 slots = 3.75–11.25 ms (not the ACL 80–800). FastConnectable is
+# interlaced page scan at 160 ms so a waking K380 can page us. PageTimeout
+# 10.24 s because QCA6390 shares the radio with LE HID.
+# ReconnectUUIDs stays audio-only. Classic HID keyboards page the host on
+# keypress; if bluetoothd outgoing-pages them for PageTimeout the radio is
+# not in page scan and both sides miss. Do not add HID 00001124.
+# Do not clear HCI_LP_SNIFF or pin UART on.
+bt_main_set() {
+	local key=$1 val=$2 file=/etc/bluetooth/main.conf
+	[ -f "$file" ] || return 0
+	if grep -qE "^#?${key}" "$file"; then
+		sed -i -E "s|^#?${key}.*|${key}=${val}|" "$file"
+	else
+		printf '\n%s=%s\n' "$key" "$val" >>"$file"
+	fi
+}
+bt_main_set MinSniffInterval 6
+bt_main_set MaxSniffInterval 18
+bt_main_set PageTimeout 16384
+bt_main_set FastConnectable true
+bt_main_set PageScanInterval 0x0100
+bt_main_set PageScanWindow 0x0012
+bt_main_set ReconnectUUIDs '00001112-0000-1000-8000-00805f9b34fb,0000111f-0000-1000-8000-00805f9b34fb,0000110a-0000-1000-8000-00805f9b34fb,0000110b-0000-1000-8000-00805f9b34fb'
 
 mkdir -p /etc/gdm3
 cat >/etc/gdm3/custom.conf <<'EOF'
@@ -1779,6 +1816,59 @@ monitor.alsa.rules = [
   }
 ]
 EOF
+# Snapshot 50 lists PipeWire Video/Source with a non-empty EnumFormat.
+# libcamera wins CAMSS arbitration but has no UDMABUF (software ISP off →
+# EnumFormat=[] → "No camera found"). spa-v4l2 cannot open MPLANE RDI.
+# Keep libcamera off; dagu-camera-pw-source.py provides NV12 instead.
+cat >/etc/wireplumber/wireplumber.conf.d/60-dagu-camera.conf <<'EOF'
+wireplumber.profiles = {
+  main = {
+    monitor.libcamera = disabled
+  }
+}
+monitor.v4l2.rules = [
+  {
+    matches = [
+      { api.v4l2.path = "/dev/video1" }
+      { api.v4l2.path = "/dev/video2" }
+      { api.v4l2.path = "/dev/video4" }
+      { api.v4l2.path = "/dev/video5" }
+      { api.v4l2.path = "/dev/video6" }
+      { api.v4l2.path = "/dev/video7" }
+      { api.v4l2.path = "/dev/video8" }
+      { api.v4l2.path = "/dev/video9" }
+      { api.v4l2.path = "/dev/video10" }
+      { api.v4l2.path = "/dev/video11" }
+      { api.v4l2.path = "/dev/video12" }
+      { api.v4l2.path = "/dev/video13" }
+      { api.v4l2.path = "/dev/video14" }
+      { api.v4l2.path = "/dev/video15" }
+    ]
+    actions = {
+      update-props = {
+        node.disabled = true
+      }
+    }
+  }
+]
+EOF
+cat >/etc/systemd/user/dagu-camera-pw-source.service <<'EOF'
+[Unit]
+Description=dagu PipeWire NV12 camera for GNOME Snapshot
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/dagu-camera-pw-source.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+mkdir -p /etc/systemd/user/default.target.wants
+ln -sf /etc/systemd/user/dagu-camera-pw-source.service \
+	/etc/systemd/user/default.target.wants/dagu-camera-pw-source.service
 # Do not put hw:0,0 in pipewire context.objects. Opening the PCM
 # before /proc/asound/cards exists exits PipeWire 234 and systemd
 # start-limits the socket for the whole session.
@@ -2072,14 +2162,15 @@ systemctl enable --now dagu-touch-boost.service >/dev/null 2>&1 || true
 # Keep in sync with linux-mainline/scripts/dagu-venus-load.sh
 cat >/usr/local/sbin/dagu-venus-load.sh <<'EOF'
 #!/bin/sh
+# Keep in sync with linux-mainline/scripts/dagu-venus-load.sh
 set -eu
 KVER=$(uname -r)
-EXTRA=/lib/modules/$KVER/extra
-[ -f "$EXTRA/venus-core.ko" ] || EXTRA=/root/venus-ko
+
 log() {
 	echo "dagu-venus-load: $*"
 	echo "dagu-venus-load: $*" >/dev/kmsg 2>/dev/null || true
 }
+
 insmod_one() {
 	ko=$1
 	if [ ! -f "$ko" ]; then
@@ -2093,12 +2184,48 @@ insmod_one() {
 	log "insmod failed $ko"
 	return 1
 }
+
+insmod_ko() {
+	ko=$1
+	insmod_one "$ko" && return 0
+	objcopy=$(command -v objcopy 2>/dev/null || command -v llvm-objcopy 2>/dev/null || true)
+	[ -n "$objcopy" ] || return 1
+	mkdir -p /run/dagu-venus
+	tmp=/run/dagu-venus/$(basename "$ko")
+	if "$objcopy" --remove-section=.BTF --remove-section=.BTF.ext "$ko" "$tmp" 2>/dev/null \
+		|| "$objcopy" --remove-section=.BTF "$ko" "$tmp" 2>/dev/null; then
+		log "retry stripped BTF $ko"
+		insmod_one "$tmp"
+		return $?
+	fi
+	return 1
+}
+
+core_loaded() {
+	lsmod | grep -q '^venus_core '
+}
+
+load_dir() {
+	dir=$1
+	[ -f "$dir/venus-core.ko" ] || return 1
+	if core_loaded; then
+		return 1
+	fi
+	log "using $dir"
+	insmod_ko "$dir/venus-core.ko" || return 1
+	insmod_ko "$dir/venus-dec.ko" || true
+	insmod_ko "$dir/venus-enc.ko" || true
+	[ -e /dev/video14 ]
+}
+
 modprobe videobuf2-v4l2 2>/dev/null || true
 modprobe v4l2-mem2mem 2>/dev/null || true
 if [ ! -e /dev/video14 ]; then
-	insmod_one "$EXTRA/venus-core.ko" || true
-	insmod_one "$EXTRA/venus-dec.ko" || true
-	insmod_one "$EXTRA/venus-enc.ko" || true
+	for dir in /root/venus-new /lib/modules/$KVER/extra /root/venus-ko; do
+		if load_dir "$dir"; then
+			break
+		fi
+	done
 fi
 if [ -e /dev/video14 ]; then
 	chgrp video /dev/video14 /dev/video15 2>/dev/null || true

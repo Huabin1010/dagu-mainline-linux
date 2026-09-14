@@ -56,10 +56,15 @@ ls -l /tmp/mic.wav 2>/dev/null || true
 echo ===pipeline-links===
 MC=/dev/media0
 media-ctl -d $MC -p 2>/dev/null | head -5 || true
+S5K=$(media-ctl -d $MC -p | sed -n "s/^- entity [0-9]*: \\(s5kjn1 [^ ]*\\) (.*/\\1/p" | head -1)
+IMX=$(media-ctl -d $MC -p | sed -n "s/^- entity [0-9]*: \\(imx596[^ ]* [^ ]*\\) (.*/\\1/p" | head -1)
+echo "entities: S5K=$S5K IMX=$IMX"
 # Rear s5kjn1 -> csiphy1 -> csid0 -> vfe0_rdi0
 media-ctl -d $MC -l "\"msm_csiphy1\":1 -> \"msm_csid0\":0[1]" || true
 media-ctl -d $MC -l "\"msm_csid0\":1 -> \"msm_vfe0_rdi0\":0[1]" || true
-media-ctl -d $MC -V "\"s5kjn1 27-0010\":0[fmt:SGBRG10_1X10/4080x3060 field:none]" || true
+if [ -n "$S5K" ]; then
+  media-ctl -d $MC -V "\"$S5K\":0[fmt:SGBRG10_1X10/4080x3060 field:none]" || true
+fi
 media-ctl -d $MC -V "\"msm_csiphy1\":0[fmt:SGBRG10_1X10/4080x3060 field:none]" || true
 media-ctl -d $MC -V "\"msm_csiphy1\":1[fmt:SGBRG10_1X10/4080x3060 field:none]" || true
 media-ctl -d $MC -V "\"msm_csid0\":0[fmt:SGBRG10_1X10/4080x3060 field:none]" || true
@@ -68,7 +73,9 @@ media-ctl -d $MC -V "\"msm_vfe0_rdi0\":0[fmt:SGBRG10_1X10/4080x3060 field:none]"
 # Front imx596 -> csiphy4 -> csid1 -> vfe1_rdi0
 media-ctl -d $MC -l "\"msm_csiphy4\":1 -> \"msm_csid1\":0[1]" || true
 media-ctl -d $MC -l "\"msm_csid1\":1 -> \"msm_vfe1_rdi0\":0[1]" || true
-media-ctl -d $MC -V "\"imx596-dagu 30-0010\":0[fmt:SBGGR10_1X10/2592x1952 field:none]" || true
+if [ -n "$IMX" ]; then
+  media-ctl -d $MC -V "\"$IMX\":0[fmt:SBGGR10_1X10/2592x1952 field:none]" || true
+fi
 media-ctl -d $MC -V "\"msm_csiphy4\":0[fmt:SBGGR10_1X10/2592x1952 field:none]" || true
 media-ctl -d $MC -V "\"msm_csiphy4\":1[fmt:SBGGR10_1X10/2592x1952 field:none]" || true
 media-ctl -d $MC -V "\"msm_csid1\":0[fmt:SBGGR10_1X10/2592x1952 field:none]" || true
@@ -76,18 +83,17 @@ media-ctl -d $MC -V "\"msm_csid1\":1[fmt:SBGGR10_1X10/2592x1952 field:none]" || 
 media-ctl -d $MC -V "\"msm_vfe1_rdi0\":0[fmt:SBGGR10_1X10/2592x1952 field:none]" || true
 echo ===v4l===
 ls /dev/video* /dev/media* 2>/dev/null || true
-echo ===test-pattern===
+echo ===subdevs===
 for s in /dev/v4l-subdev*; do
   info=$(v4l2-ctl -d "$s" --info 2>/dev/null | grep -i "Card type" || true)
   echo "$s $info"
-  v4l2-ctl -d "$s" --set-ctrl test_pattern=1 2>/dev/null && echo "test_pattern on $s" || true
 done
 echo ===rear-stream===
 # msm_vfe0_video0 = /dev/video0. 10-bit GBRG packed fourcc is pGAA.
 rear=/dev/video0
 echo using $rear pGAA 4080x3060
 rm -f /tmp/rear.raw
-timeout 8 v4l2-ctl -d "$rear" --set-fmt-video=width=4080,height=3060,pixelformat=pGAA \
+timeout 20 v4l2-ctl -d "$rear" --set-fmt-video=width=4080,height=3060,pixelformat=pGAA \
   --stream-mmap --stream-count=1 --stream-to=/tmp/rear.raw &
 RSP=$!
 sleep 1
@@ -103,7 +109,7 @@ media-ctl -d $MC -l "\"msm_csid1\":1 -> \"msm_vfe1_rdi0\":0[1]" || true
 front=/dev/video3
 echo using $front pBAA 2592x1952
 rm -f /tmp/front.raw
-timeout 8 v4l2-ctl -d "$front" --set-fmt-video=width=2592,height=1952,pixelformat=pBAA \
+timeout 12 v4l2-ctl -d "$front" --set-fmt-video=width=2592,height=1952,pixelformat=pBAA \
   --stream-mmap --stream-count=1 --stream-to=/tmp/front.raw || true
 ls -l /tmp/front.raw 2>/dev/null || true
 echo ===imx596===

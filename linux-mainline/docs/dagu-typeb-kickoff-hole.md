@@ -100,5 +100,7 @@ v6 证明：GTK 的 100 ms 冻可以用「付完 done 不要拆 GSource」解开
 - 专文：`linux-mainline/docs/dagu-identity-kickoff-hole-problem.md`（§109–§110）
 - 尝试表：`linux-mainline/out/display-stress/dagu-typeb-mutter-fix-debug-20260914.md`
 - 上游对照：`linux-mainline/out/display-stress/dagu-typeb-fix-upstream-20260914.md`
+- 安卓管线对照：`linux-mainline/docs/dagu-typeb-android-pipeline.md`（活机 `53dcc70`，只读）
+- 安卓原始落盘：`linux-mainline/out/android-extract/display-pipeline/`
 - 验收：`linux-mainline/scripts/dagu-native-lab.py`
 - 合钟抓痕：`linux-mainline/scripts/dagu-interlock.bt`

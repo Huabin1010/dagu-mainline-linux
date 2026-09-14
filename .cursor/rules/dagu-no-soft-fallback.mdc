@@ -1,30 +1,32 @@
 ---
-description: 禁止用 CPU/软解了事；Chrome GPU 与视频必须对齐硬件一线，先查源码和公开资料再动手
+description: GPU、Venus 硬解、Chrome 高性能渲染/硬解是硬要求，任何形式的软件解码或 CPU 栅格都算不合格
 alwaysApply: true
 ---
 
-# dagu：禁止软解 / CPU 退路（对齐一线）
+# dagu：GPU / Chrome / Venus 硬要求（零妥协）
 
-适配 GPU、合成、编解码时，**目标是硬件一线**，不是「能播就行」。查不清就继续查，不要改开关把负载推回 CPU。
+GPU 实现、硬件解码、Chrome 高性能渲染与硬解是产品硬要求。任何形式把负载推回 CPU（软解、软件栅格、llvmpipe、SwiftShader、关加速 flag）都禁止合入、禁止当交付、禁止当「先这样」。
 
-## 绝对禁止
+## 正路
 
-- **禁止**把 Chrome / Mineradio / 网页视频退回 CPU 栅格或 FFmpeg 软解当作交付。
-- **禁止**`--disable-gpu-rasterization`、`--disable-accelerated-video-decode`、强制 `FFmpegVideoDecoder`、`gsettings … force-software-decoders`。
-- **禁止**用 VA-API 冒充 Venus。Venus 是 `/dev/video14` stateful V4L2 m2m，不是 libva，不是 v4l2 request。
-- **禁止**在只搜了本仓库、`venus_irq_delta=0` 时写「Chrome 没有 V4L2，只能软解」然后收工。
+- GPU：Turnip Adreno 650（`/dev/dri/renderD128`），合成走 msm/DPU atomic，不是 llvmpipe
+- 解码：stateful V4L2 m2m `qcom-venus`（板上 `/dev/video14`）；编码走 Venus（`/dev/video15`）
+- Chrome：必须是 `use_v4l2_codec=true` 的 Chromium（`V4L2StatefulVideoDecoder`）。包装：`linux-mainline/scripts/dagu-chromium-native.sh`
+- 官方 `/opt/google/chrome/chrome` 是 `USE_V4L2=0`，**禁止**拿它测硬解或当一线浏览器
 
-## 必须先做
+## 任何形式都禁止
 
-1. **Search web**：Chromium `USE_V4L2_CODEC`、`V4L2VideoDecoder`、Linux ARM / SM8250 / ChromeOS 直通解码、`AcceleratedVideoDecodeLinuxGL`。
-2. **读源码**：本机 Chrome 树、`/opt/google/chrome/chrome` 字符串、Mesa 活树、`linux-mainline/docs/dagu-venus.md`。
-3. **验收硬路径**：`chrome://gpu` 每一项 Hardware；播片时 `venus_irq` 上升、进程打开 `/dev/video14`。软解数字下降不算过。
-4. **测每一项**再改下一项。截图走 `linux-mainline/scripts/dagu-gnome-screenshot.sh`。
-
-## 错误 / 正确
+- `--disable-gpu`、`--disable-gpu-rasterization`、`--disable-accelerated-video-decode`、`--use-gl=swiftshader`、强制 `FFmpegVideoDecoder`
+- VA-API、v4l2 request、WebNN（Linux 会掉 TFLite/CPU）、为「chrome://gpu 全绿」开 Graphite 却把 Venus 表清空
+- `FD_MESA_DEBUG=notile`、默认 `libdagu-linear-mod.so`、钉大核 / 锁 `performance` 来「补」软解
+- 叙事：「Chrome 没有 V4L2」「先软解能播」「掉帧 9%→7%」「软件占用下降了」
 
 ```text
-# ❌ 官方包 USE_V4L2=0 → 打开 GL flag → 掉帧从 9.6% 降到 7% → 宣称已修
-# ❌ 钉大核 / 抬 CPU 地板来「补」软解
-# ✅ 让 Chrome 的 VideoDecoder 接到 qcom-venus-decoder，再测 chrome://gpu 与掉帧
+# ❌ 官方 Chrome 153 USE_V4L2=0 → FFmpeg → 宣称已修
+# ❌ chrome://gpu Video Decode=Hardware 但 venus_irq 不动（假绿）
+# ✅ V4L2StatefulVideoDecoder + 打开 /dev/video14 + venus_irq 上升 + Rasterization/WebGL=Hardware
 ```
+
+## 飞行合格（缺一项即失败）
+
+`chrome://gpu`：Canvas / Compositing / Rasterization / WebGL / Video Decode = Hardware，WebGL `software=false`。播片进程打开 Venus 节点且 `venus_irq` 上升。编码同等。查不清就继续查 Chromium / Mesa / `linux-mainline/linux/` 与板上遥测，不准改开关绕开。

@@ -27,6 +27,9 @@ linux-mainline/header
 linux-mainline/ramdisk.cpio
 linux-mainline/*.cpio
 linux-mainline/*.cpio.gz
+/header
+/kernel
+/ramdisk.cpio
 
 # Large binaries in artifacts only
 *.img

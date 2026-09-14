@@ -30,6 +30,7 @@ install_src drivers/watchdog/qcom-wdt-early-dagu.c
 install_src drivers/gpu/drm/msm/msm_fbdev.c
 install_src drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c
 install_src drivers/media/i2c/imx596-dagu.c
+install_src drivers/media/i2c/s5kjn1-dagu-regs.h
 
 append_once() {
 	local file=$1
@@ -829,6 +830,263 @@ else:
     raise SystemExit(f"{path}: UART firmware-load block not found")
 path.write_text(text)
 print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_core.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: HID-class sniff"
+if marker in text:
+    raise SystemExit(0)
+old = """	hdev->sniff_max_interval = 800;
+	hdev->sniff_min_interval = 80;
+"""
+new = """	/* dagu: HID-class sniff (6–18 slots = 3.75–11.25 ms). Keep sniff so
+	 * classic keyboards/mice can radio-sleep and still wake the tablet.
+	 * Do not clear HCI_LP_SNIFF or pin the QCA UART awake.
+	 */
+	hdev->sniff_max_interval = 18;
+	hdev->sniff_min_interval = 6;
+"""
+if old not in text:
+    raise SystemExit(f"{path}: sniff interval defaults not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_core.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: HID host is Central"
+if marker not in text:
+    old = """	hdev->link_mode = (HCI_LM_ACCEPT);
+"""
+    new = """	/* dagu: HID host is Central. Incoming Accept Connection Request
+	 * then asks to Become central; outgoing Create Connection does not
+	 * offer a role switch. Do not clear role-switch from link policy.
+	 */
+	hdev->link_mode = (HCI_LM_MASTER | HCI_LM_ACCEPT);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: link_mode default not found")
+    text = text.replace(old, new, 1)
+    print(f"patched {path}: {marker}")
+marker = "dagu: HID-host interlaced page scan"
+if marker not in text:
+    old = """	/* default 1.28 sec page scan */
+	hdev->def_page_scan_type = PAGE_SCAN_TYPE_STANDARD;
+	hdev->def_page_scan_int = 0x0800;
+	hdev->def_page_scan_window = 0x0012;
+"""
+    new = """	/* dagu: HID-host interlaced page scan. Train hopping covers both
+	 * page trains in one interval so a waking K380 can find us; window
+	 * stays 11.25 ms. FastConnectable (BlueZ) further shortens interval
+	 * to 160 ms. Not a sleep disable.
+	 */
+	hdev->def_page_scan_type = PAGE_SCAN_TYPE_INTERLACED;
+	hdev->def_page_scan_int = 0x0400;
+	hdev->def_page_scan_window = 0x0012;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: page scan defaults not found")
+    text = text.replace(old, new, 1)
+    print(f"patched {path}: {marker}")
+path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/include/net/bluetooth/hci_core.h" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: paging clock offset"
+if marker in text:
+    raise SystemExit(0)
+old = """#define INQUIRY_CACHE_AGE_MAX   (HZ*30)   /* 30 seconds */
+#define INQUIRY_ENTRY_AGE_MAX   (HZ*60)   /* 60 seconds */
+"""
+new = """#define INQUIRY_CACHE_AGE_MAX   (HZ*30)   /* 30 seconds */
+#define INQUIRY_ENTRY_AGE_MAX   (HZ*60)   /* 60 seconds */
+/* dagu: paging clock offset stays useful while local CLKN is continuous
+ * (inquiry cache is flushed on HCI Reset). 20 ppm * 900 s ≈ 18 ms.
+ */
+#define PAGING_CLOCK_OFFSET_AGE_MAX	(HZ * 900)
+"""
+if old not in text:
+    raise SystemExit(f"{path}: inquiry age macros not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: pscan_rep_mode does not drift"
+if marker in text:
+    raise SystemExit(0)
+old = """	ie = hci_inquiry_cache_lookup(hdev, &conn->dst);
+	if (ie) {
+		if (inquiry_entry_age(ie) <= INQUIRY_ENTRY_AGE_MAX) {
+			cp.pscan_rep_mode = ie->data.pscan_rep_mode;
+			cp.pscan_mode     = ie->data.pscan_mode;
+			cp.clock_offset   = ie->data.clock_offset |
+					    cpu_to_le16(0x8000);
+		}
+
+		memcpy(conn->dev_class, ie->data.dev_class, 3);
+	}
+"""
+new = """	ie = hci_inquiry_cache_lookup(hdev, &conn->dst);
+	if (ie) {
+		/* dagu: pscan_rep_mode does not drift. Clock offset is
+		 * valid while local CLKN is continuous; HCI Reset flushes
+		 * the cache. Blind R2 + offset 0 is why classic HID pages
+		 * time out once GNOME is closed for >60 s.
+		 */
+		cp.pscan_rep_mode = ie->data.pscan_rep_mode;
+		cp.pscan_mode     = ie->data.pscan_mode;
+		if (inquiry_entry_age(ie) <= PAGING_CLOCK_OFFSET_AGE_MAX)
+			cp.clock_offset   = ie->data.clock_offset |
+					    cpu_to_le16(0x8000);
+
+		memcpy(conn->dev_class, ie->data.dev_class, 3);
+	}
+"""
+if old not in text:
+    raise SystemExit(f"{path}: Create Connection inquiry-cache block not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_event.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+changed = False
+
+marker = "dagu: store paging clock offset while ACL is up"
+if marker not in text:
+    old = """		/* Get remote features */
+		if (conn->type == ACL_LINK) {
+			struct hci_cp_read_remote_features cp;
+			cp.handle = ev->handle;
+			hci_send_cmd(hdev, HCI_OP_READ_REMOTE_FEATURES,
+				     sizeof(cp), &cp);
+
+			hci_update_scan(hdev);
+		}
+"""
+    new = """		/* Get remote features */
+		if (conn->type == ACL_LINK) {
+			struct hci_cp_read_remote_features cp;
+			struct hci_cp_read_clock_offset clkoff_cp;
+
+			cp.handle = ev->handle;
+			hci_send_cmd(hdev, HCI_OP_READ_REMOTE_FEATURES,
+				     sizeof(cp), &cp);
+
+			hci_update_scan(hdev);
+
+			/* dagu: store paging clock offset while ACL is up.
+			 * Upstream only reads it on disconnect, and only
+			 * writes the inquiry cache if an entry already
+			 * exists — so a closed GNOME panel leaves the next
+			 * Create Connection with R2 + offset 0.
+			 */
+			clkoff_cp.handle = ev->handle;
+			hci_send_cmd(hdev, HCI_OP_READ_CLOCK_OFFSET,
+				     sizeof(clkoff_cp), &clkoff_cp);
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: ACL remote-features block not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+marker = "dagu: keep POWER_SAVE in sniff"
+if marker not in text:
+    old = """		if (!test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND,
+					&conn->flags)) {
+			if (conn->mode == HCI_CM_ACTIVE)
+				set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+			else
+				clear_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+		}
+"""
+    new = """		test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND, &conn->flags);
+		/* dagu: keep POWER_SAVE in sniff so host TX (LED / output
+		 * report) can Exit Sniff. Remote-initiated sniff used to
+		 * clear this bit, leaving the first host packet stuck
+		 * until the sniff window (50–500 ms on the ACL default).
+		 * Sniff itself stays enabled.
+		 */
+		if (conn->mode == HCI_CM_SNIFF)
+			set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+		else if (conn->mode == HCI_CM_ACTIVE)
+			set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: mode-change POWER_SAVE block not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+marker = "dagu: create inquiry cache from Read Clock Offset"
+if marker not in text:
+    old = """	conn = hci_conn_hash_lookup_handle(hdev, __le16_to_cpu(ev->handle));
+	if (conn && !ev->status) {
+		struct inquiry_entry *ie;
+
+		ie = hci_inquiry_cache_lookup(hdev, &conn->dst);
+		if (ie) {
+			ie->data.clock_offset = ev->clock_offset;
+			ie->timestamp = jiffies;
+		}
+	}
+"""
+    new = """	conn = hci_conn_hash_lookup_handle(hdev, __le16_to_cpu(ev->handle));
+	if (conn && !ev->status) {
+		struct inquiry_entry *ie;
+		struct inquiry_data data;
+
+		ie = hci_inquiry_cache_lookup(hdev, &conn->dst);
+		if (ie) {
+			ie->data.clock_offset = ev->clock_offset;
+			ie->timestamp = jiffies;
+		} else {
+			/* dagu: create inquiry cache from Read Clock Offset
+			 * so the next page is not R2 + offset 0.
+			 */
+			memset(&data, 0, sizeof(data));
+			bacpy(&data.bdaddr, &conn->dst);
+			data.pscan_rep_mode = 0x02;
+			data.clock_offset = ev->clock_offset;
+			memcpy(data.dev_class, conn->dev_class, 3);
+			hci_inquiry_cache_update(hdev, &data, true);
+		}
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: clock-offset cache update not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+if changed:
+    path.write_text(text)
 PY
 
 python3 - "$KERNEL_SRC/drivers/soc/qcom/qcom-geni-se.c" <<'PY'
@@ -2041,6 +2299,39 @@ if marker not in text:
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: {marker}")
 
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+marker = "dagu: Android s5kjn1 D-PHY settle 0x13"
+if marker not in text:
+    replacements = [
+        (
+            "	if (cfg->csi2->cphy)\n"
+            "		settle_cnt = 0x12;\n"
+            "	/* dagu: log csiphy settle */\n",
+            "	if (cfg->csi2->cphy)\n"
+            "		settle_cnt = 0x12;\n"
+            "	else if (csiphy->id == 1)\n"
+            "		settle_cnt = 0x13; /* dagu: Android s5kjn1 D-PHY settle 0x13 */\n"
+            "	/* dagu: log csiphy settle */\n",
+        ),
+        (
+            "	settle_cnt = csiphy_settle_cnt_calc(link_freq, csiphy->timer_clk_rate);\n"
+            "	/* dagu: log csiphy settle */\n",
+            "	settle_cnt = csiphy_settle_cnt_calc(link_freq, csiphy->timer_clk_rate);\n"
+            "	if (!cfg->csi2->cphy && csiphy->id == 1)\n"
+            "		settle_cnt = 0x13; /* dagu: Android s5kjn1 D-PHY settle 0x13 */\n"
+            "	/* dagu: log csiphy settle */\n",
+        ),
+    ]
+    for old, new in replacements:
+        if old in text:
+            text = text.replace(old, new, 1)
+            break
+    else:
+        raise SystemExit(f"{path}: D-PHY settle 0x13 needle missing")
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
 marker = "dagu s5kjn1 frame counter"
@@ -2072,21 +2363,28 @@ if marker not in text:
 
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
-marker = "dagu: CamX 4080 C-PHY 0x0115=1"
+marker = "dagu: Android preview 4-lane D-PHY 0x0115=0"
 if marker not in text:
     replaced = False
     for old in (
+        "	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */\n",
         "	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: s5kjn1 4-lane D-PHY 0x0115=0 */\n",
         "	{ CCI_REG16(0x0114), 0x0301 },\n",
+        "	{ CCI_REG16(0x0114), 0x0300 },\n",
     ):
         if old in text:
-            text = text.replace(old, "	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */\n", 1)
+            text = text.replace(old, "	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: Android preview 4-lane D-PHY 0x0115=0 */\n", 1)
             replaced = True
             break
     if not replaced:
-        raise SystemExit(f"{path}: 0x0114 C-PHY needle missing")
+        raise SystemExit(f"{path}: 0x0114 D-PHY needle missing")
     path.write_text(text)
     print(f"patched {path}: {marker}")
+hdr = (root / "drivers/media/i2c/s5kjn1-dagu-regs.h").read_text()
+if "{ CCI_REG16(0x0114), 0x0301 }" in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h still has C-PHY 0x0114=0x0301")
+if marker not in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h missing Android D-PHY 0x0114")
 
 # Mainline lane_regs_sm8250 copies CAF combo-mode 0x?904=0x07.
 # dagu sensors each own a PHY (csiphy1 / csiphy4); CAF non-combo 2PH uses 0x03.
@@ -2154,7 +2452,7 @@ if marker not in text:
 
 text = path.read_text()
 marker = "dagu: log CSIPHY ISR"
-if marker not in text:
+if "dagu: do not printk CSIPHY" not in text and marker not in text:
     old = '''	for (i = 0; i < 11; i++) {
 		int c = i + 22;
 		u8 val = readl_relaxed(csiphy->base +
@@ -2188,7 +2486,7 @@ if marker not in text:
 path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
 text = path.read_text()
 marker = "dagu: unmask CSI2 RX IRQs"
-if marker not in text:
+if "dagu: mask lane FIFO overflow" not in text and marker not in text:
     old = '''			__csid_configure_rdi_stream(csid, enable, i);
 			__csid_configure_rx(csid, &csid->phy, i);
 			__csid_ctrl_rdi(csid, enable, i);
@@ -2373,28 +2671,160 @@ if "dagu: default <= VTS-margin" not in text:
 
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
-if "dagu: omit 0x0bcc" not in text:
-    old8 = """	{ CCI_REG16(0x0106), 0x0001 },
-	/* 0x0bcc 16-bit NACKs on dagu Qtech JN1 (C-PHY); CamX uses 8-bit. */
-	{ CCI_REG8(0x0bcc), 0x00 }, /* dagu: skip 16-bit 0x0bcc NACK */
-	{ CCI_REG16(0x6028), 0x2400 },
+if "stop MCU init on 0x2400" not in text:
+    old_4000_tail = """	{ CCI_REG16(0x6f12), 0x9600 },
+	{ CCI_REG16(0x6028), 0x4000 },
+	{ CCI_REG16(0xf44e), 0x0011 },
+	{ CCI_REG16(0xf44c), 0x0b0b },
+	{ CCI_REG16(0xf44a), 0x0006 },
+	{ CCI_REG16(0x0118), 0x0002 },
+	{ CCI_REG16(0x011a), 0x0001 },
+	{ CCI_REG16(0x6028), 0x4000 },
+	{ CCI_REG16(0x0106), 0x0001 },
+	/* dagu: omit 0x0bcc / trailing 0x2400 — Qtech NACKs after 0x4000 tail */
+};
 """
-    old16 = """	{ CCI_REG16(0x0106), 0x0001 },
+    old_4000_vanilla = """	{ CCI_REG16(0x6f12), 0x9600 },
+	{ CCI_REG16(0x6028), 0x4000 },
+	{ CCI_REG16(0xf44e), 0x0011 },
+	{ CCI_REG16(0xf44c), 0x0b0b },
+	{ CCI_REG16(0xf44a), 0x0006 },
+	{ CCI_REG16(0x0118), 0x0002 },
+	{ CCI_REG16(0x011a), 0x0001 },
+	{ CCI_REG16(0x6028), 0x4000 },
+	{ CCI_REG16(0x0106), 0x0001 },
 	{ CCI_REG16(0x0bcc), 0x0000 },
 	{ CCI_REG16(0x6028), 0x2400 },
+	{ CCI_REG16(0x602a), 0x2174 },
+	{ CCI_REG16(0x6f12), 0x0400 },
+};
 """
-    new = """	{ CCI_REG16(0x0106), 0x0001 },
-	/* dagu: omit 0x0bcc — 8/16-bit writes NACK on Qtech JN1 */
-	{ CCI_REG16(0x6028), 0x2400 },
+    new = """	{ CCI_REG16(0x6f12), 0x9600 },
+	/* dagu: stop MCU init on 0x2400; 0x4000 tail kills MCU page on Qtech */
+};
 """
-    if old8 in text:
-        text = text.replace(old8, new, 1)
-    elif old16 in text:
-        text = text.replace(old16, new, 1)
+    if old_4000_tail in text:
+        text = text.replace(old_4000_tail, new, 1)
+    elif old_4000_vanilla in text:
+        text = text.replace(old_4000_vanilla, new, 1)
     else:
-        raise SystemExit(f"{path}: 0x0bcc init_array needle missing")
+        raise SystemExit(f"{path}: MCU 0x2400 cut needle missing")
     path.write_text(text)
-    print(f"patched {path}: omit 0x0bcc")
+    print(f"patched {path}: stop MCU init on 0x2400")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: mode table while MCU page" not in text:
+    old_retry = """	cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
+			    ARRAY_SIZE(init_array_setting), &ret);
+	if (ret)
+		goto error;
+	/* Qtech: 0x4000 tail then 0x2400 often NACKs; retry before CamX mode. */
+	{
+		int i;
+
+		for (i = 0; i < 20; i++) {
+			ret = 0;
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &ret);
+			if (!ret)
+				break;
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 post-init 0x2400 retry %d: %d\\n",
+				 i, ret);
+			msleep(10);
+		}
+		if (ret)
+			goto error;
+	}
+	cci_multi_reg_write(s5kjn1->regmap, reg_list->regs,
+			    reg_list->num_regs, &ret);
+	if (ret)
+		goto error;
+"""
+    old_plain = """	cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
+			    ARRAY_SIZE(init_array_setting), &ret);
+	cci_multi_reg_write(s5kjn1->regmap, reg_list->regs,
+			    reg_list->num_regs, &ret);
+	if (ret)
+		goto error;
+"""
+    new = """	cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
+			    ARRAY_SIZE(init_array_setting), &ret);
+	if (ret)
+		goto error;
+	/* dagu: mode table while MCU page 0x2400 is still alive. */
+	cci_multi_reg_write(s5kjn1->regmap, reg_list->regs,
+			    reg_list->num_regs, &ret);
+	if (ret)
+		goto error;
+"""
+    if old_retry in text:
+        text = text.replace(old_retry, new, 1)
+    elif old_plain in text:
+        text = text.replace(old_plain, new, 1)
+    else:
+        raise SystemExit(f"{path}: mode table MCU page needle missing")
+    path.write_text(text)
+    print(f"patched {path}: mode table while MCU page 0x2400")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "MODE_SELECT before 0x2174" not in text:
+    new = """	ret = __v4l2_ctrl_handler_setup(s5kjn1->sd.ctrl_handler);
+
+	/* 0x0a70 then MODE_SELECT while MCU is halted, then 0x2174. */
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x0a70, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0001, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x0a72, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0100, &ret);
+	if (ret)
+		goto error;
+	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret) {
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 MODE_SELECT before 0x2174 NACK %d\\n", ret);
+		goto error;
+	}
+	{
+		int page_ret = 0;
+
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &page_ret);
+		if (!page_ret) {
+			cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x2174, &page_ret);
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0401, &page_ret);
+			if (page_ret)
+				dev_info(s5kjn1->dev, "dagu s5kjn1 0x2174 NACK %d\\n",
+					 page_ret);
+		} else {
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 post-mode 0x2400 NACK %d\\n",
+				 page_ret);
+		}
+	}
+
+	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
+"""
+    olds = [
+        """	ret = __v4l2_ctrl_handler_setup(s5kjn1->sd.ctrl_handler);
+
+	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret)
+		goto error;
+
+	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
+""",
+    ]
+    for old in olds:
+        if old in text:
+            text = text.replace(old, new, 1)
+            break
+    else:
+        raise SystemExit(f"{path}: stream-on MODE_SELECT-continue needle missing")
+    path.write_text(text)
+    print(f"patched {path}: MODE_SELECT before 0x2174; NACK continues")
 
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
@@ -2481,13 +2911,151 @@ if "dagu s5kjn1 0x6028 retry" not in text:
 
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
-if "dagu: skip 0x6010/0x6226 SW reset" not in text:
-    raise SystemExit(f"{path}: skip 0x6010/0x6226 SW reset missing")
+if '#include "s5kjn1-dagu-regs.h"' not in text:
+    old = """#include <media/v4l2-fwnode.h>
+"""
+    new = """#include <media/v4l2-fwnode.h>
+
+#include "s5kjn1-dagu-regs.h"
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: v4l2-fwnode include needle missing")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: include s5kjn1-dagu-regs.h")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "s5kjn1_dagu_4080x3060_mode" not in text:
+    old = """			.regs = s5kjn1_4080x3072_30fps_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_4080x3072_30fps_mode),
+"""
+    new = """			.regs = s5kjn1_dagu_4080x3060_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_dagu_4080x3060_mode),
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 4080 mode pointer needle missing")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: use CamX 4080 mode table")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "s5kjn1_4080x3072_30fps_mode[] __maybe_unused" not in text:
+    old = "static const struct cci_reg_sequence s5kjn1_4080x3072_30fps_mode[] = {"
+    new = "static const struct cci_reg_sequence s5kjn1_4080x3072_30fps_mode[] __maybe_unused = {"
+    if old not in text:
+        raise SystemExit(f"{path}: 4080 array decl needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: mark leftover 4080 array unused")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: CamX 0x6010/0x6226 SW reset" not in text:
+    old_skip = """	/* dagu: skip 0x6010/0x6226 SW reset — post-reset 0x6028 NACKs */
+
+	/* Sensor init settings */
+"""
+    old_vanilla = """	/* Set version */
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), 0x0003, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), S5KJN1_CHIP_ID, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x001e), 0x0007, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6010), 0x0001, &ret);
+	if (ret)
+		goto error;
+
+	usleep_range(5 * USEC_PER_MSEC, 6 * USEC_PER_MSEC);
+
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6226), 0x0001, &ret);
+	if (ret)
+		goto error;
+
+	usleep_range(10 * USEC_PER_MSEC, 11 * USEC_PER_MSEC);
+
+	/* Sensor init settings */
+"""
+    new = """	/* CamX: 0x0000=1, chip id, 0x001e=7, 0x6010 then 5 ms, 0x6226=1 then 10 ms. */
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), 0x0001, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), S5KJN1_CHIP_ID, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x001e), 0x0007, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6010), 0x0001, &ret);
+	if (ret)
+		goto error;
+	usleep_range(5 * USEC_PER_MSEC, 6 * USEC_PER_MSEC);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6226), 0x0001, &ret);
+	if (ret)
+		goto error;
+	usleep_range(10 * USEC_PER_MSEC, 11 * USEC_PER_MSEC);
+	/* dagu: CamX 0x6010/0x6226 SW reset; retry 0x2400 while MCU wakes */
+	{
+		int i;
+
+		for (i = 0; i < 20; i++) {
+			ret = 0;
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &ret);
+			if (!ret)
+				break;
+			dev_info(s5kjn1->dev, "dagu s5kjn1 0x2400 retry %d: %d\\n",
+				 i, ret);
+			msleep(10);
+		}
+		if (ret)
+			goto error;
+	}
+
+	/* Sensor init settings */
+"""
+    if old_skip in text:
+        text = text.replace(old_skip, new, 1)
+    elif old_vanilla in text:
+        text = text.replace(old_vanilla, new, 1)
+    else:
+        raise SystemExit(f"{path}: SW reset needle missing")
+    path.write_text(text)
+    print(f"patched {path}: CamX SW reset + 0x2400 retry")
+if "dagu: CamX 0x6010/0x6226 SW reset" not in path.read_text():
+    raise SystemExit(f"{path}: CamX SW reset missing after patch")
 
 path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
 text = path.read_text()
 if "lane_regs_sm8250_cphy" not in text or "cphy=%u" not in text:
     raise SystemExit(f"{path}: C-PHY 3PH table / lanes_enable missing (CamX 4080)")
+if "dagu: CAF 1.2.1 C-PHY data-rate" not in text:
+    raise SystemExit(f"{path}: CAF 1.2.1 C-PHY data-rate missing")
+if "0x09AC, 0x35" not in text or "0x0144, 0x22" not in text:
+    raise SystemExit(f"{path}: Luca 3PH + CAF 2.5G AEQ missing")
+if "dagu: hold CTRL0=0 until analog" not in text:
+    raise SystemExit(f"{path}: C-PHY CTRL0 hold-0 missing")
+if "dagu: C-PHY CTRL0 after analog" not in text:
+    raise SystemExit(f"{path}: C-PHY CTRL0 after analog missing")
+if "dagu: 2PH CTRL0 after analog" not in text:
+    old = """	/* dagu: C-PHY CTRL0 after analog */
+	if (cfg->csi2->cphy) {
+		udelay(50);
+		writel_relaxed(0x0E, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 0));
+	}
+"""
+    new = """	/* dagu: C-PHY CTRL0 after analog */
+	if (cfg->csi2->cphy) {
+		udelay(50);
+		writel_relaxed(0x0E, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 0));
+	} else {
+		/* dagu: 2PH CTRL0 after analog — Android s5kjn1 preview 0x0800=0x02 */
+		writel_relaxed(0x02, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 0));
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 2PH CTRL0 after analog needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: 2PH CTRL0 after analog")
+    text = path.read_text()
+if "dagu: Android s5kjn1 D-PHY settle 0x13" not in text:
+    raise SystemExit(f"{path}: D-PHY settle 0x13 missing")
 if "if (phy->cphy)" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
     raise SystemExit("camss-csid-gen2.c: C-PHY PHY_TYPE_SEL missing")
 
@@ -2548,6 +3116,631 @@ if marker not in text:
     print(f"patched {path}: {marker}")
 if marker not in path.read_text():
     raise SystemExit(f"{path}: Venus ICC stub missing after patch")
+
+# dagu: MPEG2 OPB is 256-byte stride; VP8/MPEG2 DPB min=32 breaks dmabuf.
+path = root / "drivers/media/platform/qcom/venus/helpers.h"
+text = path.read_text()
+if "venus_helper_set_opb_stride" not in text:
+    old = """int venus_helper_set_stride(struct venus_inst *inst, unsigned int aligned_width,
+			    unsigned int aligned_height);
+#endif
+"""
+    new = """int venus_helper_set_stride(struct venus_inst *inst, unsigned int aligned_width,
+			    unsigned int aligned_height);
+int venus_helper_set_opb_stride(struct venus_inst *inst, u32 stride, u32 height);
+#endif
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: set_stride prototype needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: venus_helper_set_opb_stride")
+
+path = root / "drivers/media/platform/qcom/venus/helpers.c"
+text = path.read_text()
+if "venus_helper_set_opb_stride" not in text:
+    old = """	return hfi_session_set_property(inst, ptype, &plane_actual_info);
+}
+EXPORT_SYMBOL_GPL(venus_helper_set_stride);
+"""
+    new = """	return hfi_session_set_property(inst, ptype, &plane_actual_info);
+}
+EXPORT_SYMBOL_GPL(venus_helper_set_stride);
+
+int venus_helper_set_opb_stride(struct venus_inst *inst, u32 stride, u32 height)
+{
+	const u32 ptype = HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_INFO;
+	struct hfi_uncompressed_plane_actual_info plane_actual_info;
+
+	if (!inst->opb_buftype)
+		return 0;
+
+	plane_actual_info.buffer_type = inst->opb_buftype;
+	plane_actual_info.num_planes = 2;
+	plane_actual_info.plane_format[0].actual_stride = stride;
+	plane_actual_info.plane_format[0].actual_plane_buffer_height = height;
+	plane_actual_info.plane_format[1].actual_stride = stride;
+	plane_actual_info.plane_format[1].actual_plane_buffer_height = height / 2;
+
+	return hfi_session_set_property(inst, ptype, &plane_actual_info);
+}
+EXPORT_SYMBOL_GPL(venus_helper_set_opb_stride);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: set_stride body needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: venus_helper_set_opb_stride")
+
+path = root / "drivers/media/platform/qcom/venus/helpers.c"
+text = path.read_text()
+if "dagu: MPEG2 1080p uses WORK_MODE_2" in text:
+    old = """		/* dagu: MPEG2 1080p uses WORK_MODE_2 (same as H.264).
+		 * This QHEE firmware's MODE_1 OPB wraps the next 128px
+		 * onto the right edge. Xiaomi SM8250 always programmed MODE_2.
+		 */
+		if (inst->pic_struct != HFI_INTERLACE_FRAME_PROGRESSIVE ||
+		    num_mbs <= NUM_MBS_720P)
+			mode = VIDC_WORK_MODE_1;
+"""
+    new = """		/* dagu: CAF Iris2 MPEG2 uses WORK_MODE_1 + work_route=1. */
+		if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 ||
+		    inst->pic_struct != HFI_INTERLACE_FRAME_PROGRESSIVE ||
+		    num_mbs <= NUM_MBS_720P)
+			mode = VIDC_WORK_MODE_1;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: revert WORK_MODE_2 needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 WORK_MODE_1")
+
+text = path.read_text()
+if "is_dec && inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2" not in text:
+    old = """	params.version = version;
+	params.num_vpp_pipes = inst->core->res->num_vpp_pipes;
+
+	if (is_dec) {
+"""
+    new = """	params.version = version;
+	params.num_vpp_pipes = inst->core->res->num_vpp_pipes;
+	if (is_dec && inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2)
+		params.num_vpp_pipes = 1;
+
+	if (is_dec) {
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MPEG2 num_vpp_pipes needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 scratch 1 VPP pipe")
+
+path = root / "drivers/media/platform/qcom/venus/vdec.c"
+text = path.read_text()
+# Do not program HFI stride 2048 for MPEG2 — firmware then emits a
+# layout that looks destiled. V4L2 bytesperline 2048 is still required.
+old_hfi256_nl = """	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2) {
+		u32 mpeg2_w = ALIGN(width, 256);
+
+		inst->output2_buf_size =
+			venus_helper_get_framesz_raw(out2_fmt, mpeg2_w, height);
+		ret = venus_helper_set_opb_stride(inst, mpeg2_w, height);
+		if (ret)
+			dev_dbg(inst->core->dev_dec,
+				"MPEG2 OPB stride %u: %d\\n", mpeg2_w, ret);
+	}
+
+	if (inst->dpb_fmt) {
+""".replace("\\n", "\n")
+new_hfi = """	if (inst->dpb_fmt) {
+"""
+if old_hfi256_nl in text:
+    path.write_text(text.replace(old_hfi256_nl, new_hfi, 1))
+    print(f"patched {path}: drop MPEG2 HFI 256 OPB stride")
+    text = path.read_text()
+
+text = path.read_text()
+if "dagu: CAF msm_vidc_decide_work_route_iris2" not in text:
+    old = """	wr.video_work_route = inst->core->res->num_vpp_pipes;
+
+	return hfi_session_set_property(inst, ptype, &wr);
+"""
+    new = """	wr.video_work_route = inst->core->res->num_vpp_pipes;
+	/*
+	 * dagu: CAF msm_vidc_decide_work_route_iris2() forces route=1 for
+	 * MPEG2 (and interlaced). Default 4 VPP pipes destile 1920 as 16
+	 * 128px tiles and the last tile wraps onto the first.
+	 */
+	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 ||
+	    inst->pic_struct != HFI_INTERLACE_FRAME_PROGRESSIVE)
+		wr.video_work_route = 1;
+
+	ret = hfi_session_set_property(inst, ptype, &wr);
+	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2)
+		dev_info(inst->core->dev_dec,
+			 "dagu mpeg2 work_route=%u: %d\\n",
+			 wr.video_work_route, ret);
+	return ret;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vdec_set_work_route needle missing")
+    # vanilla function has no local ret
+    if "int ret;" not in path.read_text().split("static int vdec_set_work_route")[1].split("static int")[0]:
+        old_sig = """static int vdec_set_work_route(struct venus_inst *inst)
+{
+	u32 ptype = HFI_PROPERTY_PARAM_WORK_ROUTE;
+	struct hfi_video_work_route wr;
+
+	if (!(IS_IRIS2(inst->core) || IS_IRIS2_1(inst->core)))
+		return 0;
+"""
+        new_sig = """static int vdec_set_work_route(struct venus_inst *inst)
+{
+	u32 ptype = HFI_PROPERTY_PARAM_WORK_ROUTE;
+	struct hfi_video_work_route wr;
+	int ret;
+
+	if (!(IS_IRIS2(inst->core) || IS_IRIS2_1(inst->core)))
+		return 0;
+"""
+        text = path.read_text()
+        if old_sig not in text:
+            raise SystemExit(f"{path}: vdec_set_work_route signature needle missing")
+        path.write_text(text.replace(old_sig, new_sig, 1))
+    text = path.read_text()
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 work_route=1")
+
+text = path.read_text()
+if "dagu: MPEG2 firmware reports 32-aligned" not in text:
+    old = """	} else {
+		inst->crop.left = 0;
+		inst->crop.top = 0;
+		inst->crop.width = ev_data->width;
+		inst->crop.height = ev_data->height;
+	}
+"""
+    new = """	} else {
+		inst->crop.left = 0;
+		inst->crop.top = 0;
+		inst->crop.width = ev_data->width;
+		inst->crop.height = ev_data->height;
+	}
+	/*
+	 * dagu: MPEG2 firmware reports 32-aligned height (1088 for 1080p)
+	 * and no input_crop. COMPOSE==1088 makes GStreamer advertise 1088
+	 * and waylandsink fail linux-dmabuf import (H.264 compose is 1080).
+	 */
+	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 &&
+	    inst->crop.height == 1088)
+		inst->crop.height = 1080;
+	/*
+	 * dagu: Iris2 MPEG2 destile repeats the left 128px tile on the
+	 * right of 1920 OPB. Compose 1792 hides the duplicate; 1792 is
+	 * 128-aligned so waylandsink can still import dmabuf.
+	 */
+	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 &&
+	    inst->crop.width == 1920)
+		inst->crop.width = 1792;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vdec_event_change crop needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 compose 1080")
+
+text = path.read_text()
+if "inst->crop.width = 1792" not in text:
+    old = """	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 &&
+	    inst->crop.height == 1088)
+		inst->crop.height = 1080;
+"""
+    new = """	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 &&
+	    inst->crop.height == 1088)
+		inst->crop.height = 1080;
+	/*
+	 * dagu: Iris2 MPEG2 destile repeats the left 128px tile on the
+	 * right of 1920 OPB. Compose 1792 hides the duplicate; 1792 is
+	 * 128-aligned so waylandsink can still import dmabuf.
+	 */
+	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 &&
+	    inst->crop.width == 1920)
+		inst->crop.width = 1792;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MPEG2 compose 1792 needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 compose 1792")
+
+text = path.read_text()
+if "dagu: Iris2 default linear NV12 stride" not in text:
+    old = """	ret = venus_helper_set_dyn_bufmode(inst);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+"""
+    new = """	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2) {
+		u32 stride = ALIGN(width, 128);
+
+		/*
+		 * dagu: Iris2 default linear NV12 stride is 256-aligned
+		 * (2048 for 1080p). Destile then writes 16 128px tiles into
+		 * a 1920 OPB and the 16th tile lands on the first (wrap).
+		 */
+		ret = venus_helper_set_opb_stride(inst, stride, height);
+		dev_info(inst->core->dev_dec,
+			 "dagu mpeg2 opb=%u fmt=%#x dpb=%#x stride=%u: %d\\n",
+			 inst->opb_buftype, inst->opb_fmt, inst->dpb_fmt,
+			 stride, ret);
+		if (ret)
+			return ret;
+	}
+
+	ret = venus_helper_set_dyn_bufmode(inst);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MPEG2 OPB stride 1920 needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 OPB stride 1920")
+
+text = path.read_text()
+if "else if (out2_fmt && !out_fmt)" not in text:
+    old = """	} else if (is_ubwc_fmt(out2_fmt) || is_10bit_ubwc_fmt(out_fmt)) {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT;
+		inst->opb_fmt = out_fmt;
+		inst->dpb_buftype = HFI_BUFFER_OUTPUT2;
+		inst->dpb_fmt = out2_fmt;
+	} else {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT;
+		inst->opb_fmt = out_fmt;
+		inst->dpb_buftype = 0;
+		inst->dpb_fmt = 0;
+	}
+"""
+    new = """	} else if (is_ubwc_fmt(out2_fmt) || is_10bit_ubwc_fmt(out_fmt)) {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT;
+		inst->opb_fmt = out_fmt;
+		inst->dpb_buftype = HFI_BUFFER_OUTPUT2;
+		inst->dpb_fmt = out2_fmt;
+	} else if (out2_fmt && !out_fmt) {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT2;
+		inst->opb_fmt = out2_fmt;
+		inst->dpb_buftype = 0;
+		inst->dpb_fmt = 0;
+	} else {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT;
+		inst->opb_fmt = out_fmt;
+		inst->dpb_buftype = 0;
+		inst->dpb_fmt = 0;
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MPEG2 OUTPUT2-only OPB needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 OUTPUT2-only OPB")
+
+text = path.read_text()
+if "else if (inst->opb_buftype == HFI_BUFFER_OUTPUT2)" not in text:
+    old = """	if (inst->dpb_fmt) {
+		ret = venus_helper_set_multistream(inst, false, true);
+		if (ret)
+			return ret;
+
+		ret = venus_helper_set_raw_format(inst, inst->dpb_fmt,
+						  inst->dpb_buftype);
+		if (ret)
+			return ret;
+
+		ret = venus_helper_set_output_resolution(inst, width, height,
+							 HFI_BUFFER_OUTPUT2);
+		if (ret)
+			return ret;
+	}
+
+	if (IS_V3(core) || IS_V4(core) || IS_V6(core)) {
+		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+		if (ret)
+			return ret;
+
+		if (bufreq.size > inst->output_buf_size)
+			return -EINVAL;
+
+		if (inst->dpb_fmt) {
+			ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT2,
+						      &bufreq);
+			if (ret)
+				return ret;
+
+			if (bufreq.size > inst->output2_buf_size)
+				return -EINVAL;
+		}
+"""
+    new = """	if (inst->dpb_fmt) {
+		ret = venus_helper_set_multistream(inst, false, true);
+		if (ret)
+			return ret;
+
+		ret = venus_helper_set_raw_format(inst, inst->dpb_fmt,
+						  inst->dpb_buftype);
+		if (ret)
+			return ret;
+
+		ret = venus_helper_set_output_resolution(inst, width, height,
+							 HFI_BUFFER_OUTPUT2);
+		if (ret)
+			return ret;
+	} else if (inst->opb_buftype == HFI_BUFFER_OUTPUT2) {
+		ret = venus_helper_set_multistream(inst, false, true);
+		if (ret)
+			return ret;
+
+		ret = venus_helper_set_output_resolution(inst, width, height,
+							 HFI_BUFFER_OUTPUT2);
+		if (ret)
+			return ret;
+	}
+
+	if (IS_V3(core) || IS_V4(core) || IS_V6(core)) {
+		if (inst->output_buf_size) {
+			ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT,
+						      &bufreq);
+			if (ret)
+				return ret;
+
+			if (bufreq.size > inst->output_buf_size)
+				return -EINVAL;
+		}
+
+		if (inst->output2_buf_size) {
+			ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT2,
+						      &bufreq);
+			if (ret)
+				return ret;
+
+			if (bufreq.size > inst->output2_buf_size)
+				return -EINVAL;
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MPEG2 OUTPUT2 bufreq needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 OUTPUT2 bufreq")
+
+text = path.read_text()
+if "static void vdec_capture_plane" not in text:
+    old = """	return &fmt[i];
+}
+
+static const struct venus_format *
+vdec_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+"""
+    new = """	return &fmt[i];
+}
+
+/*
+ * G_FMT sizeimage and vb2 CAPTURE alloc must use the same stride.
+ * dagu: MPEG2 firmware still fills 128-aligned OPB (1920 for 1080p).
+ * Advertising 2048 shears the packed payload. Compose 1088→1080 lets
+ * waylandsink import dmabuf.
+ */
+static void vdec_capture_plane(struct venus_inst *inst, u32 pixfmt,
+			       u32 width, u32 height, u32 *bytesperline,
+			       u32 *sizeimage)
+{
+	u32 stride = width;
+
+	if (pixfmt == V4L2_PIX_FMT_P010)
+		stride *= 2;
+	stride = ALIGN(stride, 128);
+	if (bytesperline)
+		*bytesperline = stride;
+	if (sizeimage)
+		*sizeimage = venus_helper_get_framesz(pixfmt, stride, height);
+}
+
+static const struct venus_format *
+vdec_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vdec_capture_plane insert needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: vdec_capture_plane")
+
+text = path.read_text()
+if "vdec_capture_plane(inst, pixmp->pixelformat" not in text:
+    old_helper = """	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		vdec_capture_plane(inst, pixmp->pixelformat, pixmp->width,
+				   pixmp->height, &pfmt[0].bytesperline,
+				   &pfmt[0].sizeimage);
+	} else {
+"""
+    candidates = [
+"""	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		unsigned int stride = pixmp->width;
+		unsigned int stride_align = 128;
+
+		if (pixmp->pixelformat == V4L2_PIX_FMT_P010)
+			stride *= 2;
+
+		/*
+		 * dagu: MPEG2 firmware writes OPB with 256-byte stride
+		 * (2048 for 1080p). Mapping as 1920 wraps the next row onto
+		 * the right 128px.
+		 */
+		if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2)
+			stride_align = 256;
+
+		pfmt[0].bytesperline = ALIGN(stride, stride_align);
+		if (stride_align > 128)
+			szimage = venus_helper_get_framesz(pixmp->pixelformat,
+							   pfmt[0].bytesperline,
+							   pixmp->height);
+		pfmt[0].sizeimage = szimage;
+	} else {
+""",
+"""	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		unsigned int stride = pixmp->width;
+
+		if (pixmp->pixelformat == V4L2_PIX_FMT_P010)
+			stride *= 2;
+
+		pfmt[0].sizeimage = szimage;
+		pfmt[0].bytesperline = ALIGN(stride, 128);
+""",
+    ]
+    for old in candidates:
+        if old in text:
+            path.write_text(text.replace(old, old_helper if "sizeimage = szimage" not in old[:80] else old_helper, 1))
+            # second candidate's replacement should still be helper call; first already includes "} else {"
+            print(f"patched {path}: try_fmt uses vdec_capture_plane")
+            break
+    else:
+        raise SystemExit(f"{path}: try_fmt capture plane needle missing")
+    # Fix the virgin candidate: it doesn't include "} else {", so replace with helper+else
+    text = path.read_text()
+    if "vdec_capture_plane(inst, pixmp->pixelformat" not in text:
+        raise SystemExit(f"{path}: try_fmt still missing vdec_capture_plane")
+
+text = path.read_text()
+if "output2_buf_size = format.fmt.pix_mp.plane_fmt[0].sizeimage" not in text:
+    old = """		inst->fmt_cap = fmt;
+		inst->output2_buf_size =
+			venus_helper_get_framesz(pixfmt_cap, orig_pixmp.width, orig_pixmp.height);
+"""
+    new = """		inst->fmt_cap = fmt;
+		inst->output2_buf_size = format.fmt.pix_mp.plane_fmt[0].sizeimage;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: s_fmt output2_buf_size needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: s_fmt OPB sizeimage")
+
+text = path.read_text()
+if "vdec_capture_plane(inst, inst->fmt_cap->pixfmt" not in text:
+    old = """	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+		*num_planes = inst->fmt_cap->num_planes;
+		sizes[0] = venus_helper_get_framesz(inst->fmt_cap->pixfmt,
+						    inst->width,
+						    inst->height);
+		inst->output_buf_size = sizes[0];
+		*num_buffers = max(*num_buffers, out_num);
+		inst->num_output_bufs = *num_buffers;
+
+		mutex_lock(&inst->lock);
+		if (inst->codec_state == VENUS_DEC_STATE_CAPTURE_SETUP)
+			inst->codec_state = VENUS_DEC_STATE_STOPPED;
+		mutex_unlock(&inst->lock);
+		break;
+"""
+    new = """	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE: {
+		u32 cap_sz;
+
+		*num_planes = inst->fmt_cap->num_planes;
+		vdec_capture_plane(inst, inst->fmt_cap->pixfmt, inst->width,
+				   inst->height, NULL, &cap_sz);
+		sizes[0] = cap_sz;
+		if (inst->output2_buf_size)
+			sizes[0] = max(sizes[0], inst->output2_buf_size);
+		inst->output_buf_size = sizes[0];
+		*num_buffers = max(*num_buffers, out_num);
+		inst->num_output_bufs = *num_buffers;
+
+		mutex_lock(&inst->lock);
+		if (inst->codec_state == VENUS_DEC_STATE_CAPTURE_SETUP)
+			inst->codec_state = VENUS_DEC_STATE_STOPPED;
+		mutex_unlock(&inst->lock);
+		break;
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: queue_setup capture size needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: queue_setup MPEG2 stride size")
+
+path = root / "drivers/media/platform/qcom/venus/vdec_ctrls.c"
+text = path.read_text()
+# Marker is split across two comment lines ("Do not clamp" / "H.264").
+if "only VP8/MPEG2" not in text:
+    old_all = """			/*
+			 * dagu: GST uses this as CAPTURE/OPB count. VP8/MPEG2
+			 * firmware DPB min is 32; 32 OPB mmap buffers never
+			 * become dmabuf and waylandsink cannot import them.
+			 * H.264 reports ~16 and dmabuf import works.
+			 */
+			if (ctrl->val > 16)
+				ctrl->val = 16;
+"""
+    old_up = """	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+		if (!ret)
+			ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
+		break;
+"""
+    new_clamp = """			/*
+			 * dagu: GST uses this as CAPTURE/OPB count. Clamp
+			 * only VP8/MPEG2 (firmware DPB min 32). Do not clamp
+			 * H.264 (~19) or VP9 — those already dmabuf-import.
+			 */
+			if ((inst->hfi_codec == HFI_VIDEO_CODEC_VP8 ||
+			     inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2) &&
+			    ctrl->val > 16)
+				ctrl->val = 16;
+"""
+    new_full = """	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+		if (!ret) {
+			ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
+			/*
+			 * dagu: GST uses this as CAPTURE/OPB count. Clamp
+			 * only VP8/MPEG2 (firmware DPB min 32). Do not clamp
+			 * H.264 (~19) or VP9 — those already dmabuf-import.
+			 */
+			if ((inst->hfi_codec == HFI_VIDEO_CODEC_VP8 ||
+			     inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2) &&
+			    ctrl->val > 16)
+				ctrl->val = 16;
+		}
+		break;
+"""
+    if old_all in text:
+        path.write_text(text.replace(old_all, new_clamp, 1))
+        print(f"patched {path}: clamp MIN_BUFFERS VP8/MPEG2 only")
+    elif old_up in text:
+        path.write_text(text.replace(old_up, new_full, 1))
+        print(f"patched {path}: clamp MIN_BUFFERS_FOR_CAPTURE")
+    else:
+        raise SystemExit(f"{path}: MIN_BUFFERS_FOR_CAPTURE needle missing")
+
+# dagu: Venus=m cannot select prompt-less helpers to =y. CAMSS is already
+text = path.read_text()
+if "dagu: GST uses this as CAPTURE" not in text:
+    old = """	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+		if (!ret)
+			ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
+		break;
+"""
+    new = """	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+		if (!ret) {
+			ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
+			/*
+			 * dagu: GST uses this as CAPTURE/OPB count. VP8/MPEG2
+			 * firmware DPB min is 32; 32 OPB mmap buffers never
+			 * become dmabuf and waylandsink cannot import them.
+			 * H.264 reports ~16 and dmabuf import works.
+			 */
+			if (ctrl->val > 16)
+				ctrl->val = 16;
+		}
+		break;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MIN_BUFFERS_FOR_CAPTURE needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: clamp MIN_BUFFERS_FOR_CAPTURE")
 
 # dagu: Venus=m cannot select prompt-less helpers to =y. CAMSS is already
 # built-in; pull mem2mem / contig / h264 / vp9 into the Image so Venus

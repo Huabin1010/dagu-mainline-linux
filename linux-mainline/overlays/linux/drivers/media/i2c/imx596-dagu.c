@@ -35,6 +35,8 @@
 #define IMX596_REG_MODE_SELECT		CCI_REG8(0x0100)
 #define IMX596_MODE_STANDBY		0x00
 #define IMX596_MODE_STREAMING		0x01
+#define IMX596_REG_SW_RESET		CCI_REG8(0x0103)
+#define IMX596_REG_GROUP_HOLD		CCI_REG8(0x0104)
 
 #define IMX596_MCLK_FREQ		(19200 * HZ_PER_KHZ)
 #define IMX596_LINK_FREQ		(678400000ULL) /* CamX OP PLL DDR clock */
@@ -49,13 +51,22 @@
 #define IMX596_VTS_MAX			0xffff
 #define IMX596_EXPOSURE_MIN		1
 #define IMX596_EXPOSURE_MARGIN		22
-#define IMX596_EXPOSURE_DEFAULT		0x1886 /* CamX 0x0202/0x0203 */
+/* CamX preview 0x0202/0x0203. Indoor if too bright, drop back toward 0x0400. */
+#define IMX596_EXPOSURE_DEFAULT		0x1886
 #define IMX596_AGAIN_MIN		0
-#define IMX596_AGAIN_MAX		0x0fff
-#define IMX596_AGAIN_DEFAULT		0
+/* Analog PGA 0..0x7f. Do not expose 12-bit 0x0fff — SoftISP AE saturates it. */
+#define IMX596_AGAIN_MAX		0x7f
+#define IMX596_AGAIN_DEFAULT		0x20
 #define IMX596_REG_EXPOSURE		CCI_REG16(0x0202)
 #define IMX596_REG_AGAIN		CCI_REG16(0x0204)
 #define IMX596_REG_VTS			CCI_REG16(0x0340)
+/* Sony 16-bit BE. CCI_REG16_LE did not latch 0x0600 (STREAMON readback 0). */
+#define IMX596_REG_TEST_PATTERN		CCI_REG16(0x0600)
+#define IMX596_TEST_PATTERN_DISABLE	0
+#define IMX596_TEST_PATTERN_SOLID	1
+#define IMX596_TEST_PATTERN_COLOR_BARS	2
+#define IMX596_TEST_PATTERN_GREY	3
+#define IMX596_TEST_PATTERN_WALKING	256
 #define IMX596_MBUS_CODE		MEDIA_BUS_FMT_SBGGR10_1X10
 
 #define to_imx596(_sd)			container_of(_sd, struct imx596, sd)
@@ -114,25 +125,30 @@ static int imx596_power_on(struct device *dev)
 	struct imx596 *priv = to_imx596(sd);
 	int ret;
 
-	/* CAF regulator-names: cam_vio, cam_vana, cam_vdig. XCLR after MCLK. */
+	/*
+	 * CAF qcom,cam-sensor@2 regulator-names:
+	 *   cam_vio, cam_vana, cam_vdig, cam_clk
+	 * Enable in that order. VDIG before AVDD left the pixel array at OB
+	 * while CCI/MIPI still produced RAW10.
+	 */
 	ret = imx596_enable_supply(priv, "vddio");
 	if (ret)
 		return ret;
 	usleep_range(1000, 2000);
 
-	ret = imx596_enable_supply(priv, "vddd");
-	if (ret)
-		goto disable_vddio;
-	usleep_range(1000, 2000);
-
 	ret = imx596_enable_supply(priv, "vdda");
 	if (ret)
-		goto disable_vddd;
+		goto disable_vddio;
+	usleep_range(5000, 6000);
+
+	ret = imx596_enable_supply(priv, "vddd");
+	if (ret)
+		goto disable_vdda;
 	usleep_range(1000, 2000);
 
 	ret = clk_prepare_enable(priv->mclk);
 	if (ret)
-		goto disable_vdda;
+		goto disable_vddd;
 
 	usleep_range(1000, 2000);
 	/* CAF: reset low then high with MCLK running. GPIO is active-low. */
@@ -142,10 +158,10 @@ static int imx596_power_on(struct device *dev)
 	usleep_range(50 * USEC_PER_MSEC, 55 * USEC_PER_MSEC);
 	return 0;
 
-disable_vdda:
-	imx596_disable_supply(priv, "vdda");
 disable_vddd:
 	imx596_disable_supply(priv, "vddd");
+disable_vdda:
+	imx596_disable_supply(priv, "vdda");
 disable_vddio:
 	imx596_disable_supply(priv, "vddio");
 	return ret;
@@ -158,7 +174,9 @@ static int imx596_power_off(struct device *dev)
 
 	gpiod_set_value_cansleep(priv->reset_gpio, 1);
 	clk_disable_unprepare(priv->mclk);
-	regulator_bulk_disable(ARRAY_SIZE(priv->supplies), priv->supplies);
+	imx596_disable_supply(priv, "vddd");
+	imx596_disable_supply(priv, "vdda");
+	imx596_disable_supply(priv, "vddio");
 	return 0;
 }
 
@@ -236,6 +254,52 @@ static int imx596_get_selection(struct v4l2_subdev *sd,
 	}
 }
 
+static const char * const imx596_test_pattern_menu[] = {
+	"Disabled",
+	"Color Bars",
+	"Solid Color",
+	"Grey Color Bars",
+	"Walking 1s",
+};
+
+static const int imx596_test_pattern_val[] = {
+	IMX596_TEST_PATTERN_DISABLE,
+	IMX596_TEST_PATTERN_COLOR_BARS,
+	IMX596_TEST_PATTERN_SOLID,
+	IMX596_TEST_PATTERN_GREY,
+	IMX596_TEST_PATTERN_WALKING,
+};
+
+static int imx596_write_test_pattern(struct imx596 *priv, u32 menu_index)
+{
+	u16 val = imx596_test_pattern_val[menu_index];
+	u64 rb0 = 0, rb1 = 0;
+	int ret;
+
+	ret = cci_write(priv->regmap, IMX596_REG_GROUP_HOLD, 0x01, NULL);
+	if (ret)
+		return ret;
+	ret = cci_write(priv->regmap, IMX596_REG_TEST_PATTERN, val, NULL);
+	if (ret)
+		return ret;
+	/* Split 8-bit in case 16-bit BE does not land on this silicon. */
+	ret = cci_write(priv->regmap, CCI_REG8(0x0600), val & 0xff, NULL);
+	if (ret)
+		return ret;
+	ret = cci_write(priv->regmap, CCI_REG8(0x0601), (val >> 8) & 0xff, NULL);
+	if (ret)
+		return ret;
+	ret = cci_write(priv->regmap, IMX596_REG_GROUP_HOLD, 0x00, NULL);
+	if (ret)
+		return ret;
+
+	cci_read(priv->regmap, CCI_REG8(0x0600), &rb0, NULL);
+	cci_read(priv->regmap, CCI_REG8(0x0601), &rb1, NULL);
+	dev_info(priv->dev, "dagu imx596 tpg wr=0x%x rb=0x%llx/0x%llx\n",
+		 val, rb0, rb1);
+	return 0;
+}
+
 static int imx596_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct imx596 *priv = container_of(ctrl->handler, struct imx596,
@@ -264,6 +328,9 @@ static int imx596_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_VBLANK:
 		ret = cci_write(priv->regmap, IMX596_REG_VTS,
 				ctrl->val + IMX596_HEIGHT, NULL);
+		break;
+	case V4L2_CID_TEST_PATTERN:
+		ret = imx596_write_test_pattern(priv, ctrl->val);
 		break;
 	default:
 		break;
@@ -658,6 +725,8 @@ static const struct cci_reg_sequence imx596_init[] = {
 };
 
 static const struct cci_reg_sequence imx596_mode_2592x1952[] = {
+	{ CCI_REG8(0x0112), 0x0a },
+	{ CCI_REG8(0x0113), 0x0a },
 	{ CCI_REG8(0x0114), 0x03 },
 	{ CCI_REG8(0x0342), 0x12 },
 	{ CCI_REG8(0x0343), 0x24 },
@@ -720,7 +789,7 @@ static const struct cci_reg_sequence imx596_mode_2592x1952[] = {
 	{ CCI_REG8(0x3116), 0x01 },
 	{ CCI_REG8(0x3117), 0xf4 },
 	{ CCI_REG8(0x0204), 0x00 },
-	{ CCI_REG8(0x0205), 0x00 },
+	{ CCI_REG8(0x0205), 0x20 },
 	{ CCI_REG8(0x020e), 0x01 },
 	{ CCI_REG8(0x020f), 0x00 },
 	{ CCI_REG8(0x0216), 0x00 },
@@ -746,12 +815,18 @@ static int imx596_enable_streams(struct v4l2_subdev *sd,
 	if (ret < 0)
 		return ret;
 
+	/* Sony SW reset before dumping 364-entry trim into a cold state machine. */
+	ret = cci_write(priv->regmap, IMX596_REG_SW_RESET, 0x01, NULL);
+	if (ret)
+		goto rpm_put;
+	usleep_range(10 * USEC_PER_MSEC, 12 * USEC_PER_MSEC);
+
 	ret = cci_multi_reg_write(priv->regmap, imx596_init,
 				  ARRAY_SIZE(imx596_init), NULL);
 	if (ret)
 		goto rpm_put;
 
-	ret = cci_write(priv->regmap, CCI_REG8(0x0104), 0x01, NULL);
+	ret = cci_write(priv->regmap, IMX596_REG_GROUP_HOLD, 0x01, NULL);
 	if (ret)
 		goto rpm_put;
 
@@ -760,7 +835,7 @@ static int imx596_enable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		goto rpm_put;
 
-	ret = cci_write(priv->regmap, CCI_REG8(0x0104), 0x00, NULL);
+	ret = cci_write(priv->regmap, IMX596_REG_GROUP_HOLD, 0x00, NULL);
 	if (ret)
 		goto rpm_put;
 
@@ -769,7 +844,13 @@ static int imx596_enable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		goto rpm_put;
 
+	ret = cci_write(priv->regmap, IMX596_REG_GROUP_HOLD, 0x01, NULL);
+	if (ret)
+		goto rpm_put;
 	ret = __v4l2_ctrl_handler_setup(priv->sd.ctrl_handler);
+	if (ret)
+		goto rpm_put;
+	ret = cci_write(priv->regmap, IMX596_REG_GROUP_HOLD, 0x00, NULL);
 	if (ret)
 		goto rpm_put;
 
@@ -783,6 +864,9 @@ static int imx596_enable_streams(struct v4l2_subdev *sd,
 	{
 		u64 fc = 0, mode = 0, lanes = 0, dt = 0;
 		u64 pll_op = 0, prediv = 0, vt_mpy = 0;
+		u64 exp = 0, again = 0, bin = 0, outw = 0;
+		u64 tpg0 = 0, tpg1 = 0, qbc0 = 0, qbc1 = 0;
+		u64 analog0 = 0, analog1 = 0, hdr = 0, ob = 0;
 
 		cci_read(priv->regmap, CCI_REG8(0x0005), &fc, NULL);
 		cci_read(priv->regmap, IMX596_REG_MODE_SELECT, &mode, NULL);
@@ -791,10 +875,24 @@ static int imx596_enable_streams(struct v4l2_subdev *sd,
 		cci_read(priv->regmap, CCI_REG8(0x030d), &prediv, NULL);
 		cci_read(priv->regmap, CCI_REG8(0x030f), &pll_op, NULL);
 		cci_read(priv->regmap, CCI_REG8(0x0307), &vt_mpy, NULL);
+		cci_read(priv->regmap, IMX596_REG_EXPOSURE, &exp, NULL);
+		cci_read(priv->regmap, IMX596_REG_AGAIN, &again, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x0901), &bin, NULL);
+		cci_read(priv->regmap, CCI_REG16(0x034c), &outw, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x0600), &tpg0, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x0601), &tpg1, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x3200), &qbc0, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x3201), &qbc1, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x3246), &analog0, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x3247), &analog1, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x3220), &hdr, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x0b06), &ob, NULL);
 		dev_info(priv->dev,
-			 "dagu imx596 streaming %dx%d fc=0x%llx mode=0x%llx dt=0x%llx lanes=0x%llx prediv=0x%llx op=0x%llx vt=0x%llx mclk=%lu\n",
+			 "dagu imx596 streaming %dx%d fc=0x%llx mode=0x%llx dt=0x%llx lanes=0x%llx prediv=0x%llx op=0x%llx vt=0x%llx exp=0x%llx again=0x%llx bin=0x%llx outw=0x%llx tpg=0x%llx/0x%llx qbc=0x%llx/0x%llx analog=0x%llx/0x%llx hdr=0x%llx ob=0x%llx mclk=%lu\n",
 			 IMX596_WIDTH, IMX596_HEIGHT, fc, mode, dt, lanes,
-			 prediv, pll_op, vt_mpy, clk_get_rate(priv->mclk));
+			 prediv, pll_op, vt_mpy, exp, again, bin, outw,
+			 tpg0, tpg1, qbc0, qbc1, analog0, analog1, hdr, ob,
+			 clk_get_rate(priv->mclk));
 	}
 	return 0;
 
@@ -926,7 +1024,7 @@ static int imx596_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 
-	ret = v4l2_ctrl_handler_init(&priv->ctrl_handler, 8);
+	ret = v4l2_ctrl_handler_init(&priv->ctrl_handler, 12);
 	if (ret)
 		goto entity_cleanup;
 	v4l2_ctrl_new_int_menu(&priv->ctrl_handler, NULL, V4L2_CID_LINK_FREQ,
@@ -936,6 +1034,7 @@ static int imx596_probe(struct i2c_client *client)
 			  IMX596_PIXEL_RATE, 1, IMX596_PIXEL_RATE);
 	{
 		struct v4l2_ctrl *hblank;
+		struct v4l2_fwnode_device_properties props;
 		s64 hblank_val = IMX596_HTS - IMX596_WIDTH;
 		s64 vblank_val = IMX596_VTS - IMX596_HEIGHT;
 		s64 exposure_max = IMX596_VTS - IMX596_EXPOSURE_MARGIN;
@@ -957,6 +1056,13 @@ static int imx596_probe(struct i2c_client *client)
 						    IMX596_EXPOSURE_MIN,
 						    exposure_max, 1,
 						    IMX596_EXPOSURE_DEFAULT);
+		v4l2_ctrl_new_std_menu_items(&priv->ctrl_handler, &imx596_ctrl_ops,
+					    V4L2_CID_TEST_PATTERN,
+					    ARRAY_SIZE(imx596_test_pattern_menu) - 1,
+					    0, 0, imx596_test_pattern_menu);
+		if (!v4l2_fwnode_device_parse(priv->dev, &props))
+			v4l2_ctrl_new_fwnode_properties(&priv->ctrl_handler,
+						       &imx596_ctrl_ops, &props);
 	}
 	priv->sd.ctrl_handler = &priv->ctrl_handler;
 	if (priv->ctrl_handler.error) {
@@ -1031,7 +1137,7 @@ MODULE_DEVICE_TABLE(of, imx596_of_match);
 
 static struct i2c_driver imx596_i2c_driver = {
 	.driver = {
-		.name = "imx596-dagu",
+		.name = "imx596",
 		.pm = &imx596_pm_ops,
 		.of_match_table = imx596_of_match,
 	},

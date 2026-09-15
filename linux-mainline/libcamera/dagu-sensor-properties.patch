@@ -9,4 +9,7 @@
 +	} },
 +	{ "imx596", {
 +		.unitCellSize = { 800, 800 },
++	} },
++	{ "imx596-dagu", {
++		.unitCellSize = { 800, 800 },
  	} },

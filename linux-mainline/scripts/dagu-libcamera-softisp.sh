@@ -30,6 +30,9 @@ block = '''	{ "s5kjn1", {
 	{ "imx596", {
 		.unitCellSize = { 800, 800 },
 	} },
+	{ "imx596-dagu", {
+		.unitCellSize = { 800, 800 },
+	} },
 '''
 if needle not in text:
     sys.exit("imx219 needle missing")

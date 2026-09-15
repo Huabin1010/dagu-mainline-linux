@@ -1172,6 +1172,8 @@
 		vdda-supply = <&camera_front_vana>;
 		vddio-supply = <&vreg_l1c_1p8>;
 		vddd-supply = <&vreg_l2c_1p15>;
+		orientation = <0>; /* V4L2_CAMERA_ORIENTATION_FRONT */
+		rotation = <0>;
 
 		port {
 			imx596_ep: endpoint {

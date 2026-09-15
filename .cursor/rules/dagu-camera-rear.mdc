@@ -1,0 +1,27 @@
+---
+description: 后置 s5kjn1 已出帧：禁止再按 CamX 表改回 C-PHY
+alwaysApply: true
+---
+
+# dagu：后置摄像头（飞行合格路径）
+
+s5kjn1 预览已按安卓 **live CSIPHY** 对齐：2PH D-PHY 4-lane 出 RAW，SoftISP skip 4×4 全 FOV，Snapshot 约 30fps。CamX 4080 色谱表的 C-PHY 不是正在跑的 PHY。改前置时不得捎带回后置 C-PHY。
+
+## 正路（缺一项即失败）
+
+- 传感器：CCI0@0x10，csiphy1，4080×3060 GBRG packed10 `pGAA`，`0x0114=0x0300`
+- DT：`csiphy1_ep` `bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>`（本树 = 4），`data-lanes = <0 1 2 3>`，`clock-lanes = <7>`；传感器 `data-lanes = <1 2 3 4>`
+- CSIPHY1 遥测：`r0800=0x02` `c5=0xd5` `c7=0x02` `cphy=0` settle `0x13`；传感器 `r0114=0x300`
+- Viewfinder：skip 4×4 → **1020×764**（对齐安卓 IFE 1920×1080 全 FOV，不是中心裁切）
+
+## 禁止
+
+- `0x0114=0x0301` / `MEDIA_BUS_TYPE_CSI2_CPHY` / 3-trio：CSID FIFO 卡住，VFE 0 帧，Snapshot 黑屏。apply-overlays 必须拒绝 header 里残留 `0x0301`
+- `bus-type = <5>`（PARALLEL）或手写魔数 1 当 C-PHY
+- CSID SOT `0xffffffff`、FIFO `0x20000` 解 mask
+- 改前置 skip / csiphy4 来「修」后置
+
+```text
+# ❌ CamX bin 0x0301 C-PHY → r0800=0xe → 黑屏
+# ✅ live dump 0x0800=0x02 D-PHY + skip 4×4 1020×764 @30
+```

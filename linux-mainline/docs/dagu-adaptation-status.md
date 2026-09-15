@@ -203,9 +203,9 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 |----|------|
 | 电源 / MCLK / 复位 / CCI | probe 成功，进 media 图。上电顺序 VIO → VANA → VDIG → MCLK → XSHUTDOWN |
 | 预览尺寸 | 4080×3060 GBRG 10-bit，fourcc `pGAA`，`/dev/video0` |
-| PHY | 安卓 CamX 4080 预览 **C-PHY 3-trio**（`0x0114=0x0301`）。D-PHY 4-lane 只在 8160×6120 全幅表 |
-| DT | `bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>`（本 7.0 树 = 1），`data-lanes = <1 2 3>`。**禁止写 `<5>`**，5 是 PARALLEL，CAMSS probe `-22`，Snapshot「No Camera Found」 |
-| CSIPHY | csiphy1 C-PHY settle `0x12`（CamX）；不要拿 D-PHY `0x13` 去跑 4080 |
+| PHY | 安卓预览 **D-PHY 4-lane**（live CSIPHY `0x0800=0x02` / `0x0814=0xD5`，`0x0114=0x0300`）。CamX 4080 表的 C-PHY `0x0301` 会让 CSID/VFE 黑屏 |
+| DT | `bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>`（本树 = 4），`data-lanes = <1 2 3 4>`，`clock-lanes = <7>` |
+| CSIPHY | csiphy1 D-PHY settle `0x13`（安卓 dump）；不要用 C-PHY `0x12` 跑 4080 预览 |
 | STREAMON | 先写 page `0x4000` 传感器/PLL；MCU `0x2400` 按 10/20/50/100 ms 扫描，NACK 不判失败。验收：`/tmp/rear.raw` 约 15.6 MB |
 
 已踩过、不要退回去的坑：

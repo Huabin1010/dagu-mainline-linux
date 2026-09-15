@@ -3123,36 +3123,37 @@ if marker not in text and "dagu: 0x2400 delay sweep then 0x4000 mode" not in tex
 
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
-marker = "dagu: CamX 4080 C-PHY 0x0115=1"
-# Undo the D-PHY Frankenstein (4080 2x2 MCU + 0x0114=0x0300). CamX 4080 is C-PHY.
-if "dagu: Android preview 4-lane D-PHY 0x0115=0" in text:
+marker = "dagu: Android live D-PHY 4-lane 0x0115=0"
+# Live Android CSIPHY1 preview is 2PH D-PHY (0x0800=0x02). CamX 4080 C-PHY
+# 0x0114=0x0301 blacks CSID/VFE — do not re-apply it.
+if "dagu: CamX 4080 C-PHY 0x0115=1" in text:
     text = text.replace(
-        "	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: Android preview 4-lane D-PHY 0x0115=0 */\n",
         "	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */\n",
+        "	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: Android live D-PHY 4-lane 0x0115=0 */\n",
     )
     path.write_text(text)
     text = path.read_text()
-    print(f"patched {path}: revert D-PHY 0x0114 to CamX C-PHY")
+    print(f"patched {path}: revert C-PHY 0x0114 to Android live D-PHY")
 if marker not in text:
     replaced = False
     for old in (
-        "	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: s5kjn1 4-lane D-PHY 0x0115=0 */\n",
-        "	{ CCI_REG16(0x0114), 0x0300 },\n",
+        "	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */\n",
         "	{ CCI_REG16(0x0114), 0x0301 },\n",
+        "	{ CCI_REG16(0x0114), 0x0300 },\n",
     ):
         if old in text:
-            text = text.replace(old, "	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */\n", 1)
+            text = text.replace(old, "	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: Android live D-PHY 4-lane 0x0115=0 */\n", 1)
             replaced = True
             break
     if not replaced:
-        raise SystemExit(f"{path}: 0x0114 C-PHY needle missing")
+        raise SystemExit(f"{path}: 0x0114 D-PHY needle missing")
     path.write_text(text)
     print(f"patched {path}: {marker}")
 hdr = (root / "drivers/media/i2c/s5kjn1-dagu-regs.h").read_text()
-if "{ CCI_REG16(0x0114), 0x0300 }" in hdr:
-    raise SystemExit("s5kjn1-dagu-regs.h 4080 still D-PHY 0x0114=0x0300")
+if "{ CCI_REG16(0x0114), 0x0301 }" in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h 4080 still CamX C-PHY 0x0114=0x0301")
 if marker not in hdr:
-    raise SystemExit("s5kjn1-dagu-regs.h missing CamX C-PHY 0x0114")
+    raise SystemExit("s5kjn1-dagu-regs.h missing Android live D-PHY 0x0114")
 if "s5kjn1_dagu_4080x3060_mcu" not in hdr:
     raise SystemExit("s5kjn1-dagu-regs.h missing MCU 0x2400 table")
 if "s5kjn1_dagu_2040x1530_mode" not in hdr:

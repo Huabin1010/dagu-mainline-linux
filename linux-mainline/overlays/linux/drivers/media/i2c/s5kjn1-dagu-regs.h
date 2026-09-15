@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * CamX 4080x3060 crop/PLL for dagu Qtech s5kjn1 preview.
- * PHY is C-PHY 3-trio (0x0114=0x0301). The only D-PHY table in
- * com.qti.sensormodule.dagu_qtech_s5kjn1_wide.bin is 8160x6120
- * (0x0114=0x0300, 0x0900=0x0111). Do not mix 4080 2x2 MCU with D-PHY.
+ * Live Android preview CSIPHY1 is 2PH D-PHY (0x0800=0x02, 0x0814=0xD5,
+ * settle 0x13) so 0x0114=0x0300 (4-lane). CamX chromatix 4080 C-PHY
+ * 0x0114=0x0301 does not match the running PHY and blacks CSID/VFE.
  *
  * MCU page 0x2400 is optional: Qtech NACKs 0x6028=0x2400 until the MCU
  * wakes. STREAMON writes 0x4000 sensor/PHY/PLL even if MCU is silent.
@@ -274,7 +274,7 @@ static const struct cci_reg_sequence s5kjn1_dagu_4080x3060_mode[] = {
 	{ CCI_REG16(0x0384), 0x0002 },
 	{ CCI_REG16(0x0386), 0x0002 },
 	{ CCI_REG16(0x0110), 0x1002 },
-	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */
+	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: Android live D-PHY 4-lane 0x0115=0 */
 	{ CCI_REG16(0x0116), 0x3000 },
 	{ CCI_REG16(0x0136), 0x1300 },
 	{ CCI_REG16(0x013e), 0x00c8 },
@@ -321,7 +321,7 @@ static const struct cci_reg_sequence s5kjn1_dagu_2040x1530_mode[] __maybe_unused
 	{ CCI_REG16(0x0384), 0x0002 },
 	{ CCI_REG16(0x0386), 0x0002 },
 	{ CCI_REG16(0x0110), 0x1002 },
-	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */
+	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: Android live D-PHY 4-lane 0x0115=0 */
 	{ CCI_REG16(0x0116), 0x3000 },
 	{ CCI_REG16(0x0136), 0x1300 },
 	{ CCI_REG16(0x013e), 0x00c8 },

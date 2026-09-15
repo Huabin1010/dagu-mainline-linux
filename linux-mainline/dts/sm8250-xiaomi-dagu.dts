@@ -1183,7 +1183,7 @@
 /*
  * CAF: back_main s5kjn1 csiphy1 / CCI0 I2C0 @0x10, reset GPIO93, MCLK GPIO94.
  * Stock Android clock-rates = 19.2 MHz (not 24). Preview 4080x3060 GBRG 10-bit
- * C-PHY 3-trio (CamX 0x0114=0x0301). The D-PHY table is 8160x6120 only.
+ * D-PHY 4-lane (live CSIPHY 0x0800=0x02 / 0x0814=0xD5, 0x0114=0x0300).
  * VIO ldoc1 (L1C 1.8 V), AVDD GPIO31 2.8 V, VDIG ldoc3 (L3C 1.104 V).
  * Power: VIO → VANA → VDIG (CAF). VDIG before AVDD pins the array at OB.
  */
@@ -1213,12 +1213,11 @@
 		port {
 			s5kjn1_ep: endpoint {
 				/*
-				 * CamX 4080x3060 preview is C-PHY 3-trio
-				 * (0x0114=0x0301). D-PHY 4-lane is the 8160
-				 * full-res table only — mixing it with 2x2
-				 * MCU leaves the packer on pedestal noise.
+				 * Live Android preview MMIO is CAF 1.2.1 2PH
+				 * D-PHY 4-lane (csiphy 0x0800=0x02, 0x0814=0xD5).
+				 * CamX 0x0114=0x0301 C-PHY blacks CSID/VFE.
 				 */
-				data-lanes = <1 2 3>;
+				data-lanes = <1 2 3 4>;
 				link-frequencies = /bits/ 64 <700000000>;
 				remote-endpoint = <&csiphy1_ep>;
 			};
@@ -1274,8 +1273,9 @@
 		port@1 {
 			reg = <1>;
 			csiphy1_ep: endpoint {
-				data-lanes = <0 1 2>;
-				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
 				remote-endpoint = <&s5kjn1_ep>;
 			};
 		};

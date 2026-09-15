@@ -1,0 +1,8 @@
+device=dagu
+stamp=20260826-210700
+serial=<android-serial>
+build=OS2.0.10.0.ULZCNXM
+kernel=4.19.157-perf-gb57830672689
+root=magisk
+host=Linux build-host 7.0.0-30-generic #30-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 31 18:22:54 UTC 2026 x86_64 GNU/Linux
+

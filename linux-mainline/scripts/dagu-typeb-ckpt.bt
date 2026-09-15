@@ -1,0 +1,81 @@
+// Type B: kernel uprobe_events at the three stock-mutter offsets,
+// bpftrace consumes those tracepoints + dpu_enc_kickoff on one clock.
+// bpftrace 0.25 cannot resolve static apply_state / mid-function BL
+// as uprobe:so:offset — ftrace p:name file:offset can.
+//
+// 1 apply  0x165124  meta_wayland_actor_surface_apply_state
+// 2 sched  0x16517c  bl clutter_stage_schedule_update (Wayland 标了需要刷新)
+// 3 disp   clutter 0x73c0c  clutter_frame_clock_dispatch
+//
+// python substitutes __MAIN_PID__. python installs the uprobes first.
+
+BEGIN {
+  printf("typeb-ckpt MAIN=%d apply=0x165124 sched=0x16517c disp=0x73c0c\n", __MAIN_PID__);
+}
+
+tracepoint:dpu:dpu_enc_kickoff {
+  $now = nsecs;
+  $t0 = @last_kick;
+  @n_kick++;
+  if ($t0 != 0) {
+    $gap = ($now - $t0) / 1000000;
+    if ($gap >= 80 && $gap <= 200) {
+      $a = @f_apply == 0 ? 9999 : (@f_apply - $t0) / 1000000;
+      $s = @f_sched == 0 ? 9999 : (@f_sched - $t0) / 1000000;
+      $d = @f_disp == 0 ? 9999 : (@f_disp - $t0) / 1000000;
+      $h1 = ($a != 9999 && $a < 32) ? 1 : 0;
+      $h2 = ($s != 9999 && $s < 32) ? 1 : 0;
+      $h3 = ($d != 9999 && $d < 32) ? 1 : 0;
+      if ($h1 == 0) {
+        @n_gtk++;
+        printf("HOLE gap=%lld apply=%lld sched=%lld disp=%lld verdict=GTK\n",
+               $gap, $a, $s, $d);
+      } else if ($h2 == 0) {
+        @n_wayland++;
+        printf("HOLE gap=%lld apply=%lld sched=%lld disp=%lld verdict=WAYLAND\n",
+               $gap, $a, $s, $d);
+      } else if ($h3 == 0) {
+        @n_clock++;
+        printf("HOLE gap=%lld apply=%lld sched=%lld disp=%lld verdict=FRAMECLOCK\n",
+               $gap, $a, $s, $d);
+      } else {
+        @n_ran++;
+        printf("HOLE gap=%lld apply=%lld sched=%lld disp=%lld verdict=DISPATCHED_NO_KICK\n",
+               $gap, $a, $s, $d);
+      }
+      @n_hole++;
+    } else if ($gap >= 50) {
+      @n_mid++;
+    }
+  }
+  @last_kick = $now;
+  @f_apply = 0;
+  @f_sched = 0;
+  @f_disp = 0;
+}
+
+tracepoint:uprobes:dagu_apply
+/pid == __MAIN_PID__/ {
+  @n_apply++;
+  if (@f_apply == 0) { @f_apply = nsecs; }
+}
+
+tracepoint:uprobes:dagu_sched
+/pid == __MAIN_PID__/ {
+  @n_sched++;
+  if (@f_sched == 0) { @f_sched = nsecs; }
+}
+
+tracepoint:uprobes:dagu_disp
+/pid == __MAIN_PID__/ {
+  @n_disp++;
+  if (@last_kick != 0 && (nsecs - @last_kick) >= 10000000) {
+    if (@f_disp == 0) { @f_disp = nsecs; }
+  }
+}
+
+END {
+  printf("END kick=%d hole80=%d mid50=%d apply=%d sched=%d disp=%d GTK=%d WAYLAND=%d FRAMECLOCK=%d DISPATCHED_NO_KICK=%d\n",
+    @n_kick, @n_hole, @n_mid, @n_apply, @n_sched, @n_disp,
+    @n_gtk, @n_wayland, @n_clock, @n_ran);
+}

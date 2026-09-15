@@ -1,0 +1,118 @@
+// Off-wake for gnome-shell main thread after Type B kickoff holes.
+// BCC offwaketime-bpfcc cannot attach here (no available_filter_functions).
+// Same idea: sched_switch off/on + sched_wakeup waker, plus the GNOME
+// path that SHOULD wake: meta_thread_queue_callback → g_source_set_ready_time
+// / g_main_context_wakeup → clutter_frame_clock_notify_presented.
+//
+// MAIN/KMS tids are passed as -D.
+
+#ifndef MAIN
+#define MAIN 1236
+#endif
+#ifndef KMS
+#define KMS 1253
+#endif
+
+BEGIN {
+  printf("offwake MAIN=%d KMS=%d\n", MAIN, KMS);
+}
+
+tracepoint:dpu:dpu_enc_kickoff {
+  $now = nsecs;
+  $prev = @last_kick;
+  @last_kick = $now;
+  @n_kick++;
+  if ($prev != 0) {
+    $gap = ($now - $prev) / 1000000;
+    if ($gap >= 50) {
+      $t0 = $prev;
+      printf("HOLE gap_ms=%llu kick#%d t0=%llu now=%llu qcb=%llu cbs=%llu srt=%llu gwu=%llu npr=%llu sch=%llu firstWake=%llu lastWake=%llu wtid=%d waker=%s\n",
+        $gap, @n_kick, $t0, $now,
+        @last_qcb, @last_cbs, @last_srt, @last_gwu, @last_npr, @last_sch,
+        @first_wake, @last_wake, @waker_tid, @waker_comm);
+      @n_hole++;
+    }
+  }
+  @first_wake = 0;
+  @n_wake_gap = 0;
+}
+
+tracepoint:sched:sched_switch
+/args->prev_pid == MAIN/ {
+  @offns = nsecs;
+}
+
+kprobe:try_to_wake_up
+{
+  $p = (struct task_struct *)arg0;
+  if ($p->pid == MAIN && @offns != 0 && (nsecs - @offns) >= 40000000) {
+    printf("TTWU %dms waker=%s wtid=%d\n  kstack:%s\n  ustack:%s\n",
+      (nsecs - @offns)/1000000, comm, tid, kstack, ustack);
+  }
+}
+
+tracepoint:sched:sched_wakeup
+/args->pid == MAIN/ {
+  @waker_comm = comm;
+  @waker_tid = tid;
+  if (@last_kick != 0 && (nsecs - @last_kick) >= 20000000) {
+    @wkstack = kstack;
+    @wustack = ustack;
+  }
+  @last_wake = nsecs;
+  if (@first_wake == 0 && @last_kick != 0) {
+    @first_wake = nsecs;
+  }
+  @n_wake_gap++;
+}
+
+tracepoint:sched:sched_switch
+/args->next_pid == MAIN && @offns != 0/ {
+  $d = (nsecs - @offns) / 1000000;
+  if ($d >= 40) {
+    printf("OFFWAKE %dms waker=%s wtid=%d\n  kstack:%s\n  ustack:%s\n",
+      $d, @waker_comm, @waker_tid, @wkstack, @wustack);
+  }
+  @offns = 0;
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/libmutter-18.so.0.0.0:meta_thread_queue_callback {
+  @last_qcb = nsecs;
+  @n_qcb++;
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/libmutter-18.so.0.0.0:0x1d5d00
+/tid == MAIN/ {
+  @last_cbs = nsecs;
+  @n_cbs++;
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/libglib-2.0.so.0.8800.0:g_source_set_ready_time
+/pid == MAIN/ {
+  @last_srt = nsecs;
+  @n_srt++;
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/libglib-2.0.so.0.8800.0:g_main_context_wakeup
+/pid == MAIN/ {
+  @last_gwu = nsecs;
+  @n_gwu++;
+  @gwu_tid = tid;
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/mutter-18/libmutter-clutter-18.so.0.0.0:clutter_frame_clock_notify_presented
+/tid == MAIN/ {
+  @last_npr = nsecs;
+  @n_npr++;
+}
+
+uprobe:/usr/lib/aarch64-linux-gnu/mutter-18/libmutter-clutter-18.so.0.0.0:clutter_frame_clock_schedule_update
+/tid == MAIN/ {
+  @last_sch = nsecs;
+  @n_sch++;
+}
+
+END {
+  printf("END kick=%d hole=%d qcb=%d cbs=%d srt=%d gwu=%d npr=%d sch=%d\n",
+    @n_kick, @n_hole, @n_qcb, @n_cbs, @n_srt, @n_gwu, @n_npr, @n_sch);
+}

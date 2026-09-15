@@ -1,0 +1,185 @@
+From: dagu adaptation
+Subject: freedreno/a6xx: destile GMEM into LINEAR per tile
+
+Chromium Ozone tags linux-dmabuf LINEAR. dagu-linear-mod.c forces GBM
+pixels LINEAR so the contract matches.
+
+a6xx BLIT_EVENT_STORE writes macrotile into those buffers; ANGLE/Skia
+then sample them as LINEAR (backdrop-filter snow). A shared-IB CP_BLIT
+with full-surface dest also snows the whole window: a6xx A2D has no
+TPL1_A2D_WINDOW_OFFSET, so one GMEM tile is replayed across the buffer.
+
+Do not bypass those batches to sysmem. unused-depth sysmem of tiled
+WebGL CCU-hangs a650 (irq 00800005, white window after hangcheck).
+
+Instead, skip BLIT_EVENT_STORE for TILE6_LINEAR color and destile each
+bin with CP_BLIT using the tile's sysmem rectangle and TILE6_2 GMEM
+source. Tiled (TILE6_3) WebGL keeps the normal event store.
+
+Load via LD_LIBRARY_PATH=/usr/local/lib/dagu-mesa for Chrome and
+Mineradio. Never replace gnome-shell Mesa.
+
+
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_blitter.h	2026-05-28 01:02:08.000000000 +0800
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_blitter.h	2026-09-12 10:07:45.426470595 +0800
+@@ -37,4 +37,15 @@
+ void fd6_resolve_tile(struct fd_batch *batch, fd_cs &cs, uint32_t base,
+                       struct pipe_surface *psurf, uint32_t unknown_8c01) assert_dt;
+ 
++/* a650: BLIT_EVENT_STORE into LINEAR writes macrotile. The shared
++ * tile_store CP_BLIT also snows — A2D has no window offset on a6xx, so
++ * a full-surface dest replays one GMEM tile across the whole buffer.
++ * Destile this tile with explicit sysmem coordinates.
++ */
++struct fd_tile;
++template <chip CHIP>
++void fd6_resolve_linear_tile(struct fd_batch *batch, fd_cs &cs,
++                             const struct fd_tile *tile, uint32_t base,
++                             struct pipe_surface *psurf) assert_dt;
++
+ #endif /* FD6_BLIT_H_ */
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_blitter.cc	2026-05-28 01:02:08.000000000 +0800
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_blitter.cc	2026-09-12 10:07:50.618502711 +0800
+@@ -17,6 +17,7 @@
+ 
+ #include "freedreno_blitter.h"
+ #include "freedreno_fence.h"
++#include "freedreno_gmem.h"
+ #include "freedreno_resource.h"
+ #include "freedreno_tracepoints.h"
+ 
+@@ -1236,6 +1237,68 @@
+ FD_GENX(fd6_resolve_tile);
+ 
+ template <chip CHIP>
++void
++fd6_resolve_linear_tile(struct fd_batch *batch, fd_cs &cs,
++                        const struct fd_tile *tile, uint32_t base,
++                        struct pipe_surface *psurf)
++{
++   const struct fd_gmem_stateobj *gmem = batch->gmem_state;
++   unsigned tw = MAX2(1, tile->bin_w);
++   unsigned th = MAX2(1, tile->bin_h);
++   unsigned x1 = tile->xoff;
++   unsigned y1 = tile->yoff;
++   uint32_t gmem_pitch = gmem->bin_w * batch->framebuffer.samples *
++                         util_format_get_blocksize(psurf->format);
++
++   {
++      fd_ncrb<CHIP> ncrb(cs, 26);
++
++      ncrb.add(GRAS_A2D_DEST_TL(CHIP, .x = x1, .y = y1));
++      ncrb.add(GRAS_A2D_DEST_BR(CHIP, .x = x1 + tw - 1, .y = y1 + th - 1));
++      ncrb.add(GRAS_A2D_SRC_XMIN(CHIP, 0));
++      ncrb.add(GRAS_A2D_SRC_XMAX(CHIP, tw - 1));
++      ncrb.add(GRAS_A2D_SRC_YMIN(CHIP, 0));
++      ncrb.add(GRAS_A2D_SRC_YMAX(CHIP, th - 1));
++
++      emit_blit_setup<CHIP>(ncrb, psurf->format, false, NULL, 0, ROTATE_0);
++      emit_blit_dst(ncrb, psurf->texture, psurf->format, psurf->level,
++                    psurf->first_layer);
++
++      enum a6xx_format sfmt = fd6_color_format(psurf->format, TILE6_LINEAR);
++      enum a3xx_msaa_samples samples = fd_msaa_samples(batch->framebuffer.samples);
++
++      ncrb.add(TPL1_A2D_SRC_TEXTURE_INFO(CHIP,
++         .color_format = sfmt,
++         .tile_mode = TILE6_2,
++         .color_swap = WZYX,
++         .srgb = util_format_is_srgb(psurf->format),
++         .samples = samples,
++         .samples_average = samples > MSAA_ONE,
++         .unk20 = true,
++         .unk22 = true,
++      ));
++      ncrb.add(TPL1_A2D_SRC_TEXTURE_SIZE(CHIP,
++         .width = tw,
++         .height = th,
++      ));
++
++      if (CHIP < A8XX)
++         base += batch->ctx->screen->gmem_base;
++
++      ncrb.add(TPL1_A2D_SRC_TEXTURE_BASE(CHIP, .qword = base));
++      ncrb.add(TPL1_A2D_SRC_TEXTURE_PITCH(CHIP, .pitch = gmem_pitch));
++   }
++
++   fd6_cache_inv<CHIP>(batch->ctx, cs);
++   fd_pkt7(cs, CP_WAIT_FOR_IDLE, 0);
++   fd_pkt7(cs, CP_BLIT, 1)
++      .add(CP_BLIT_0(.op = BLIT_OP_SCALE));
++   fd_pkt7(cs, CP_WAIT_FOR_IDLE, 0);
++   fd6_emit_flushes<CHIP>(batch->ctx, cs, FD6_FLUSH_CCU_COLOR | FD6_WAIT_FOR_IDLE);
++}
++FD_GENX(fd6_resolve_linear_tile);
++
++template <chip CHIP>
+ static bool
+ handle_rgba_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
+    assert_dt
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc	2026-05-28 01:02:08.000000000 +0800
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc	2026-09-12 10:07:55.751534462 +0800
+@@ -1859,6 +1859,14 @@
+    if (!fd_resource(psurf->texture)->valid)
+       return;
+ 
++   /* LINEAR color is destiled per-tile in fd6_emit_tile_gmem2mem.
++    * BLIT_EVENT_STORE writes macrotile; a shared CP_BLIT IB snows the
++    * whole window because a6xx A2D has no window offset.
++    */
++   if (buffer == FD_BUFFER_COLOR &&
++       fd_resource_tile_mode(psurf->texture, psurf->level) == 0)
++      return;
++
+    /* if we need to resolve, but cannot with BLIT event, we instead need
+     * to generate per-tile CP_BLIT (r2d) commands:
+     *
+@@ -1996,6 +2004,48 @@
+       trace_end_tile_stores(&batch->trace, cs);
+    }
+ 
++   if (batch->resolve & FD_BUFFER_COLOR) {
++      struct pipe_framebuffer_state *pfb = &batch->framebuffer;
++      const struct fd_gmem_stateobj *gmem = batch->gmem_state;
++      bool need_linear = false;
++
++      for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
++         struct pipe_surface *psurf = &pfb->cbufs[i];
++         if (!psurf->texture)
++            continue;
++         if (!(batch->resolve & (PIPE_CLEAR_COLOR0 << i)))
++            continue;
++         if (!fd_resource(psurf->texture)->valid)
++            continue;
++         if (fd_resource_tile_mode(psurf->texture, psurf->level) == 0) {
++            need_linear = true;
++            break;
++         }
++      }
++
++      if (need_linear) {
++         struct fd_ringbuffer *linear_ib =
++            fd_submit_new_ringbuffer(batch->submit, 0x800,
++                                     FD_RINGBUFFER_STREAMING);
++         fd_cs linear_cs(linear_ib);
++
++         for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
++            struct pipe_surface *psurf = &pfb->cbufs[i];
++            if (!psurf->texture)
++               continue;
++            if (!(batch->resolve & (PIPE_CLEAR_COLOR0 << i)))
++               continue;
++            if (!fd_resource(psurf->texture)->valid)
++               continue;
++            if (fd_resource_tile_mode(psurf->texture, psurf->level) != 0)
++               continue;
++            fd6_resolve_linear_tile<CHIP>(batch, linear_cs, tile,
++                                          gmem->cbuf_base[i], psurf);
++         }
++         emit_conditional_ib<CHIP>(cs, batch, tile, linear_ib);
++      }
++   }
++
+    fd6_set_render_mode<CHIP>(cs, {.mode = RM6_BIN_RENDER_END});
+ }
+ 

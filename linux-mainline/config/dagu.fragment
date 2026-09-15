@@ -1,0 +1,230 @@
+# dagu (SM8250) P0 — ramdisk-only boot. Applied on arm64 defconfig.
+# Lessons from Kernel-Build/ginkgo: SoC clocks and storage/USB must be
+# built-in; modules are useless until Ubuntu on userdata is mounted.
+
+# Kryo 585 = Cortex-A77 + A55: no FEAT_LVA.
+# Live HyperOS 4.19 dump: VA_BITS_39 + 3-level tables. Kernel code sits at
+# 0xa0080000 (ABL 2MB base 0xa0000000 + text_offset 0x80000). 7.0 defconfig
+# is VA_BITS_52; 48 still uses 4-level tables that this QHEE map may reject.
+# CONFIG_ARM64_VA_BITS_52 is not set
+# CONFIG_ARM64_VA_BITS_48 is not set
+CONFIG_ARM64_VA_BITS_39=y
+CONFIG_ARM64_VA_BITS=39
+# CONFIG_ARM64_PTR_AUTH_KERNEL is not set
+# CONFIG_ARM64_BTI_KERNEL is not set
+# Live 4.19 dump has no KVM. 7.0 defconfig installs nVHE at EL2 and
+# fights QHEE already running on this HyperOS boot chain.
+# CONFIG_KVM is not set
+
+# Stock 4.19 Image is not an EFI stub (no MZ). ABL loads raw Image and jumps
+# it; EFI stub + CONFIG_EFI=y from arm64 defconfig is a boot-protocol mismatch.
+# CONFIG_EFI_STUB is not set
+# CONFIG_EFI is not set
+
+# arm64 defconfig does NOT set SM_GCC_8250 (same trap as ginkgo SM_GCC_6125).
+CONFIG_SM_GCC_8250=y
+CONFIG_SM_GPUCC_8250=y
+CONFIG_SM_DISPCC_8250=y
+CONFIG_SM_VIDEOCC_8250=y
+CONFIG_PINCTRL_SM8250=y
+CONFIG_INTERCONNECT_QCOM_SM8250=y
+
+# Console / earlycon (pads undocumented; still enable if a TAP appears)
+CONFIG_SERIAL_QCOM_GENI=y
+CONFIG_SERIAL_QCOM_GENI_CONSOLE=y
+CONFIG_SERIAL_EARLYCON=y
+CONFIG_CONSOLE_LOGLEVEL_DEFAULT=8
+
+# Console via DRM_MSM fbdev. 1600x2560x4 ≈ 16 MiB; fbdev overalloc 100%
+# wants ~32 MiB and defconfig CMA is 32 — modeset can fail with a black
+# panel while KTZ is already on from probe.
+CONFIG_CMA_SIZE_MBYTES=128
+CONFIG_FB=y
+# CONFIG_FB_SIMPLE is not set
+# CONFIG_DRM_SIMPLEDRM is not set
+# CONFIG_SYSFB_SIMPLEFB is not set
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+CONFIG_VT=y
+CONFIG_VT_CONSOLE=y
+CONFIG_LOGO=y
+CONFIG_LOGO_LINUX_CLUT224=y
+
+# UFS @ 1d84000 — defconfig has QCOM UFS / QMP PHY as module
+CONFIG_SCSI=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_SCSI_UFSHCD=y
+CONFIG_SCSI_UFSHCD_PLATFORM=y
+CONFIG_SCSI_UFS_QCOM=y
+CONFIG_PHY_QCOM_QMP=y
+CONFIG_PHY_QCOM_QMP_UFS=y
+CONFIG_EXT4_FS=y
+
+# USB gadget: gemini/ginkgo path is built-in g_serial (0525:a4a7, ttyGS0).
+# ConfigFS RNDIS in PID1 steals the UDC — skip it until UDC is proven.
+# elish DTS uses usb-role-switch + PM8150B Type-C; defconfig has these =m.
+CONFIG_USB_DWC3=y
+CONFIG_USB_DWC3_QCOM=y
+CONFIG_USB_DWC3_DUAL_ROLE=y
+CONFIG_USB_GADGET=y
+CONFIG_USB_G_SERIAL=y
+CONFIG_U_SERIAL_CONSOLE=y
+CONFIG_USB_CONFIGFS=y
+CONFIG_USB_CONFIGFS_RNDIS=y
+CONFIG_USB_CONFIGFS_ACM=y
+CONFIG_USB_CONFIGFS_SERIAL=y
+CONFIG_USB_U_SERIAL=y
+CONFIG_USB_CONFIGFS_F_FS=y
+CONFIG_PHY_QCOM_QMP_USB=y
+CONFIG_PHY_QCOM_QUSB2=y
+# sm8250 HS PHY is qcom,usb-snps-hs-7nm-phy (FEMTO V2), not QUSB2.
+# =m never loads in ramdisk → DWC3 waits forever, no UDC, no RNDIS.
+CONFIG_PHY_QCOM_USB_SNPS_FEMTO_V2=y
+CONFIG_TYPEC=y
+CONFIG_TYPEC_TCPM=y
+CONFIG_TYPEC_QCOM_PMIC=y
+CONFIG_USB_ROLE_SWITCH=y
+CONFIG_EXTCON=y
+# TYPEC_QCOM_PMIC depends on (DRM || DRM=n); defconfig has DRM=m which forces =m.
+# L81A dual-DPHY + MDP (not elish CPHY). GPU stays off.
+CONFIG_DRM=y
+CONFIG_DRM_KMS_HELPER=y
+CONFIG_DRM_DISPLAY_HELPER=y
+CONFIG_DRM_MSM=y
+CONFIG_QCOM_OCMEM=y
+CONFIG_QCOM_LLCC=y
+CONFIG_BACKLIGHT_CLASS_DEVICE=y
+CONFIG_BACKLIGHT_KTZ8866=y
+CONFIG_DRM_PANEL_XIAOMI_DAGU_L81A=y
+CONFIG_PHY_QCOM_QMP_COMBO=y
+CONFIG_USB_PS5169_DAGU=y
+
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_TMPFS=y
+CONFIG_CONFIGFS_FS=y
+
+# Keys (PM8150 pwrkey + resin volume-down + gpio-keys)
+CONFIG_INPUT_MISC=y
+CONFIG_INPUT_PM8941_PWRKEY=y
+CONFIG_KEYBOARD_GPIO=y
+# MSM restart turns an early panic into a ~2s fastboot bounce.
+# CONFIG_POWER_RESET_MSM is not set
+# PON + elish-common `mode-bootloader = <0x2>` makes reboot(bootloader) work.
+CONFIG_MFD_SPMI_PMIC=y
+CONFIG_POWER_RESET_QCOM_PON=y
+# CONFIG_POWER_RESET_SYSCON is not set
+# CONFIG_POWER_RESET_SYSCON_POWEROFF is not set
+
+# ABL leaves the KPSS watchdog armed. =m never loads in ramdisk, so it
+# resets to fastboot in ~2s. Built-in driver keeps pinging.
+CONFIG_WATCHDOG=y
+CONFIG_QCOM_WDT=y
+# Kernel must not ping forever if PID1 never starts (90s+ black USB).
+# CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED is not set
+# CONFIG_ARM_SBSA_WATCHDOG is not set
+
+CONFIG_PSTORE=y
+CONFIG_PSTORE_RAM=y
+CONFIG_PSTORE_CONSOLE=y
+CONFIG_MAGIC_SYSRQ=y
+
+# Hang in D-state / IRQ-off: dump stack. Do NOT panic on hung_task —
+# UFS QUERY_ATTR can sit in D-state >10s (exception vs clk_scaling lock)
+# and CONFIG_BOOTPARAM_HUNG_TASK_PANIC=1 kills the Ubuntu desktop.
+CONFIG_DEBUG_KERNEL=y
+CONFIG_DETECT_HUNG_TASK=y
+CONFIG_DEFAULT_HUNG_TASK_TIMEOUT=120
+# 7.0: this is an int (hung-task count to panic). 1 panics the Ubuntu
+# desktop when UFS QUERY_ATTR sits in D-state. Keep 0 = warn only.
+CONFIG_BOOTPARAM_HUNG_TASK_PANIC=0
+CONFIG_SOFTLOCKUP_DETECTOR=y
+CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=1
+CONFIG_HARDLOCKUP_DETECTOR=y
+CONFIG_HARDLOCKUP_DETECTOR_PREFER_BUDDY=y
+CONFIG_BOOTPARAM_HARDLOCKUP_PANIC=y
+CONFIG_PANIC_TIMEOUT=5
+
+CONFIG_REGULATOR_FIXED_VOLTAGE=y
+CONFIG_ARM_SMMU=y
+
+# P2: Kryo 585 stays at bootloader votes without this (ginkgo lesson).
+CONFIG_ARM_QCOM_CPUFREQ_HW=y
+CONFIG_QCOM_TSENS=y
+CONFIG_NVMEM_QCOM_QFPROM=y
+
+# P4 Himax: GENI SPI hangs this QHEE; display.fragment enables spi-gpio + Himax.
+# CONFIG_SPI_QCOM_GENI is not set
+
+# P5 QCA6390 / ath11k + BT (no MPSS on this APQ tablet)
+CONFIG_PCI=y
+CONFIG_PCIE_QCOM=y
+CONFIG_WLAN=y
+CONFIG_RFKILL=y
+CONFIG_CRYPTO_SHA256=y
+CONFIG_CFG80211=y
+CONFIG_MAC80211=y
+CONFIG_ATH11K=y
+CONFIG_ATH11K_PCI=y
+CONFIG_BT=y
+CONFIG_BT_BREDR=y
+CONFIG_BT_LE=y
+CONFIG_BT_HIDP=y
+CONFIG_BT_HCIUART=y
+CONFIG_BT_HCIUART_QCA=y
+CONFIG_SERIAL_DEV_BUS=y
+CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
+
+# P6 dual BQ27Z561 + 67W pumps + wireless
+CONFIG_BATTERY_BQ27XXX=y
+CONFIG_BATTERY_BQ27XXX_I2C=y
+CONFIG_POWER_SUPPLY=y
+CONFIG_CHARGER_BQ2597X_DAGU=y
+CONFIG_CHARGER_PM8150B_DAGU=y
+CONFIG_CHARGER_P9418_DAGU=y
+CONFIG_KEYBOARD_NANOSIC_DAGU=y
+CONFIG_HID_MULTITOUCH=y
+
+# P7 CS35L41 + SM8250 ASoC (ADSP / Q6)
+CONFIG_SOUND=y
+CONFIG_SND=y
+CONFIG_SND_SOC=y
+CONFIG_SND_SOC_CS35L41=y
+CONFIG_SND_SOC_CS35L41_I2C=y
+CONFIG_I2C_QCOM_GENI=y
+CONFIG_QCOM_APR=y
+CONFIG_SOUNDWIRE=y
+CONFIG_SND_SOC_QCOM=y
+# USB offload stays a module in defconfig and pins the SM8250 card to =m.
+# CONFIG_SND_SOC_USB is not set
+# CONFIG_SND_SOC_QDSP6_USB is not set
+CONFIG_SND_SOC_SM8250=y
+CONFIG_SND_SOC_QDSP6=y
+
+# P8 GPU firmware loader
+CONFIG_QCOM_MDT_LOADER=y
+CONFIG_QCOM_RMTFS_MEM=y
+CONFIG_REMOTEPROC=y
+CONFIG_QCOM_Q6V5_PAS=y
+CONFIG_QCOM_PIL_INFO=y
+CONFIG_RPMSG_QCOM_GLINK_SMEM=y
+CONFIG_SOUNDWIRE_QCOM=y
+
+# Camera / video / sensors (CAMSS + IIO; Venus/SLPI wait for staged mbn)
+CONFIG_SM_CAMCC_8250=y
+CONFIG_MEDIA_SUPPORT=y
+CONFIG_MEDIA_CAMERA_SUPPORT=y
+CONFIG_MEDIA_CONTROLLER=y
+CONFIG_VIDEO_DEV=y
+CONFIG_VIDEO_V4L2_SUBDEV_API=y
+CONFIG_V4L_PLATFORM_DRIVERS=y
+CONFIG_V4L_MEM2MEM_DRIVERS=y
+CONFIG_VIDEO_QCOM_CAMSS=y
+CONFIG_VIDEO_QCOM_VENUS=y
+CONFIG_IIO=y
+CONFIG_IIO_BUFFER=y
+CONFIG_IIO_TRIGGERED_BUFFER=y
+CONFIG_IIO_ST_LSM6DSX=y
+CONFIG_IIO_ST_LSM6DSX_I2C=y
+CONFIG_AK8975=y
+

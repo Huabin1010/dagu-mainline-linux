@@ -1,0 +1,38 @@
+From: dagu
+Subject: [PATCH] drm/msm/dpu: skip redundant DSC bind on every kickoff
+
+Mainline dpu_encoder_prepare_for_kickoff() calls dpu_encoder_prep_dsc()
+on every frame. That path rewrites DSC PPS, rebinds dsc0→pp0 / dsc1→pp1,
+and sets CTL_FLUSH bit 22 (pending_flush_dsc). On Xiaomi dagu L81A
+(SM8250, 1600×2560@120 dual-DSC) the mux rewrite stalls wait_event on
+CTL_FLUSH 107-219 ms (pending always 0x4218c0). DRM debug shows
+"Binding dsc:0 to pp:0" / "Binding dsc:1 to pp:1" on every atomic.
+
+Keep DSC enabled. Bind once at enable / hw_reset / runtime resume;
+later kickoffs leave the mux. Disable still unpreps.
+
+Applied by linux-mainline/scripts/apply-overlays.sh
+(marker: dagu: skip redundant DSC prep).
+
+Do not flash until head.S is checked (DAGU_PRIMARY_ENTRY_PROBE=0).
+
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+index 0000000..dagu0006 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -215,6 +215,11 @@ struct dpu_encoder_virt {
+ 
+ 	/* DSC configuration */
+ 	struct drm_dsc_config *dsc;
++	/* dagu: skip redundant DSC prep. Mainline rebinds DSC and
++	 * pending_flush_dsc (CTL bit 22) on every kickoff. L81A 120 Hz
++	 * dual-DSC then stalls CTL_FLUSH wait_event 107-219 ms.
++	 */
++	bool dsc_prepared;
+ };
+ 
+ #define to_dpu_encoder_virt(x) container_of(x, struct dpu_encoder_virt, base)

@@ -1,0 +1,52 @@
+From: dagu
+Subject: [PATCH] dagu: use KMS deadline timer even if the thread is NORMAL
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2).
+
+is_using_deadline_timer() requires ENABLED *and* scheduling priority
+!= NORMAL. On dagu rtkit never raises the KMS thread, so the timer
+stays off. update_ready() then queues a pending_update when a page
+flip is in flight, and schedule_process() refuses to flush it
+(g_warning_once). maybe_post runs, dpu_enc_kickoff waits ~100 ms.
+
+Treat ENABLED as sufficient.
+
+Live ELF:
+  0x1bbd3c paciasp / get_priority  →  mov w0,#1; ret
+
+---
+ src/backends/native/meta-kms-impl-device.c | 14 +-------------
+ 1 file changed, 1 insertion(+), 13 deletions(-)
+
+diff --git a/src/backends/native/meta-kms-impl-device.c b/src/backends/native/meta-kms-impl-device.c
+index 0000000..dagu0003 100644
+--- a/src/backends/native/meta-kms-impl-device.c
++++ b/src/backends/native/meta-kms-impl-device.c
+@@ -1849,26 +1849,14 @@ is_using_deadline_timer (MetaKmsImplDevice *impl_device)
+   MetaKmsImplDevicePrivate *priv =
+     meta_kms_impl_device_get_instance_private (impl_device);
+ 
+-  if (priv->deadline_timer_state != META_DEADLINE_TIMER_STATE_ENABLED)
+-    {
+-      return FALSE;
+-    }
+-  else
+-    {
+-      MetaKmsImpl *impl = meta_kms_impl_device_get_impl (impl_device);
+-      MetaThreadImpl *thread_impl = META_THREAD_IMPL (impl);
+-
+-      switch (meta_thread_impl_get_scheduling_priority (thread_impl))
+-        {
+-        case META_SCHEDULING_PRIORITY_NORMAL:
+-          return FALSE;
+-        case META_SCHEDULING_PRIORITY_REALTIME:
+-        case META_SCHEDULING_PRIORITY_HIGH_PRIORITY:
+-          return TRUE;
+-        }
+-
+-      g_assert_not_reached ();
+-    }
++  return priv->deadline_timer_state == META_DEADLINE_TIMER_STATE_ENABLED;
+ }
+ 
+ static CrtcFrame *

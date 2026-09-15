@@ -1,0 +1,12 @@
+[Unit]
+Description=dagu: refresh Resources GPU hwmon0 files
+After=dagu-resources-fix.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-resources-gpu-poll.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

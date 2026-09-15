@@ -1,0 +1,36 @@
+# P0 USB on top of DAGU_MINIMAL (PID1 proven by PID1-ping).
+# HS-only peripheral g_serial: UDC + ttyGS0 console (0525:a4a7).
+# PHYs (FEMTO_V2/QUSB2), GADGET, G_SERIAL, EXTCON already =y in base.
+#
+# No INTERCONNECT_QCOM_SM8250 here on purpose: its BCM voter drives
+# rpmh_write_batch(), which times out against QHEE's RSC and takes
+# dwc3_qcom_probe() down with it. The DTS deletes usb_1's "interconnects"
+# instead, which makes of_icc_get() hand back NULL and the driver skip it.
+CONFIG_USB_DWC3=y
+CONFIG_USB_DWC3_QCOM=y
+# Dual-role: default peripheral (g_serial). echo host to usb_role for OTG.
+CONFIG_USB_DWC3_DUAL_ROLE=y
+CONFIG_USB_ROLE_SWITCH=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_XHCI_PLATFORM=y
+CONFIG_USB_STORAGE=y
+CONFIG_USB_UAS=y
+CONFIG_USB_HID=y
+CONFIG_HID=y
+CONFIG_HID_GENERIC=y
+CONFIG_HID_MULTITOUCH=y
+CONFIG_HID_SUPPORT=y
+CONFIG_HIDRAW=y
+# BlueZ HOG (BLE mice/keyboards) feeds reports through /dev/uhid.
+CONFIG_UHID=y
+CONFIG_INPUT_MOUSEDEV=y
+# DWC3 needs a real IOMMU domain for its TRB/event buffers; see the
+# apps_smmu comment in sm8250-xiaomi-dagu.dts.
+CONFIG_ARM_SMMU=y
+# apps_smmu resets every S2CR at probe. QHEE hands over the display stream as
+# TRANS, not BYPASS, so qcom_smmu_cfg_probe() pins nothing ("preserved 0 boot
+# mappings") and the default FAULT policy makes the SMMU abort MDP's scanout of
+# cont_splash_region — panel black 26ms after fbcon takes over, backlight still
+# on. ARM_SMMU_DISABLE_BYPASS_BY_DEFAULT can't be turned off from here: its
+# prompt is "if EXPERT", so olddefconfig puts the "default y" straight back.
+# build-bootimg.sh passes arm-smmu.disable_bypass=0 instead.

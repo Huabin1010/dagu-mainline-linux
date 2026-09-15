@@ -1,0 +1,58 @@
+## @file
+#  The application to show the Boot Manager Menu.
+#
+#  dagu overlay: consume SimpleTextIn so volume keys on ButtonsDxe are visible.
+#
+#  Copyright (c) 2011 - 2018, Intel Corporation. All rights reserved.<BR>
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+#
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = BootManagerMenuApp
+  MODULE_UNI_FILE                = BootManagerMenuApp.uni
+  FILE_GUID                      = EEC25BDC-67F2-4D95-B1D5-F81B2039D11D
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = BootManagerMenuEntry
+
+[Sources]
+  BootManagerMenu.c
+  BootManagerMenu.h
+  BootManagerMenuStrings.uni
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  HiiLib
+  DebugLib
+  UefiLib
+  MemoryAllocationLib
+  UefiBootServicesTableLib
+  UefiApplicationEntryPoint
+  UefiBootManagerLib
+  DevicePathLib
+
+[Guids]
+
+[Protocols]
+  gEfiBootLogoProtocolGuid                      ## SOMETIMES_CONSUMES
+  gEfiLoadedImageDevicePathProtocolGuid         ## CONSUMES
+  gEfiSimpleTextInProtocolGuid                  ## CONSUMES
+  gEfiSimpleTextInputExProtocolGuid             ## CONSUMES
+
+[Pcd]
+  gEfiMdeModulePkgTokenSpaceGuid.PcdConOutRow                          ## PRODUCES
+  gEfiMdeModulePkgTokenSpaceGuid.PcdConOutColumn                       ## PRODUCES
+  gEfiMdeModulePkgTokenSpaceGuid.PcdVideoHorizontalResolution          ## PRODUCES
+  gEfiMdeModulePkgTokenSpaceGuid.PcdVideoVerticalResolution            ## PRODUCES
+  gEfiMdeModulePkgTokenSpaceGuid.PcdSetupConOutColumn                  ## SOMETIMES_CONSUMES
+  gEfiMdeModulePkgTokenSpaceGuid.PcdSetupConOutRow                     ## SOMETIMES_CONSUMES
+  gEfiMdeModulePkgTokenSpaceGuid.PcdSetupVideoHorizontalResolution     ## SOMETIMES_CONSUMES
+  gEfiMdeModulePkgTokenSpaceGuid.PcdSetupVideoVerticalResolution       ## SOMETIMES_CONSUMES
+
+[UserExtensions.TianoCore."ExtraFiles"]
+  BootManagerMenuAppExtra.uni

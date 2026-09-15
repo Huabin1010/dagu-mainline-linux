@@ -1,0 +1,52 @@
+# TestLabBridgeDxe v2: USB BOOT.LOG bridge for dagu UEFI bring-up.
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = TestLabBridgeDxe
+  FILE_GUID                      = 7c9f2a11-4b6e-4d2a-9e31-448d2011ab7f
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 3.0
+  ENTRY_POINT                    = TestLabBridgeDxeInitialize
+
+[Sources.common]
+  TestLabBridgeDxe.c
+  TestLabBridgeGuid.c
+  TestLabFatDisk.S
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  ShellPkg/ShellPkg.dec
+  Silicon/Qualcomm/QcomPkg/QcomPkg.dec
+  GPLDrivers/Library/SimpleInit/SimpleInit.dec
+
+[BuildOptions.common]
+  GCC:*_*_AARCH64_CC_FLAGS = -I$(MODULE_DIR)/../../Include
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DevicePathLib
+  MemoryAllocationLib
+  PrintLib
+  SerialPortLib
+  TimerLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiLib
+
+[Guids]
+  gTestLabBridgeProtocolGuid
+  gTestLabBridgeRamDiskGuid
+
+[Protocols]
+  gEfiBlockIoProtocolGuid
+  gEfiDevicePathProtocolGuid
+  gEfiShellProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
+  gEfiSimpleTextOutProtocolGuid
+
+[Depex]
+  gEfiSimpleTextOutProtocolGuid AND
+  gEfiGraphicsOutputProtocolGuid

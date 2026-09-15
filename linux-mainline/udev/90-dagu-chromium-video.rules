@@ -1,0 +1,6 @@
+# Chromium GPU sandbox (AddV4L2GpuPermissions) only brokers
+# /dev/video-dec0..4 and /dev/video-enc0..4. Venus is /dev/video14/15,
+# so %n would create video-dec14 (not in the allowlist).
+# Armbian SM8250: packages/bsp/common/etc/udev/rules.d/90-chromium-video.rules
+SUBSYSTEM=="video4linux", ATTR{name}=="qcom-venus-decoder", SYMLINK+="video-dec0", GROUP="video", MODE="0660"
+SUBSYSTEM=="video4linux", ATTR{name}=="qcom-venus-encoder", SYMLINK+="video-enc0", GROUP="video", MODE="0660"

@@ -1,0 +1,5659 @@
+#!/usr/bin/env bash
+# Copy overlay drivers into the kernel tree and register Kconfig/Makefile.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/env.sh
+source "$ROOT/scripts/env.sh"
+
+[[ -d "$KERNEL_SRC" ]] || { echo "run setup-kernel.sh" >&2; exit 1; }
+
+install_src() {
+	local rel=$1
+	local src="$ROOT/overlays/linux/$rel"
+	local dst="$KERNEL_SRC/$rel"
+	[[ -f "$src" ]] || { echo "missing overlay $src" >&2; exit 1; }
+	mkdir -p "$(dirname "$dst")"
+	cp -f "$src" "$dst"
+}
+
+install_src drivers/gpu/drm/panel/panel-xiaomi-dagu-l81a.c
+install_src drivers/video/backlight/ktz8866.c
+install_src drivers/input/touchscreen/himax-dagu.c
+install_src drivers/usb/misc/ps5169-dagu.c
+install_src drivers/input/keyboard/nanosic-dagu.c
+install_src drivers/power/supply/bq2597x-dagu.c
+install_src drivers/power/supply/pm8150b-charger-dagu.c
+install_src drivers/power/supply/p9418-dagu.c
+install_src drivers/power/supply/xiaomi-dual-fg.c
+install_src drivers/watchdog/qcom-wdt-early-dagu.c
+install_src drivers/gpu/drm/msm/msm_fbdev.c
+install_src drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c
+install_src drivers/media/i2c/imx596-dagu.c
+install_src drivers/media/i2c/s5kjn1-dagu-regs.h
+install_src drivers/media/v4l2loopback-dagu/v4l2loopback.c
+install_src drivers/media/v4l2loopback-dagu/v4l2loopback.h
+install_src drivers/media/v4l2loopback-dagu/v4l2loopback_formats.h
+install_src drivers/media/v4l2loopback-dagu/Makefile
+install_src drivers/media/v4l2loopback-dagu/Kconfig
+
+append_once() {
+	local file=$1
+	local needle=$2
+	local line=$3
+	grep -q "$needle" "$file" || echo "$line" >>"$file"
+}
+
+append_once "$KERNEL_SRC/drivers/gpu/drm/panel/Makefile" \
+	'DRM_PANEL_XIAOMI_DAGU_L81A' \
+	'obj-$(CONFIG_DRM_PANEL_XIAOMI_DAGU_L81A) += panel-xiaomi-dagu-l81a.o'
+
+append_once "$KERNEL_SRC/drivers/input/touchscreen/Makefile" \
+	'himax-dagu.o' \
+	'obj-$(CONFIG_TOUCHSCREEN_HIMAX_DAGU) += himax-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/usb/misc/Makefile" \
+	'ps5169-dagu.o' \
+	'obj-$(CONFIG_USB_PS5169_DAGU) += ps5169-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/input/keyboard/Makefile" \
+	'nanosic-dagu.o' \
+	'obj-$(CONFIG_KEYBOARD_NANOSIC_DAGU) += nanosic-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
+	'bq2597x-dagu.o' \
+	'obj-$(CONFIG_CHARGER_BQ2597X_DAGU) += bq2597x-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
+	'pm8150b-charger-dagu.o' \
+	'obj-$(CONFIG_CHARGER_PM8150B_DAGU) += pm8150b-charger-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
+	'p9418-dagu.o' \
+	'obj-$(CONFIG_CHARGER_P9418_DAGU) += p9418-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
+	'xiaomi-dual-fg.o' \
+	'obj-$(CONFIG_BATTERY_XIAOMI_DUAL_FG) += xiaomi-dual-fg.o'
+
+append_once "$KERNEL_SRC/drivers/watchdog/Makefile" \
+	'qcom-wdt-early-dagu.o' \
+	'obj-$(CONFIG_QCOM_WDT) += qcom-wdt-early-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/media/i2c/Makefile" \
+	'imx596-dagu.o' \
+	'obj-$(CONFIG_VIDEO_IMX596_DAGU) += imx596-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/media/Makefile" \
+	'v4l2loopback-dagu' \
+	'obj-$(CONFIG_VIDEO_V4L2LOOPBACK_DAGU) += v4l2loopback-dagu/'
+
+append_once "$KERNEL_SRC/drivers/media/Kconfig" \
+	'v4l2loopback-dagu/Kconfig' \
+	'source "drivers/media/v4l2loopback-dagu/Kconfig"'
+
+append_once "$KERNEL_SRC/drivers/gpu/drm/msm/Makefile" \
+	'msm_gpu_resources_sysfs.o' \
+	'msm-y += msm_gpu_resources_sysfs.o'
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+def insert_kconfig(path, needle, block):
+    text = path.read_text()
+    if block.splitlines()[0] in text:
+        return
+    if needle not in text:
+        raise SystemExit(f"needle {needle!r} missing in {path}")
+    path.write_text(text.replace(needle, block + needle, 1))
+
+insert_kconfig(
+    root / "drivers/gpu/drm/panel/Kconfig",
+    "config DRM_PANEL_NOVATEK_NT36523",
+    """config DRM_PANEL_XIAOMI_DAGU_L81A
+	tristate "Xiaomi Pad 5 Pro 12.4 L81A dual-DPHY panel"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Himax HX83121A dual-DSI DPHY panel used on Xiaomi dagu.
+	  Do not enable the elish NT36523 CPHY driver on this device.
+
+""",
+)
+
+insert_kconfig(
+    root / "drivers/input/touchscreen/Kconfig",
+    "config TOUCHSCREEN_HIMAX_HX83112B",
+    """config TOUCHSCREEN_HIMAX_DAGU
+	tristate "Himax HX83121 SPI touchscreen (Xiaomi dagu)"
+	depends on SPI
+	help
+	  SPI touchscreen on Xiaomi Pad 5 Pro 12.4. Pins: IRQ GPIO39, RST GPIO100.
+
+""",
+)
+
+insert_kconfig(
+    root / "drivers/usb/misc/Kconfig",
+    "config USB_HSIC_USB3503",
+    """config USB_PS5169_DAGU
+	tristate "Parade PS5169 USB/DP redriver (Xiaomi dagu)"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  USB3/DisplayPort redriver on Xiaomi Pad 5 Pro 12.4 (I2C 0x28).
+
+""",
+)
+
+insert_kconfig(
+    root / "drivers/input/keyboard/Kconfig",
+    "config KEYBOARD_GPIO",
+    """config KEYBOARD_NANOSIC_DAGU
+	tristate "Nanosic 803 keyboard MCU (Xiaomi dagu)"
+	depends on I2C
+	select HID
+	select HID_GENERIC
+	select HID_MULTITOUCH
+	help
+	  Magnetic keyboard MCU on Xiaomi Pad 5 Pro 12.4. I2C @0x4c on
+	  QUP SE2 pads (gpio115/116 bit-bang). Do not enable GENI i2c2.
+
+""",
+)
+
+kcfg_nanosic = root / "drivers/input/keyboard/Kconfig"
+kcfg_text = kcfg_nanosic.read_text()
+kcfg_old = """config KEYBOARD_NANOSIC_DAGU
+	tristate "Nanosic 803 keyboard MCU (Xiaomi dagu)"
+	depends on I2C
+	help
+	  Magnetic keyboard MCU on Xiaomi Pad 5 Pro 12.4. QUP SE2 I2C @0x4c.
+"""
+kcfg_new = """config KEYBOARD_NANOSIC_DAGU
+	tristate "Nanosic 803 keyboard MCU (Xiaomi dagu)"
+	depends on I2C
+	select HID
+	select HID_GENERIC
+	select HID_MULTITOUCH
+	help
+	  Magnetic keyboard MCU on Xiaomi Pad 5 Pro 12.4. I2C @0x4c on
+	  QUP SE2 pads (gpio115/116 bit-bang). Do not enable GENI i2c2.
+"""
+if kcfg_old in kcfg_text:
+    kcfg_nanosic.write_text(kcfg_text.replace(kcfg_old, kcfg_new, 1))
+
+insert_kconfig(
+    root / "drivers/power/supply/Kconfig",
+    "config BATTERY_BQ27XXX",
+    """config CHARGER_BQ2597X_DAGU
+	tristate "TI BQ25970 charge pump (Xiaomi dagu)"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Dual BQ25970 / SC8551 switched-cap pumps for 67W PPS on dagu.
+
+config CHARGER_PM8150B_DAGU
+	tristate "PM8150B SMB5 charger (Xiaomi dagu)"
+	depends on MFD_SPMI_PMIC
+	help
+	  PM8150B buck charger for 5 V / 9 V input on dagu. Does not
+	  copy CAF qpnp-smb5 or touch Type-C registers.
+
+config CHARGER_P9418_DAGU
+	tristate "IDT P9418 wireless charger (Xiaomi dagu)"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  P9418 wireless charger on Xiaomi Pad 5 Pro 12.4.
+
+config BATTERY_XIAOMI_DUAL_FG
+	tristate "Xiaomi dual BQ27Z561 combiner (dagu)"
+	depends on POWER_SUPPLY
+	help
+	  CAF xiaomi,dual-FuelGauge: one bms from master+slave BQ27Z561.
+
+""",
+)
+
+insert_kconfig(
+    root / "drivers/power/supply/Kconfig",
+    "config CHARGER_P9418_DAGU",
+    """config CHARGER_PM8150B_DAGU
+	tristate "PM8150B SMB5 charger (Xiaomi dagu)"
+	depends on MFD_SPMI_PMIC
+	help
+	  PM8150B buck charger for 5 V / 9 V input on dagu. Does not
+	  copy CAF qpnp-smb5 or touch Type-C registers.
+
+""",
+)
+
+insert_kconfig(
+    root / "drivers/power/supply/Kconfig",
+    "config CHARGER_P9418_DAGU",
+    """config BATTERY_XIAOMI_DUAL_FG
+	tristate "Xiaomi dual BQ27Z561 combiner (dagu)"
+	depends on POWER_SUPPLY
+	help
+	  CAF xiaomi,dual-FuelGauge: one bms from master+slave BQ27Z561.
+
+""",
+)
+
+insert_kconfig(
+    root / "drivers/media/i2c/Kconfig",
+    "config VIDEO_IMX412",
+    """config VIDEO_IMX596_DAGU
+	tristate "Sony IMX596 sensor (Xiaomi dagu front camera)"
+	depends on I2C && GPIOLIB
+	select V4L2_CCI_I2C
+	help
+	  Front camera on Xiaomi Pad 5 Pro 12.4. CAF: CCI1@0x1a, csiphy4,
+	  reset GPIO109, MCLK GPIO97.
+
+""",
+)
+
+# Do not poke KPSS WDT from primary_entry: MMU is off and that
+# physical store SErrors on this ABL map. Pet from early_initcall instead.
+PY
+
+# L81A: CAF lp11-init + bllp HS. Re-applied every build (linux/ is a checkout).
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+host = root / "drivers/gpu/drm/msm/dsi/dsi_host.c"
+text = host.read_text()
+old = """\t\t/* Always set low power stop mode for BLLP
+		 * to let command engine send packets
+		 */
+		data |= DSI_VID_CFG0_EOF_BLLP_POWER_STOP |
+			DSI_VID_CFG0_BLLP_POWER_STOP;
+"""
+new = """\t\t/* dagu L81A: CAF qcom,mdss-dsi-bllp-power-mode keeps BLLP HS.
+		 * Upstream always forces LP BLLP so the cmd engine can TX;
+		 * Himax video+DSC stays black if blanking drops to LP.
+		 * CLOCK_NON_CONTINUOUS panels keep the old LP BLLP.
+		 */
+		if (flags & MIPI_DSI_CLOCK_NON_CONTINUOUS) {
+			data |= DSI_VID_CFG0_EOF_BLLP_POWER_STOP |
+				DSI_VID_CFG0_BLLP_POWER_STOP;
+		}
+"""
+if "dagu L81A: CAF qcom,mdss-dsi-bllp-power-mode" not in text:
+    if old not in text:
+        raise SystemExit("dsi_host.c BLLP block not found")
+    host.write_text(text.replace(old, new, 1))
+
+mgr = root / "drivers/gpu/drm/msm/dsi/dsi_manager.c"
+text = mgr.read_text()
+old = """	ret = dsi_mgr_bridge_power_on(bridge);
+	if (ret) {
+		dev_err(&msm_dsi->pdev->dev, "Power on failed: %d\\n", ret);
+		return;
+	}
+
+	ret = msm_dsi_host_enable(host);
+	if (ret) {
+		pr_err("%s: enable host %d failed, %d\\n", __func__, id, ret);
+		goto host_en_fail;
+	}
+
+	if (is_bonded_dsi && msm_dsi1) {
+		ret = msm_dsi_host_enable(msm_dsi1->host);
+		if (ret) {
+			pr_err("%s: enable host1 failed, %d\\n", __func__, ret);
+			goto host1_en_fail;
+		}
+	}
+
+	return;
+
+host1_en_fail:
+	msm_dsi_host_disable(host);
+host_en_fail:
+	dsi_mgr_bridge_power_off(bridge);
+}
+"""
+new = """	/* dagu L81A: CAF lp11-init. Power/LP11 in pre_enable, start video
+	 * in enable() after the panel has sent on-command (0x11/0x29).
+	 */
+	ret = dsi_mgr_bridge_power_on(bridge);
+	if (ret) {
+		dev_err(&msm_dsi->pdev->dev, "Power on failed: %d\\n", ret);
+		return;
+	}
+}
+
+static void dsi_mgr_bridge_enable(struct drm_bridge *bridge)
+{
+	int id = dsi_mgr_bridge_get_id(bridge);
+	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
+	struct msm_dsi *msm_dsi1 = dsi_mgr_get_dsi(DSI_1);
+	struct mipi_dsi_host *host = msm_dsi->host;
+	bool is_bonded_dsi = IS_BONDED_DSI();
+	int ret;
+
+	if (is_bonded_dsi && !IS_MASTER_DSI_LINK(id))
+		return;
+
+	ret = msm_dsi_host_enable(host);
+	if (ret) {
+		pr_err("%s: enable host %d failed, %d\\n", __func__, id, ret);
+		return;
+	}
+
+	if (is_bonded_dsi && msm_dsi1) {
+		ret = msm_dsi_host_enable(msm_dsi1->host);
+		if (ret)
+			pr_err("%s: enable host1 failed, %d\\n", __func__, ret);
+	}
+}
+"""
+if "dagu L81A: CAF lp11-init" not in text:
+    if old not in text:
+        raise SystemExit("dsi_manager.c pre_enable host_enable block not found")
+    text = text.replace(old, new, 1)
+    old2 = """static const struct drm_bridge_funcs dsi_mgr_bridge_funcs = {
+	.attach = dsi_mgr_bridge_attach,
+	.pre_enable = dsi_mgr_bridge_pre_enable,
+	.post_disable = dsi_mgr_bridge_post_disable,
+"""
+    new2 = """static const struct drm_bridge_funcs dsi_mgr_bridge_funcs = {
+	.attach = dsi_mgr_bridge_attach,
+	.pre_enable = dsi_mgr_bridge_pre_enable,
+	.enable = dsi_mgr_bridge_enable,
+	.post_disable = dsi_mgr_bridge_post_disable,
+"""
+    if old2 not in text:
+        raise SystemExit("dsi_manager.c bridge funcs not found")
+    mgr.write_text(text.replace(old2, new2, 1))
+
+# Drop diagnostic TPG from a previous build.
+text = mgr.read_text()
+tpg = """
+	/* dagu L81A: uncompressed TPG. Checkerboard means video+panel lock. */
+	msm_dsi_host_test_pattern_en(host);
+	if (is_bonded_dsi && msm_dsi1)
+		msm_dsi_host_test_pattern_en(msm_dsi1->host);
+"""
+if tpg in text:
+    mgr.write_text(text.replace(tpg, "", 1))
+
+# Explicit DPHY: leftover CPHY bits from ABL black the L81A video stream.
+host = root / "drivers/gpu/drm/msm/dsi/dsi_host.c"
+text = host.read_text()
+old = """	if (msm_host->cphy_mode)
+		dsi_write(msm_host, REG_DSI_CPHY_MODE_CTRL, BIT(0));
+}
+"""
+new = """	if (msm_host->cphy_mode)
+		dsi_write(msm_host, REG_DSI_CPHY_MODE_CTRL, BIT(0));
+	else
+		/* dagu L81A: force DPHY (do not leave CPHY_MODE_CTRL set). */
+		dsi_write(msm_host, REG_DSI_CPHY_MODE_CTRL, 0);
+}
+"""
+if "dagu L81A: force DPHY" not in text:
+    if old not in text:
+        raise SystemExit("dsi_host.c CPHY_MODE_CTRL block not found")
+    host.write_text(text.replace(old, new, 1))
+
+phy = root / "drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c"
+text = phy.read_text()
+old = """	if (phy->cphy_mode)
+		writel(BIT(6), base + REG_DSI_7nm_PHY_CMN_GLBL_CTRL);
+"""
+new = """	if (phy->cphy_mode)
+		writel(BIT(6), base + REG_DSI_7nm_PHY_CMN_GLBL_CTRL);
+	else
+		/* dagu L81A: clear leftover CPHY bit on DPHY. */
+		writel(0, base + REG_DSI_7nm_PHY_CMN_GLBL_CTRL);
+"""
+if "dagu L81A: clear leftover CPHY bit" not in text:
+    if old not in text:
+        raise SystemExit("dsi_phy_7nm.c GLBL_CTRL block not found")
+    text = text.replace(old, new, 1)
+    phy.write_text(text)
+
+text = phy.read_text()
+old = """	} else {
+		writel(0x00, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_0);
+		writel(timing->clk_zero, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_1);
+		writel(timing->clk_prepare, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_2);
+		writel(timing->clk_trail, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_3);
+		writel(timing->hs_exit, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_4);
+		writel(timing->hs_zero, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_5);
+		writel(timing->hs_prepare, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_6);
+		writel(timing->hs_trail, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_7);
+		writel(timing->hs_rqst, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_8);
+		writel(0x02, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_9);
+		writel(0x04, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_10);
+		writel(0x00, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_11);
+		writel(timing->shared_timings.clk_pre,
+		       base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_12);
+		writel(timing->shared_timings.clk_post,
+		       base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_13);
+	}
+"""
+new = """	} else {
+		/* dagu L81A: CAF qcom,mdss-dsi-panel-phy-timings
+		 * [00 1C 08 07 17 16 07 07 08 02 04 00 19 0C]
+		 */
+		writel(0x00, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_0);
+		writel(0x1c, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_1);
+		writel(0x08, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_2);
+		writel(0x07, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_3);
+		writel(0x17, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_4);
+		writel(0x16, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_5);
+		writel(0x07, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_6);
+		writel(0x07, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_7);
+		writel(0x08, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_8);
+		writel(0x02, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_9);
+		writel(0x04, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_10);
+		writel(0x00, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_11);
+		writel(0x19, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_12);
+		writel(0x0c, base + REG_DSI_7nm_PHY_CMN_TIMING_CTRL_13);
+	}
+"""
+if "dagu L81A: CAF qcom,mdss-dsi-panel-phy-timings" not in text:
+    if old not in text:
+        raise SystemExit("dsi_phy_7nm.c DPHY timing block not found")
+    phy.write_text(text.replace(old, new, 1))
+
+# Video-mode idle_pc only drops IRQs (does not gate DSC clocks). That
+# starves Mutter's frame clock (~100-150 ms fallback) and races dual
+# DSC flush (vblank timeout 0x400000). Keep vid IRQs on.
+enc = root / "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c"
+etext = enc.read_text()
+emarker = "dagu: video mode keep IRQs"
+if emarker not in etext:
+    eold = """		if (dpu_crtc_frame_pending(drm_enc->crtc) > 1) {
+			DRM_DEBUG_KMS("id:%d skip schedule work\\n",
+				      DRMID(drm_enc));
+			return 0;
+		}
+
+		queue_delayed_work(priv->kms->wq, &dpu_enc->delayed_off_work,
+				   msecs_to_jiffies(dpu_enc->idle_timeout));
+"""
+    enew = """		if (dpu_crtc_frame_pending(drm_enc->crtc) > 1) {
+			DRM_DEBUG_KMS("id:%d skip schedule work\\n",
+				      DRMID(drm_enc));
+			return 0;
+		}
+
+		/* dagu: video mode keep IRQs. idle_pc only calls
+		 * _dpu_encoder_irq_disable (IDLE_TIMEOUT=58 ms). Panel
+		 * still scans; Mutter then misses vblank and falls back
+		 * to a 100-150 ms frame-clock timeout (Chrome WaitForSwap
+		 * holes). First commit after idle also races dual DSC
+		 * CTL flush (vblank timeout 0x400000).
+		 */
+		if (is_vid_mode)
+			return 0;
+
+		queue_delayed_work(priv->kms->wq, &dpu_enc->delayed_off_work,
+				   msecs_to_jiffies(dpu_enc->idle_timeout));
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: FRAME_DONE idle queue block not found")
+    enc.write_text(etext.replace(eold, enew, 1))
+    print(f"patched {enc}: {emarker}")
+
+# Mainline calls dpu_encoder_prep_dsc() on every kickoff: dsc_config,
+# dsc_bind_pingpong_blk (dsc0→pp0, dsc1→pp1), enable_dsc, and
+# update_pending_flush_dsc (CTL_FLUSH bit 22). L81A dual-DSC then
+# stalls wait_event 107-219 ms. Bind once at enable/hw_reset.
+enc = root / "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c"
+etext = enc.read_text()
+emarker = "dagu: skip redundant DSC prep"
+if emarker not in etext:
+    eold = """	/* DSC configuration */
+	struct drm_dsc_config *dsc;
+};
+"""
+    enew = """	/* DSC configuration */
+	struct drm_dsc_config *dsc;
+	/* dagu: skip redundant DSC prep. Mainline rebinds DSC and
+	 * pending_flush_dsc (CTL bit 22) on every kickoff. L81A 120 Hz
+	 * dual-DSC then stalls CTL_FLUSH wait_event 107-219 ms.
+	 */
+	bool dsc_prepared;
+};
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: dsc field block not found")
+    etext = etext.replace(eold, enew, 1)
+
+    eold = """	if (!dpu_enc->enabled)
+		goto out;
+
+	if (dpu_enc->cur_slave && dpu_enc->cur_slave->ops.restore)
+"""
+    enew = """	if (!dpu_enc->enabled)
+		goto out;
+
+	dpu_enc->dsc_prepared = false;
+
+	if (dpu_enc->cur_slave && dpu_enc->cur_slave->ops.restore)
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: runtime_resume restore block not found")
+    etext = etext.replace(eold, enew, 1)
+
+    eold = """	dpu_enc = to_dpu_encoder_virt(drm_enc);
+	dpu_enc->dsc = dpu_encoder_get_dsc_config(drm_enc);
+"""
+    enew = """	dpu_enc = to_dpu_encoder_virt(drm_enc);
+	dpu_enc->dsc = dpu_encoder_get_dsc_config(drm_enc);
+	dpu_enc->dsc_prepared = false;
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: atomic_enable dsc assign not found")
+    etext = etext.replace(eold, enew, 1)
+
+    eold = """	if (dpu_enc->dsc)
+		dpu_encoder_prep_dsc(dpu_enc, dpu_enc->dsc);
+}
+"""
+    enew = """	if (dpu_enc->dsc && (!dpu_enc->dsc_prepared || needs_hw_reset)) {
+		/* dagu: skip redundant DSC prep. Modeset/enable and
+		 * hw_reset still bind; later kickoffs keep the mux.
+		 */
+		dpu_encoder_prep_dsc(dpu_enc, dpu_enc->dsc);
+		dpu_enc->dsc_prepared = true;
+	}
+}
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: prepare_for_kickoff prep_dsc not found")
+    etext = etext.replace(eold, enew, 1)
+
+    eold = """	if (dpu_enc->dsc) {
+		dpu_encoder_unprep_dsc(dpu_enc);
+		dpu_enc->dsc = NULL;
+	}
+"""
+    enew = """	if (dpu_enc->dsc) {
+		dpu_encoder_unprep_dsc(dpu_enc);
+		dpu_enc->dsc = NULL;
+		dpu_enc->dsc_prepared = false;
+	}
+"""
+    if eold not in etext:
+        raise SystemExit(f"{enc}: unprep_dsc disable block not found")
+    etext = etext.replace(eold, enew, 1)
+    enc.write_text(etext)
+    print(f"patched {enc}: {emarker}")
+
+# DPU INTF DSC active width must match DSI (DIV_ROUND_UP). Upstream
+# truncates 800*8/24=266; CAF and dsi_timing_setup both use 267.
+vid = root / "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c"
+text = vid.read_text()
+old = """		timing->width = timing->width * drm_dsc_get_bpp_int(dsc) /
+				(dsc->bits_per_component * 3);
+		timing->xres = timing->width;
+"""
+new = """		/* dagu L81A: CAF DIV_ROUND_UP(hdisplay, 3) for 8bpp DSC.
+		 * Truncation yields 266 vs DSI 267 → video never locks.
+		 */
+		timing->width = DIV_ROUND_UP(timing->width *
+					     drm_dsc_get_bpp_int(dsc),
+					     dsc->bits_per_component * 3);
+		timing->xres = timing->width;
+"""
+if "dagu L81A: CAF DIV_ROUND_UP" not in text:
+    if old not in text:
+        raise SystemExit("dpu_encoder_phys_vid.c DSC width block not found")
+    vid.write_text(text.replace(old, new, 1))
+
+PY
+
+# primary_entry probe: OFF. Default used to be 1, which injected PSCI
+# SYSTEM_RESET at the first kernel instruction — instant bounce to fastboot.
+if [[ "${DAGU_PRIMARY_ENTRY_PROBE:-0}" == 1 ]]; then
+	python3 - "$KERNEL_SRC/arch/arm64/kernel/head.S" <<'PY'
+import re
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu bringup: SMC-first primary_entry probe"
+block = """SYM_CODE_START(primary_entry)
+	/* dagu bringup: SMC-first primary_entry probe (no MMU-off stores before SMC) */
+	ldr	x0, =0x84000009			// PSCI SMC32 SYSTEM_RESET
+	smc	#0
+	ldr	x0, =0xC4000009			// PSCI SMC64 SYSTEM_RESET
+	smc	#0
+	/* fallback: dual DBGC @0xb0000000 and 0xb0100000 (TWRP record_size=0) */
+	ldr	x2, =0xb0000000
+	ldr	w3, =0x43474244			// "DBGC"
+	str	w3, [x2]
+	str	wzr, [x2, #4]
+	mov	w3, #16
+	str	w3, [x2, #8]
+	ldr	x3, =0x21544948			// "HIT!"
+	str	x3, [x2, #12]
+	ldr	x2, =0xb0100000
+	ldr	w3, =0x43474244
+	str	w3, [x2]
+	str	wzr, [x2, #4]
+	mov	w3, #16
+	str	w3, [x2, #8]
+	str	x3, [x2, #12]
+9:
+	b	9b
+
+"""
+if marker in text:
+    pass
+else:
+    text, n = re.subn(
+        r"SYM_CODE_START\(primary_entry\)\n(?:.*?\n)*?(?=\tbl\trecord_mmu_state)",
+        block,
+        text,
+        count=1,
+    )
+    if n != 1:
+        raise SystemExit(f"{path}: could not patch primary_entry probe")
+    path.write_text(text)
+    print(f"patched {path}: SMC-first primary_entry probe")
+PY
+else
+	python3 - "$KERNEL_SRC/arch/arm64/kernel/head.S" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu bringup: SMC-first primary_entry probe"
+if marker not in text:
+    raise SystemExit(0)
+start = text.find("SYM_CODE_START(primary_entry)\n")
+if start < 0:
+    raise SystemExit(f"{path}: primary_entry missing")
+needle_end = "\tbl\trecord_mmu_state\n"
+end = text.find(needle_end, start)
+if end < 0:
+    raise SystemExit(f"{path}: record_mmu_state missing after primary_entry")
+text = text[:start] + "SYM_CODE_START(primary_entry)\n" + text[end:]
+path.write_text(text)
+print(f"restored {path}: native primary_entry (probe off)")
+PY
+fi
+
+echo "==> overlays installed"
+
+python3 - "$KERNEL_SRC/drivers/cpufreq/qcom-cpufreq-hw.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: skip CPU ICC paths"
+old = """\tret = dev_pm_opp_of_find_icc_paths(cpu_dev, NULL);
+\tif (ret)
+\t\treturn dev_err_probe(dev, ret, "Failed to find icc paths\\n");
+"""
+new = """\tret = dev_pm_opp_of_find_icc_paths(cpu_dev, NULL);
+\tif (ret) {
+\t\t/* dagu: skip CPU ICC paths — SM8250 ICC is off; BCM voter hangs */
+\t\tdev_info(dev, "dagu: skip CPU ICC paths (%d), scale without BCM\\n",
+\t\t\t ret);
+\t}
+"""
+if marker not in text:
+    if old not in text:
+        raise SystemExit(f"{path}: cpufreq icc-path block not found")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+# A previous overlay forced icc_scaling_enabled=false, which makes
+# dev_pm_opp_add() fail against the DT OPP table and LUT probe abort.
+old_bad = """\t\t/* Disable all opps and cross-validate against LUT later */
+\t\t/* dagu: skip CPU ICC paths — scale EPSS LUT without BCM votes */
+\t\ticc_scaling_enabled = false;
+"""
+new_good = """\t\t/* Disable all opps and cross-validate against LUT later */
+\t\ticc_scaling_enabled = true;
+"""
+text = path.read_text()
+if old_bad in text:
+    text = text.replace(old_bad, new_good, 1)
+    path.write_text(text)
+    print(f"restored {path}: icc_scaling_enabled=true")
+# Don't vote CPU/L3 interconnects on freq change (no SM8250 ICC).
+bw_old = """\tif (icc_scaling_enabled)
+\t\tqcom_cpufreq_set_bw(policy, freq);
+"""
+bw_new = """\t/* dagu: skip CPU ICC paths — EPSS freq scale only, no BCM vote */
+"""
+text = path.read_text()
+if "EPSS freq scale only" not in text:
+    if bw_old not in text:
+        raise SystemExit(f"{path}: cpufreq set_bw call not found")
+    text = text.replace(bw_old, bw_new, 1)
+    path.write_text(text)
+    print(f"patched {path}: skip set_bw ICC")
+# DT CPU OPP tables pull ICC; treat -EPROBE_DEFER as "no OPP table"
+# so the EPSS LUT path can still register frequencies.
+lut_old = """\t} else if (ret != -ENODEV) {
+\t\tdev_err(cpu_dev, "Invalid opp table in device tree\\n");
+\t\tkfree(table);
+\t\treturn ret;
+\t} else {
+\t\tpolicy->fast_switch_possible = true;
+\t\ticc_scaling_enabled = false;
+\t}
+"""
+lut_new = """\t} else if (ret == -EPROBE_DEFER) {
+\t\t/* dagu: skip CPU ICC paths — DT OPPs need ICC; use EPSS LUT */
+\t\tdev_pm_opp_of_remove_table(cpu_dev);
+\t\tdev_info(cpu_dev, "dagu: skip DT OPP ICC (%d), use EPSS LUT\\n",
+\t\t\t ret);
+\t\tpolicy->fast_switch_possible = true;
+\t\ticc_scaling_enabled = false;
+\t} else if (ret != -ENODEV) {
+\t\tdev_err(cpu_dev, "Invalid opp table in device tree\\n");
+\t\tkfree(table);
+\t\treturn ret;
+\t} else {
+\t\tpolicy->fast_switch_possible = true;
+\t\ticc_scaling_enabled = false;
+\t}
+"""
+text = path.read_text()
+if "dagu: skip DT CPU OPP table" in text:
+    pass  # of_add_table already removed; LUT EPROBE_DEFER patch does not apply
+elif "dev_pm_opp_of_remove_table(cpu_dev)" not in text:
+    if "use EPSS LUT" in text:
+        old_defer = """\t} else if (ret == -EPROBE_DEFER) {
+\t\t/* dagu: skip CPU ICC paths — DT OPPs need ICC; use EPSS LUT */
+\t\tdev_info(cpu_dev, "dagu: skip DT OPP ICC (%d), use EPSS LUT\\n",
+\t\t\t ret);
+"""
+        new_defer = """\t} else if (ret == -EPROBE_DEFER) {
+\t\t/* dagu: skip CPU ICC paths — DT OPPs need ICC; use EPSS LUT */
+\t\tdev_pm_opp_of_remove_table(cpu_dev);
+\t\tdev_info(cpu_dev, "dagu: skip DT OPP ICC (%d), use EPSS LUT\\n",
+\t\t\t ret);
+"""
+        if old_defer not in text:
+            raise SystemExit(f"{path}: EPROBE_DEFER LUT block not found")
+        text = text.replace(old_defer, new_defer, 1)
+        path.write_text(text)
+        print(f"patched {path}: remove DT OPP table before LUT")
+    else:
+        if lut_old not in text:
+            raise SystemExit(f"{path}: cpufreq Invalid opp table block not found")
+        path.write_text(text.replace(lut_old, lut_new, 1))
+        print(f"patched {path}: EPSS LUT on OPP EPROBE_DEFER")
+# Never parse DT CPU OPPs: they have no voltages, and even after deleting
+# interconnects of_add_table would set icc_scaling_enabled and then
+# adjust_voltage() against LUT frequencies that do not match DT opp-hz.
+text = path.read_text()
+skip_marker = "dagu: skip DT CPU OPP table"
+if skip_marker not in text:
+    add_old = """\tret = dev_pm_opp_of_add_table(cpu_dev);
+\tif (!ret) {
+"""
+    if add_old not in text:
+        raise SystemExit(f"{path}: of_add_table block not found for skip")
+    start = text.find(add_old)
+    # Cut through the matching if/else that ends at icc_scaling_enabled = false;
+    # followed by the LUT walk.
+    end_token = "\tfor (i = 0; i < LUT_MAX_ENTRIES; i++) {"
+    end = text.find(end_token, start)
+    if end < 0:
+        raise SystemExit(f"{path}: LUT walk not found after of_add_table")
+    add_new = """\t/* dagu: skip DT CPU OPP table — LUT supplies freq/volt, no ICC */
+\t(void)opp;
+\t(void)rate;
+\tpolicy->fast_switch_possible = true;
+\ticc_scaling_enabled = false;
+
+"""
+    path.write_text(text[:start] + add_new + text[end:])
+    print(f"patched {path}: {skip_marker}")
+PY
+
+python3 - "$KERNEL_SRC/drivers/tty/serial/qcom_geni_serial.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: load UART QUPFW from this SE"
+if marker in text:
+    raise SystemExit(0)
+new = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\t/* dagu: load UART QUPFW from this SE firmware-name, never the wrapper */
+\t\tret = geni_load_se_firmware(&port->se, GENI_SE_UART);
+\t\tif (ret) {
+\t\t\tdev_err(uport->dev, "UART firmware load failed ret: %d\\n", ret);
+\t\t\treturn ret;
+\t\t}
+\t} else if (proto != GENI_SE_UART) {
+"""
+skip = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\t/* dagu: UART proto invalid, not loading QUPFW on this QHEE */
+\t\tdev_err(uport->dev,
+\t\t\t"UART proto invalid, not loading QUPFW on this QHEE\\n");
+\t\treturn -EOPNOTSUPP;
+\t} else if (proto != GENI_SE_UART) {
+"""
+upstream = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\tret = geni_load_se_firmware(&port->se, GENI_SE_UART);
+\t\tif (ret) {
+\t\t\tdev_err(uport->dev, "UART firmware load failed ret: %d\\n", ret);
+\t\t\treturn ret;
+\t\t}
+\t} else if (proto != GENI_SE_UART) {
+"""
+if skip in text:
+    text = text.replace(skip, new, 1)
+elif upstream in text:
+    text = text.replace(upstream, new, 1)
+else:
+    raise SystemExit(f"{path}: UART firmware-load block not found")
+path.write_text(text)
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_core.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: HID-class sniff"
+if marker in text:
+    raise SystemExit(0)
+old = """	hdev->sniff_max_interval = 800;
+	hdev->sniff_min_interval = 80;
+"""
+new = """	/* dagu: HID-class sniff (6–18 slots = 3.75–11.25 ms). Keep sniff so
+	 * classic keyboards/mice can radio-sleep and still wake the tablet.
+	 * Do not clear HCI_LP_SNIFF or pin the QCA UART awake.
+	 */
+	hdev->sniff_max_interval = 18;
+	hdev->sniff_min_interval = 6;
+"""
+if old not in text:
+    raise SystemExit(f"{path}: sniff interval defaults not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_core.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: HID host is Central"
+if marker not in text:
+    old = """	hdev->link_mode = (HCI_LM_ACCEPT);
+"""
+    new = """	/* dagu: HID host is Central. Incoming Accept Connection Request
+	 * then asks to Become central; outgoing Create Connection does not
+	 * offer a role switch. Do not clear role-switch from link policy.
+	 */
+	hdev->link_mode = (HCI_LM_MASTER | HCI_LM_ACCEPT);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: link_mode default not found")
+    text = text.replace(old, new, 1)
+    print(f"patched {path}: {marker}")
+marker = "dagu: HID-host interlaced page scan"
+if marker not in text:
+    old = """	/* default 1.28 sec page scan */
+	hdev->def_page_scan_type = PAGE_SCAN_TYPE_STANDARD;
+	hdev->def_page_scan_int = 0x0800;
+	hdev->def_page_scan_window = 0x0012;
+"""
+    new = """	/* dagu: HID-host interlaced page scan. Train hopping covers both
+	 * page trains in one interval so a waking K380 can find us; window
+	 * stays 11.25 ms. FastConnectable (BlueZ) further shortens interval
+	 * to 160 ms. Not a sleep disable.
+	 */
+	hdev->def_page_scan_type = PAGE_SCAN_TYPE_INTERLACED;
+	hdev->def_page_scan_int = 0x0400;
+	hdev->def_page_scan_window = 0x0012;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: page scan defaults not found")
+    text = text.replace(old, new, 1)
+    print(f"patched {path}: {marker}")
+path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/include/net/bluetooth/hci_core.h" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: paging clock offset"
+if marker in text:
+    raise SystemExit(0)
+old = """#define INQUIRY_CACHE_AGE_MAX   (HZ*30)   /* 30 seconds */
+#define INQUIRY_ENTRY_AGE_MAX   (HZ*60)   /* 60 seconds */
+"""
+new = """#define INQUIRY_CACHE_AGE_MAX   (HZ*30)   /* 30 seconds */
+#define INQUIRY_ENTRY_AGE_MAX   (HZ*60)   /* 60 seconds */
+/* dagu: paging clock offset stays useful while local CLKN is continuous
+ * (inquiry cache is flushed on HCI Reset). 20 ppm * 900 s ≈ 18 ms.
+ */
+#define PAGING_CLOCK_OFFSET_AGE_MAX	(HZ * 900)
+"""
+if old not in text:
+    raise SystemExit(f"{path}: inquiry age macros not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: pscan_rep_mode does not drift"
+if marker in text:
+    raise SystemExit(0)
+old = """	ie = hci_inquiry_cache_lookup(hdev, &conn->dst);
+	if (ie) {
+		if (inquiry_entry_age(ie) <= INQUIRY_ENTRY_AGE_MAX) {
+			cp.pscan_rep_mode = ie->data.pscan_rep_mode;
+			cp.pscan_mode     = ie->data.pscan_mode;
+			cp.clock_offset   = ie->data.clock_offset |
+					    cpu_to_le16(0x8000);
+		}
+
+		memcpy(conn->dev_class, ie->data.dev_class, 3);
+	}
+"""
+new = """	ie = hci_inquiry_cache_lookup(hdev, &conn->dst);
+	if (ie) {
+		/* dagu: pscan_rep_mode does not drift. Clock offset is
+		 * valid while local CLKN is continuous; HCI Reset flushes
+		 * the cache. Blind R2 + offset 0 is why classic HID pages
+		 * time out once GNOME is closed for >60 s.
+		 */
+		cp.pscan_rep_mode = ie->data.pscan_rep_mode;
+		cp.pscan_mode     = ie->data.pscan_mode;
+		if (inquiry_entry_age(ie) <= PAGING_CLOCK_OFFSET_AGE_MAX)
+			cp.clock_offset   = ie->data.clock_offset |
+					    cpu_to_le16(0x8000);
+
+		memcpy(conn->dev_class, ie->data.dev_class, 3);
+	}
+"""
+if old not in text:
+    raise SystemExit(f"{path}: Create Connection inquiry-cache block not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_event.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+changed = False
+
+marker = "dagu: store paging clock offset while ACL is up"
+if marker not in text:
+    old = """		/* Get remote features */
+		if (conn->type == ACL_LINK) {
+			struct hci_cp_read_remote_features cp;
+			cp.handle = ev->handle;
+			hci_send_cmd(hdev, HCI_OP_READ_REMOTE_FEATURES,
+				     sizeof(cp), &cp);
+
+			hci_update_scan(hdev);
+		}
+"""
+    new = """		/* Get remote features */
+		if (conn->type == ACL_LINK) {
+			struct hci_cp_read_remote_features cp;
+			struct hci_cp_read_clock_offset clkoff_cp;
+
+			cp.handle = ev->handle;
+			hci_send_cmd(hdev, HCI_OP_READ_REMOTE_FEATURES,
+				     sizeof(cp), &cp);
+
+			hci_update_scan(hdev);
+
+			/* dagu: store paging clock offset while ACL is up.
+			 * Upstream only reads it on disconnect, and only
+			 * writes the inquiry cache if an entry already
+			 * exists — so a closed GNOME panel leaves the next
+			 * Create Connection with R2 + offset 0.
+			 */
+			clkoff_cp.handle = ev->handle;
+			hci_send_cmd(hdev, HCI_OP_READ_CLOCK_OFFSET,
+				     sizeof(clkoff_cp), &clkoff_cp);
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: ACL remote-features block not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+marker = "dagu: HID sniff TX stays in-window"
+old_force_exit = """		test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND, &conn->flags);
+		/* dagu: keep POWER_SAVE in sniff so host TX (LED / output
+		 * report) can Exit Sniff. Remote-initiated sniff used to
+		 * clear this bit, leaving the first host packet stuck
+		 * until the sniff window (50–500 ms on the ACL default).
+		 * Sniff itself stays enabled.
+		 */
+		if (conn->mode == HCI_CM_SNIFF)
+			set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+		else if (conn->mode == HCI_CM_ACTIVE)
+			set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+"""
+old_upstream = """		if (!test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND,
+					&conn->flags)) {
+			if (conn->mode == HCI_CM_ACTIVE)
+				set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+			else
+				clear_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+		}
+"""
+new_in_window = """		if (!test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND,
+					&conn->flags)) {
+			/* dagu: HID sniff TX stays in-window. K380 sniff is
+			 * 20 slots (12.5 ms). Exit Sniff for LED/output is
+			 * ~200 ms on QCA6390, so Ctrl+T / the next key wait
+			 * and Linux autorepeats the first key. Do not set
+			 * POWER_SAVE in sniff. Sniff itself stays enabled.
+			 */
+			if (conn->mode == HCI_CM_ACTIVE)
+				set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+			else
+				clear_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+		}
+"""
+if marker not in text:
+    if old_force_exit in text:
+        text = text.replace(old_force_exit, new_in_window, 1)
+        changed = True
+        print(f"patched {path}: {marker} (from force-exit)")
+    elif old_upstream in text:
+        text = text.replace(old_upstream, new_in_window, 1)
+        changed = True
+        print(f"patched {path}: {marker}")
+    else:
+        raise SystemExit(f"{path}: mode-change POWER_SAVE block not found")
+
+marker = "dagu: create inquiry cache from Read Clock Offset"
+if marker not in text:
+    old = """	conn = hci_conn_hash_lookup_handle(hdev, __le16_to_cpu(ev->handle));
+	if (conn && !ev->status) {
+		struct inquiry_entry *ie;
+
+		ie = hci_inquiry_cache_lookup(hdev, &conn->dst);
+		if (ie) {
+			ie->data.clock_offset = ev->clock_offset;
+			ie->timestamp = jiffies;
+		}
+	}
+"""
+    new = """	conn = hci_conn_hash_lookup_handle(hdev, __le16_to_cpu(ev->handle));
+	if (conn && !ev->status) {
+		struct inquiry_entry *ie;
+		struct inquiry_data data;
+
+		ie = hci_inquiry_cache_lookup(hdev, &conn->dst);
+		if (ie) {
+			ie->data.clock_offset = ev->clock_offset;
+			ie->timestamp = jiffies;
+		} else {
+			/* dagu: create inquiry cache from Read Clock Offset
+			 * so the next page is not R2 + offset 0.
+			 */
+			memset(&data, 0, sizeof(data));
+			bacpy(&data.bdaddr, &conn->dst);
+			data.pscan_rep_mode = 0x02;
+			data.clock_offset = ev->clock_offset;
+			memcpy(data.dev_class, conn->dev_class, 3);
+			hci_inquiry_cache_update(hdev, &data, true);
+		}
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: clock-offset cache update not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+if changed:
+    path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+changed = False
+
+marker = "dagu: Create Connection Cancel must not wait"
+if marker not in text:
+    old = """	if (reason != HCI_ERROR_REMOTE_POWER_OFF)
+		return __hci_cmd_sync_status_sk(hdev, HCI_OP_CREATE_CONN_CANCEL,
+						6, &conn->dst,
+						HCI_EV_CONN_COMPLETE,
+						HCI_CMD_TIMEOUT, NULL);
+
+	return __hci_cmd_sync_status(hdev, HCI_OP_CREATE_CONN_CANCEL,
+				     6, &conn->dst, HCI_CMD_TIMEOUT);
+"""
+    new = """	/* dagu: Create Connection Cancel must not wait for
+	 * HCI_EV_CONN_COMPLETE when the handle is still unset.
+	 * QCA6390 returns Unknown Connection Identifier (0x02) while
+	 * the radio is still paging; waiting the event leaves
+	 * handle 3840 in BT_CONNECT and Inquiry sees Busy. 0x02 maps
+	 * to -ENOTCONN — that is a successful host-side cancel.
+	 */
+	if (HCI_CONN_HANDLE_UNSET(conn->handle) ||
+	    reason == HCI_ERROR_REMOTE_POWER_OFF) {
+		int err;
+
+		err = __hci_cmd_sync_status(hdev, HCI_OP_CREATE_CONN_CANCEL,
+					    6, &conn->dst, HCI_CMD_TIMEOUT);
+		if (err == -ENOTCONN)
+			return 0;
+		return err;
+	}
+
+	return __hci_cmd_sync_status_sk(hdev, HCI_OP_CREATE_CONN_CANCEL,
+					6, &conn->dst,
+					HCI_EV_CONN_COMPLETE,
+					HCI_CMD_TIMEOUT, NULL);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: Create Connection Cancel wait block not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+marker = "dagu: ACL Create Connection needs a complete callback"
+if marker not in text:
+    old = """int hci_connect_acl_sync(struct hci_dev *hdev, struct hci_conn *conn)
+{
+	int err;
+
+	err = hci_cmd_sync_queue_once(hdev, hci_acl_create_conn_sync, conn,
+				      NULL);
+	return (err == -EEXIST) ? 0 : err;
+}
+"""
+    new = """static void create_acl_conn_complete(struct hci_dev *hdev, void *data, int err)
+{
+	struct hci_conn *conn = data;
+
+	/* dagu: ACL Create Connection needs a complete callback.
+	 * Upstream queues it with NULL complete, so a Page Timeout
+	 * without HCI_EV_CONN_COMPLETE leaves BT_CONNECT + unset
+	 * handle (3840) occupying the QCA radio.
+	 */
+	if (err == -ECANCELED)
+		return;
+
+	hci_dev_lock(hdev);
+
+	if (!hci_conn_valid(hdev, conn))
+		goto done;
+
+	if (!err || conn->state != BT_CONNECT)
+		goto done;
+
+	hci_conn_failed(conn, bt_status(err));
+
+done:
+	hci_dev_unlock(hdev);
+}
+
+int hci_connect_acl_sync(struct hci_dev *hdev, struct hci_conn *conn)
+{
+	int err;
+
+	err = hci_cmd_sync_queue_once(hdev, hci_acl_create_conn_sync, conn,
+				      create_acl_conn_complete);
+	return (err == -EEXIST) ? 0 : err;
+}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hci_connect_acl_sync not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+if changed:
+    path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/drivers/bluetooth/hci_qca.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: GNOME Settings dual-mode StartDiscovery"
+if marker not in text:
+    old = """	/* Enable controller to do both LE scan and BR/EDR inquiry
+	 * simultaneously.
+	 */
+	hci_set_quirk(hdev, HCI_QUIRK_SIMULTANEOUS_DISCOVERY);
+"""
+    new = """	/* dagu: GNOME Settings dual-mode StartDiscovery. QCA6390/ROME is
+	 * TDD and shares the radio with LE HID; HCI_QUIRK_SIMULTANEOUS_DISCOVERY
+	 * runs LE scan + Inquiry at once and starves BR FHS, so K380 appears
+	 * then vanishes from the panel. Leave the quirk unset so the host
+	 * time-slices LE scan then Inquiry (Android does this). Do not kill
+	 * gnome-control-center; do not set ControllerMode=bredr.
+	 */
+	if (soc_type != QCA_ROME && soc_type != QCA_QCA6390)
+		hci_set_quirk(hdev, HCI_QUIRK_SIMULTANEOUS_DISCOVERY);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: SIMULTANEOUS_DISCOVERY block not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/drivers/soc/qcom/qcom-geni-se.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: SE firmware-name before wrapper"
+if marker not in text:
+    old = """\tret = device_property_read_string(se->wrapper->dev, "firmware-name", &fw_name);
+\tif (ret) {
+\t\tdev_err(se->dev, "Failed to read firmware-name property: %d\\n", ret);
+\t\treturn -EINVAL;
+\t}
+"""
+    new = """\t/* dagu: SE firmware-name before wrapper — never put firmware-name on qupv3_id_0 */
+\tret = device_property_read_string(se->dev, "firmware-name", &fw_name);
+\tif (ret)
+\t\tret = device_property_read_string(se->wrapper->dev, "firmware-name", &fw_name);
+\tif (ret) {
+\t\tdev_err(se->dev, "Failed to read firmware-name property: %d\\n", ret);
+\t\treturn -EINVAL;
+\t}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: firmware-name lookup not found")
+    text = text.replace(old, new, 1)
+
+marker2 = "dagu: skip QUPV3 wrapper CSRs while loading SE RAM"
+if marker2 not in text:
+    old = """\t/*
+\t * Disable high-priority interrupts until all currently executing
+\t * low-priority interrupts have been fully handled.
+\t */
+\tgeni_setbits32(se->wrapper->base + QUPV3_COMMON_CFG, FAST_SWITCH_TO_HIGH_DISABLE);
+
+\t/* Set AHB_M_CLK_CGC_ON to indicate hardware controls se-wrapper cgc clock. */
+\tgeni_setbits32(se->wrapper->base + QUPV3_SE_AHB_M_CFG, AHB_M_CLK_CGC_ON);
+
+\t/* Let hardware to control common cgc. */
+\tgeni_setbits32(se->wrapper->base + QUPV3_COMMON_CGC_CTRL, COMMON_CSR_SLV_CLK_CGC_ON);
+"""
+    new = """\t/*
+\t * dagu: skip QUPV3 wrapper CSRs while loading SE RAM.
+\t * Writing QUPV3_COMMON_CFG / AHB_M_CFG on this QHEE bounced to the
+\t * bootloader. ABL already configured the wrapper; only program this SE.
+\t */
+\tif (!of_property_read_bool(se->dev->of_node, "qcom,skip-wrapper-fw-init")) {
+\t\tgeni_setbits32(se->wrapper->base + QUPV3_COMMON_CFG,
+\t\t\t       FAST_SWITCH_TO_HIGH_DISABLE);
+\t\tgeni_setbits32(se->wrapper->base + QUPV3_SE_AHB_M_CFG, AHB_M_CLK_CGC_ON);
+\t\tgeni_setbits32(se->wrapper->base + QUPV3_COMMON_CGC_CTRL,
+\t\t\t       COMMON_CSR_SLV_CLK_CGC_ON);
+\t}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: wrapper CSR block not found")
+    text = text.replace(old, new, 1)
+
+path.write_text(text)
+print(f"patched {path}: geni SE firmware-name + skip wrapper CSRs")
+PY
+
+python3 - "$KERNEL_SRC/drivers/i2c/busses/i2c-qcom-geni.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: I2C proto invalid, not loading QUPFW"
+if marker in text:
+    raise SystemExit(0)
+old = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\tret = geni_load_se_firmware(&gi2c->se, GENI_SE_I2C);
+\t\tif (ret) {
+\t\t\tdev_err_probe(dev, ret, "i2c firmware load failed ret: %d\\n", ret);
+\t\t\tgoto err_resources;
+\t\t}
+\t} else if (proto != GENI_SE_I2C) {
+"""
+new = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\t/* dagu: I2C proto invalid, not loading QUPFW on this QHEE */
+\t\tdev_err_probe(dev, -EOPNOTSUPP,
+\t\t\t      "I2C proto invalid, not loading QUPFW on this QHEE\\n");
+\t\tret = -EOPNOTSUPP;
+\t\tgoto err_resources;
+\t} else if (proto != GENI_SE_I2C) {
+"""
+if old not in text:
+    raise SystemExit(f"{path}: I2C firmware-load block not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/drivers/gpu/drm/drm_fb_helper.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: skip fbdev vblank wait"
+if marker in text:
+    raise SystemExit(0)
+needle = "\tdrm_client_modeset_wait_for_vblank(&helper->client, 0);\n"
+repl = (
+    "\t/* dagu: skip fbdev vblank wait — DPU INTF vsync is not raising "
+    "drm vblank, so this 1s wait WARNs into fbcon and retriggers damage. */\n"
+)
+if needle not in text:
+    raise SystemExit(f"{path}: vblank wait needle missing")
+# DPU INTF vsync never raises drm vblank; skip every helper wait.
+text = text.replace(needle, repl)
+path.write_text(text)
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+hdr = root / "drivers/gpu/drm/msm/msm_drv.h"
+src = root / "drivers/gpu/drm/msm/msm_drv.c"
+decl = "void msm_gpu_resources_sysfs_init(struct device *dev);\n"
+ht = hdr.read_text()
+if "msm_gpu_resources_sysfs_init" not in ht:
+    needle = "bool msm_gpu_no_components(void);\n"
+    if needle not in ht:
+        raise SystemExit(f"{hdr}: msm_gpu_no_components needle missing")
+    hdr.write_text(ht.replace(needle, needle + "\n" + decl, 1))
+    print(f"patched {hdr}: msm_gpu_resources_sysfs_init")
+st = src.read_text()
+if "msm_gpu_resources_sysfs_init" not in st:
+    needle = "\tif (priv->kms_init)\n\t\tmsm_drm_kms_post_init(dev);\n\n\treturn 0;\n"
+    repl = (
+        "\tif (priv->kms_init)\n"
+        "\t\tmsm_drm_kms_post_init(dev);\n\n"
+        "\tmsm_gpu_resources_sysfs_init(dev);\n\n"
+        "\treturn 0;\n"
+    )
+    if needle not in st:
+        raise SystemExit(f"{src}: msm_drm_kms_post_init needle missing")
+    src.write_text(st.replace(needle, repl, 1))
+    print(f"patched {src}: msm_gpu_resources_sysfs_init")
+PY
+
+python3 - "$KERNEL_SRC/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+# Linear-only scanout dropped SSPP multirect (800+800). Dual LM then
+# flickered. Keep UBWC so DPU splits the 1600-wide plane again.
+old_linear_only = """static const uint64_t supported_format_modifiers[] = {
+	/* dagu: skip UBWC scanout — 1600x2560 XR30 compressed plus
+	 * FB_DAMAGE_CLIPS leaves RGB noise in scrolled GTK regions
+	 * (no SM8250 ICC, dual-DSI SSPP multirect on one pipe). */
+	DRM_FORMAT_MOD_LINEAR,
+	DRM_FORMAT_MOD_INVALID
+};
+"""
+restored = """static const uint64_t supported_format_modifiers[] = {
+	DRM_FORMAT_MOD_QCOM_COMPRESSED,
+	DRM_FORMAT_MOD_LINEAR,
+	DRM_FORMAT_MOD_INVALID
+};
+"""
+if old_linear_only in text:
+    text = text.replace(old_linear_only, restored, 1)
+    print(f"restored UBWC modifiers on {path}")
+marker = "dagu: skip FB_DAMAGE_CLIPS"
+if marker not in text:
+    needle = "\tdrm_plane_enable_fb_damage_clips(plane);\n"
+    repl = (
+        "\t/* dagu: skip FB_DAMAGE_CLIPS — partial KMS updates of UBWC "
+        "XR30 leave RGB noise in scrolled GTK regions. Full frames OK. */\n"
+    )
+    if needle not in text:
+        raise SystemExit(f"{path}: FB_DAMAGE_CLIPS needle missing")
+    text = text.replace(needle, repl, 1)
+    print(f"patched {path}: {marker}")
+marker = "dagu: skip same-SSPP smart-DMA parallel"
+if marker not in text:
+    old_para = """	if (drm_rect_width(&r_pipe_cfg->src_rect) != 0) {
+		if (!dpu_plane_is_multirect_parallel_capable(pipe->sspp, pipe_cfg, fmt, max_linewidth) ||
+		    !dpu_plane_is_multirect_parallel_capable(pipe->sspp, r_pipe_cfg, fmt, max_linewidth))
+			return false;
+
+		r_pipe->sspp = pipe->sspp;
+
+		pipe->multirect_index = DPU_SSPP_RECT_0;
+		pipe->multirect_mode = DPU_SSPP_MULTIRECT_PARALLEL;
+
+		r_pipe->multirect_index = DPU_SSPP_RECT_1;
+		r_pipe->multirect_mode = DPU_SSPP_MULTIRECT_PARALLEL;
+	}
+"""
+    new_para = """	if (drm_rect_width(&r_pipe_cfg->src_rect) != 0) {
+		/* dagu: skip same-SSPP smart-DMA parallel — 1600x2560@120
+		 * needs 526 Mpix/s through one Xin; MDP max is 460 MHz.
+		 * Virtual RM will pick a second SSPP. */
+		return false;
+	}
+"""
+    if old_para not in text:
+        raise SystemExit(f"{path}: try_multirect_parallel body missing")
+    text = text.replace(old_para, new_para, 1)
+    print(f"patched {path}: {marker}")
+marker = "dagu: skip 10bpc XR30"
+if marker not in text:
+    old10 = "\tDRM_FORMAT_ARGB2101010,\n\tDRM_FORMAT_XRGB2101010,\n"
+    new10 = "\t/* dagu: skip 10bpc XR30 — L81A DSC is 8bpc; mutter XR30 snows. */\n"
+    if old10 not in text:
+        raise SystemExit(f"{path}: 10bpc format needle missing")
+    text = text.replace(old10, new10)
+    print(f"patched {path}: {marker}")
+path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: skip 10bpc XR30"
+if marker not in text:
+    old = "\tDRM_FORMAT_ARGB2101010,\n\tDRM_FORMAT_XRGB2101010,\n"
+    new = "\t/* dagu: skip 10bpc XR30 — L81A DSC is 8bpc; mutter XR30 snows. */\n"
+    if text.count(old) < 1:
+        raise SystemExit(f"{path}: 10bpc format needle missing")
+    text = text.replace(old, new)
+    path.write_text(text)
+    print(f"patched {path}: {marker} ({text.count(marker)} sites)")
+PY
+
+python3 - "$KERNEL_SRC/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: two SSPPs for 1600@120 split"
+if marker not in text:
+    old = "bool dpu_use_virtual_planes;\nmodule_param(dpu_use_virtual_planes, bool, 0);\n"
+    new = (
+        "bool dpu_use_virtual_planes = true; "
+        "/* dagu: two SSPPs for 1600@120 split */\n"
+        "module_param(dpu_use_virtual_planes, bool, 0);\n"
+    )
+    if old not in text:
+        raise SystemExit(f"{path}: dpu_use_virtual_planes needle missing")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+# CS35L41 PUP_DONE waits for ASP clocks; Q6 AFE starts those at trigger,
+# after DAPM PRE_PMU, so the 100ms poll always times out on this board.
+path = root / "sound/soc/codecs/cs35l41-lib.c"
+text = path.read_text()
+marker = "dagu: CS35L41 PUP timeout is non-fatal"
+if marker not in text:
+    old = """		if (ret)
+			dev_err(dev, "Enable(%d) failed: %d\\n", enable, ret);
+"""
+    new = """		if (ret) {
+			/* dagu: CS35L41 PUP timeout is non-fatal */
+			dev_warn(dev, "Enable(%d) timed out (%d); clocks may arrive at trigger\\n",
+				 enable, ret);
+			if (enable)
+				ret = 0;
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: Enable timeout needle missing")
+    path.write_text(text.replace(old, new))
+    print(f"patched {path}: {marker}")
+
+# POST_PMD runs after TDM clocks drop; PDN_DONE never arrives (-110).
+# Returning the timeout makes ASoC log "Main AMP event failed" four times
+# per PipeWire idle. Same clocks-at-trigger case as PUP — ignore it.
+path = root / "sound/soc/codecs/cs35l41-lib.c"
+text = path.read_text()
+marker = "dagu: CS35L41 PMD timeout is non-fatal"
+if marker not in text:
+    old = """			/* dagu: CS35L41 PUP timeout is non-fatal */
+			dev_warn(dev, "Enable(%d) timed out (%d); clocks may arrive at trigger\\n",
+				 enable, ret);
+			if (enable)
+				ret = 0;
+"""
+    new = """			/* dagu: CS35L41 PUP timeout is non-fatal */
+			/* dagu: CS35L41 PMD timeout is non-fatal */
+			dev_warn(dev, "Enable(%d) timed out (%d); clocks may arrive at trigger\\n",
+				 enable, ret);
+			ret = 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: PMD timeout needle missing")
+    path.write_text(text.replace(old, new))
+    print(f"patched {path}: {marker}")
+
+# Halo Protection firmware treats missing ReDC as uncalibrated and limits
+# output. Xiaomi persist has factory cal_r; wm_adsp marks CAL_R SYS so ALSA
+# cannot write it. Poke the XM registers after wmfw+bin preload.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: apply persist ReDC after DSP preload"
+if marker not in text:
+    old = """static int cs35l41_dsp_preload_ev(struct snd_soc_dapm_widget *w,
+				  struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(component);
+	int ret;
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		if (cs35l41->dsp.cs_dsp.booted)
+			return 0;
+
+		return wm_adsp_early_event(w, kcontrol, event);
+"""
+    new = """static void cs35l41_dagu_apply_spk_cal(struct cs35l41_private *cs35l41)
+{
+	u32 cal_r, ambient = 23, vpbr;
+	int ret;
+
+	/* dagu: apply persist ReDC after DSP preload */
+	if (device_property_read_u32(cs35l41->dev, "cirrus,cal-r", &cal_r))
+		return;
+	device_property_read_u32(cs35l41->dev, "cirrus,cal-ambient", &ambient);
+
+	if (!device_property_read_u32(cs35l41->dev, "cirrus,vpbr-config", &vpbr)) {
+		ret = regmap_write(cs35l41->regmap, CS35L41_VPBR_CFG, vpbr);
+		if (ret)
+			dev_warn(cs35l41->dev, "dagu: VPBR_CFG write failed: %d\\n", ret);
+	}
+
+	ret = 0;
+	ret |= regmap_write(cs35l41->regmap, 0x0280026c, ambient);
+	ret |= regmap_write(cs35l41->regmap, 0x02800268, cal_r);
+	ret |= regmap_write(cs35l41->regmap, 0x02800270, 1);
+	ret |= regmap_write(cs35l41->regmap, 0x02800274, cal_r + 1);
+	if (ret)
+		dev_warn(cs35l41->dev, "dagu: CAL_R=%u write failed: %d\\n", cal_r, ret);
+	else
+		dev_info(cs35l41->dev, "dagu: applied CAL_R=%u ambient=%u\\n",
+			 cal_r, ambient);
+}
+
+static int cs35l41_dsp_preload_ev(struct snd_soc_dapm_widget *w,
+				  struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(component);
+	int ret;
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		if (cs35l41->dsp.cs_dsp.booted)
+			return 0;
+
+		ret = wm_adsp_early_event(w, kcontrol, event);
+		if (ret)
+			return ret;
+		cs35l41_dagu_apply_spk_cal(cs35l41);
+		return 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: dsp_preload_ev needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Already-applied kernels only wrote CAL_STATUS=1. Android tinymix
+# Protection cd CAL_SET_STATUS is 2 and CAL_R_SELECTED equals CAL_R.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: Halo CAL_SET_STATUS=2"
+if marker not in text:
+    old = """	ret |= regmap_write(cs35l41->regmap, 0x02800268, cal_r);
+	ret |= regmap_write(cs35l41->regmap, 0x02800270, 1);
+	ret |= regmap_write(cs35l41->regmap, 0x02800274, cal_r + 1);
+	if (ret)
+		dev_warn(cs35l41->dev, "dagu: CAL_R=%u write failed: %d\\n", cal_r, ret);
+	else
+		dev_info(cs35l41->dev, "dagu: applied CAL_R=%u ambient=%u\\n",
+			 cal_r, ambient);
+"""
+    new = """	ret |= regmap_write(cs35l41->regmap, 0x02800268, cal_r);
+	ret |= regmap_write(cs35l41->regmap, 0x02800270, 1);
+	ret |= regmap_write(cs35l41->regmap, 0x02800274, cal_r + 1);
+	/* dagu: Halo CAL_SET_STATUS=2 */
+	ret |= regmap_write(cs35l41->regmap, 0x02800278, cal_r);
+	ret |= regmap_write(cs35l41->regmap, 0x0280027c, 2);
+	if (ret)
+		dev_warn(cs35l41->dev, "dagu: CAL_R=%u write failed: %d\\n", cal_r, ret);
+	else
+		dev_info(cs35l41->dev, "dagu: applied CAL_R=%u ambient=%u SET_STATUS=2\\n",
+			 cal_r, ambient);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: CAL_SET_STATUS upgrade needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Hibernate + i2c-gpio: wake -42 then NAK on i2c-20/21. DSP preload makes
+# autosuspend enter hibernate after 3s idle. No-op runtime PM.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: skip CS35L41 hibernate on i2c-gpio"
+if marker not in text:
+    old = """static int cs35l41_runtime_suspend(struct device *dev)
+{
+	struct cs35l41_private *cs35l41 = dev_get_drvdata(dev);
+
+	dev_dbg(cs35l41->dev, "Runtime suspend\\n");
+
+	if (!cs35l41->dsp.preloaded || !cs35l41->dsp.cs_dsp.running)
+		return 0;
+
+	cs35l41_enter_hibernate(dev, cs35l41->regmap, cs35l41->hw_cfg.bst_type);
+
+	regcache_cache_only(cs35l41->regmap, true);
+	regcache_mark_dirty(cs35l41->regmap);
+
+	return 0;
+}
+"""
+    new = """static int cs35l41_runtime_suspend(struct device *dev)
+{
+	/* dagu: skip CS35L41 hibernate on i2c-gpio */
+	return 0;
+}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: runtime_suspend needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: skip CS35L41 hibernate resume"
+if marker not in text:
+    old = """static int cs35l41_runtime_resume(struct device *dev)
+{
+	struct cs35l41_private *cs35l41 = dev_get_drvdata(dev);
+	int ret;
+
+	dev_dbg(cs35l41->dev, "Runtime resume\\n");
+
+	if (!cs35l41->dsp.preloaded || !cs35l41->dsp.cs_dsp.running)
+		return 0;
+
+	regcache_cache_only(cs35l41->regmap, false);
+
+	ret = cs35l41_exit_hibernate(cs35l41->dev, cs35l41->regmap);
+	if (ret)
+		return ret;
+
+	/* Test key needs to be unlocked to allow the OTP settings to re-apply */
+	cs35l41_test_key_unlock(cs35l41->dev, cs35l41->regmap);
+	ret = regcache_sync(cs35l41->regmap);
+	cs35l41_test_key_lock(cs35l41->dev, cs35l41->regmap);
+	if (ret) {
+		dev_err(cs35l41->dev, "Failed to restore register cache: %d\\n", ret);
+		return ret;
+	}
+	cs35l41_init_boost(cs35l41->dev, cs35l41->regmap, &cs35l41->hw_cfg);
+
+	return 0;
+}
+"""
+    new = """static int cs35l41_runtime_resume(struct device *dev)
+{
+	/* dagu: skip CS35L41 hibernate resume */
+	return 0;
+}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: runtime_resume needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Xiaomi Fast Use Case: mixer_paths leaves Fast Use Case Switch On and
+# loads per-amp *-music.txt into Halo CSPL_UPDATE_PARAMS_CONFIG.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: CS35L41 Fast Use Case music.txt"
+if marker not in text:
+    old = """#include "cs35l41.h"
+"""
+    new = """#include "cs35l41.h"
+#include <asm/byteorder.h>
+#include <linux/slab.h>
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: cs35l41.h include needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """static int cs35l41_dsp_audio_ev(struct snd_soc_dapm_widget *w,
+				struct snd_kcontrol *kcontrol, int event)
+{
+"""
+    new = """#define CS35L41_CSPL_ALG		0xcd
+#define CS35L41_CSPL_CMD_UPDATE_PARAM	8
+#define CS35L41_CSPL_ST_RUNNING		0
+#define CS35L41_FAST_SWITCH_BUF		64
+
+static int cs35l41_csp_write(struct wm_adsp *dsp, const char *name,
+			     void *buf, size_t len)
+{
+	static const int types[] = {
+		WMFW_ADSP2_YM, WMFW_ADSP2_XM,
+		WMFW_HALO_YM_PACKED, WMFW_HALO_XM_PACKED,
+	};
+	int i, ret = -ENOENT;
+
+	for (i = 0; i < ARRAY_SIZE(types); i++) {
+		ret = wm_adsp_write_ctl(dsp, name, types[i], CS35L41_CSPL_ALG,
+					buf, len);
+		if (!ret)
+			return 0;
+	}
+	return ret;
+}
+
+static int cs35l41_csp_read(struct wm_adsp *dsp, const char *name,
+			    void *buf, size_t len)
+{
+	static const int types[] = {
+		WMFW_ADSP2_YM, WMFW_ADSP2_XM,
+		WMFW_HALO_YM_PACKED, WMFW_HALO_XM_PACKED,
+	};
+	int i, ret = -ENOENT;
+
+	for (i = 0; i < ARRAY_SIZE(types); i++) {
+		ret = wm_adsp_read_ctl(dsp, name, types[i], CS35L41_CSPL_ALG,
+				       buf, len);
+		if (ret >= 0)
+			return 0;
+	}
+	return ret;
+}
+
+/* CAF cs35l41_do_fast_switch: comma-separated s32 -> Halo UPDATE_PARAM. */
+static int cs35l41_do_fast_switch(struct cs35l41_private *cs35l41)
+{
+	char val_str[CS35L41_FAST_SWITCH_BUF];
+	const struct firmware *fw;
+	const char *fw_name = cs35l41->fast_switch_name;
+	__be32 *data_ctl_buf = NULL, cmd_ctl, st_ctl;
+	s32 data_ctl_len, val;
+	unsigned int i, j, k;
+	int ret;
+	bool fw_running = false;
+
+	/* dagu: CS35L41 Fast Use Case music.txt */
+	if (!fw_name)
+		return 0;
+
+	ret = request_firmware(&fw, fw_name, cs35l41->dev);
+	if (ret) {
+		dev_err(cs35l41->dev, "dagu: fast-switch firmware %s: %d\\n",
+			fw_name, ret);
+		return ret;
+	}
+
+	for (i = 0, j = 0; i < fw->size && (char)fw->data[i] != ','; i++) {
+		if ((char)fw->data[i] == ' ' || (char)fw->data[i] == '\\n' ||
+		    (char)fw->data[i] == '\\r' || (char)fw->data[i] == '\\t')
+			continue;
+		if (j >= CS35L41_FAST_SWITCH_BUF - 1) {
+			ret = -EINVAL;
+			goto exit;
+		}
+		val_str[j++] = fw->data[i];
+	}
+	if (i >= fw->size) {
+		ret = -EINVAL;
+		goto exit;
+	}
+	i++;
+	val_str[j] = '\\0';
+	ret = kstrtos32(val_str, 10, &data_ctl_len);
+	if (ret || data_ctl_len < 1) {
+		dev_err(cs35l41->dev, "dagu: fast-switch len %s: %d\\n",
+			val_str, ret);
+		ret = ret ? ret : -EINVAL;
+		goto exit;
+	}
+
+	data_ctl_buf = kcalloc(data_ctl_len, sizeof(*data_ctl_buf), GFP_KERNEL);
+	if (!data_ctl_buf) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+	data_ctl_buf[0] = cpu_to_be32(data_ctl_len);
+
+	for (j = 0, k = 1; i <= fw->size && k < (unsigned int)data_ctl_len; i++) {
+		char c = (i == fw->size) ? ',' : (char)fw->data[i];
+
+		if (c == ',' || i == fw->size) {
+			if (!j)
+				continue;
+			val_str[j] = '\\0';
+			ret = kstrtos32(val_str, 10, &val);
+			if (ret) {
+				dev_err(cs35l41->dev,
+					"dagu: fast-switch parse %s: %d\\n",
+					val_str, ret);
+				goto exit;
+			}
+			data_ctl_buf[k++] = cpu_to_be32(val);
+			j = 0;
+		} else if (c == ' ' || c == '\\n' || c == '\\r' || c == '\\t') {
+			continue;
+		} else {
+			if (j >= CS35L41_FAST_SWITCH_BUF - 1) {
+				ret = -EINVAL;
+				goto exit;
+			}
+			val_str[j++] = c;
+		}
+	}
+
+	ret = cs35l41_csp_write(&cs35l41->dsp, "CSPL_UPDATE_PARAMS_CONFIG",
+				data_ctl_buf, data_ctl_len * sizeof(__be32));
+	if (ret) {
+		dev_err(cs35l41->dev, "dagu: CSPL_UPDATE_PARAMS_CONFIG: %d\\n",
+			ret);
+		goto exit;
+	}
+
+	cmd_ctl = cpu_to_be32(CS35L41_CSPL_CMD_UPDATE_PARAM);
+	ret = cs35l41_csp_write(&cs35l41->dsp, "CSPL_COMMAND", &cmd_ctl,
+				sizeof(cmd_ctl));
+	if (ret) {
+		dev_err(cs35l41->dev, "dagu: CSPL_COMMAND UPDATE_PARAM: %d\\n",
+			ret);
+		goto exit;
+	}
+
+	for (i = 0; i < 5; i++) {
+		ret = cs35l41_csp_read(&cs35l41->dsp, "CSPL_STATE", &st_ctl,
+				       sizeof(st_ctl));
+		if (!ret && be32_to_cpu(st_ctl) == CS35L41_CSPL_ST_RUNNING) {
+			fw_running = true;
+			break;
+		}
+		usleep_range(100, 110);
+	}
+	if (!fw_running) {
+		dev_err(cs35l41->dev, "dagu: CSPL_STATE not RUNNING after fast-switch\\n");
+		ret = -EIO;
+		goto exit;
+	}
+	dev_info(cs35l41->dev, "dagu: fast-switch %s (%d words)\\n",
+		 fw_name, data_ctl_len);
+	ret = 0;
+exit:
+	kfree(data_ctl_buf);
+	release_firmware(fw);
+	return ret;
+}
+
+static int cs35l41_fast_switch_en_get(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component =
+		snd_kcontrol_chip(kcontrol);
+	struct cs35l41_private *cs35l41 =
+		snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.integer.value[0] = cs35l41->fast_switch_en;
+	return 0;
+}
+
+static int cs35l41_fast_switch_en_put(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component =
+		snd_kcontrol_chip(kcontrol);
+	struct cs35l41_private *cs35l41 =
+		snd_soc_component_get_drvdata(component);
+	int enable = !!ucontrol->value.integer.value[0];
+	int ret = 0;
+
+	if (enable && !cs35l41->fast_switch_en && cs35l41->dsp.cs_dsp.running)
+		ret = cs35l41_do_fast_switch(cs35l41);
+	cs35l41->fast_switch_en = enable;
+	return ret;
+}
+
+static int cs35l41_dsp_audio_ev(struct snd_soc_dapm_widget *w,
+				struct snd_kcontrol *kcontrol, int event)
+{
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: dsp_audio_ev needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """		return cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						 CSPL_MBOX_CMD_RESUME);
+	case SND_SOC_DAPM_PRE_PMD:
+"""
+    new = """		ret = cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						CSPL_MBOX_CMD_RESUME);
+		if (ret)
+			return ret;
+		if (cs35l41->fast_switch_en) {
+			ret = cs35l41_do_fast_switch(cs35l41);
+			if (ret)
+				dev_err(cs35l41->dev,
+					"dagu: fast-switch after RESUME: %d\\n",
+					ret);
+		}
+		return 0;
+	case SND_SOC_DAPM_PRE_PMD:
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: RESUME needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	WM_ADSP2_PRELOAD_SWITCH("DSP1", 1),
+	WM_ADSP_FW_CONTROL("DSP1", 0),
+};
+"""
+    new = """	WM_ADSP2_PRELOAD_SWITCH("DSP1", 1),
+	WM_ADSP_FW_CONTROL("DSP1", 0),
+	SOC_SINGLE_EXT("Fast Use Case Switch Enable", SND_SOC_NOPM, 0, 1, 0,
+		       cs35l41_fast_switch_en_get, cs35l41_fast_switch_en_put),
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: aud_controls needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	if (hw_cfg) {
+		cs35l41->hw_cfg = *hw_cfg;
+	} else {
+		ret = cs35l41_handle_pdata(cs35l41->dev, &cs35l41->hw_cfg);
+		if (ret != 0)
+			return ret;
+	}
+"""
+    new = """	if (hw_cfg) {
+		cs35l41->hw_cfg = *hw_cfg;
+	} else {
+		ret = cs35l41_handle_pdata(cs35l41->dev, &cs35l41->hw_cfg);
+		if (ret != 0)
+			return ret;
+	}
+
+	if (!device_property_read_string(cs35l41->dev, "cirrus,fast-switch",
+					 &cs35l41->fast_switch_name))
+		cs35l41->fast_switch_en = true;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: probe pdata needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.h"
+text = path.read_text()
+marker = "dagu: CS35L41 fast-switch fields"
+if marker not in text:
+    old = """	struct gpio_desc *reset_gpio;
+};
+"""
+    new = """	struct gpio_desc *reset_gpio;
+	/* dagu: CS35L41 fast-switch fields */
+	const char *fast_switch_name;
+	bool fast_switch_en;
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: cs35l41_private needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: fast-switch after first DSP start"
+if marker not in text and "mod_delayed_work(system_wq, &cs35l41->fast_switch_work" not in text:
+    old = """		if (!cs35l41->dsp.cs_dsp.running)
+			return wm_adsp_event(w, kcontrol, event);
+"""
+    new = """		if (!cs35l41->dsp.cs_dsp.running) {
+			/* dagu: fast-switch after first DSP start */
+			ret = wm_adsp_event(w, kcontrol, event);
+			if (ret)
+				return ret;
+			if (cs35l41->fast_switch_en) {
+				ret = cs35l41_do_fast_switch(cs35l41);
+				if (ret)
+					dev_err(cs35l41->dev,
+						"dagu: fast-switch after DSP start: %d\\n",
+						ret);
+			}
+			return 0;
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: first DSP start needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: fast-switch uses snd_kcontrol_chip"
+if marker not in text and "snd_soc_kcontrol_component" in text:
+    text = text.replace("snd_soc_kcontrol_component", "snd_kcontrol_chip")
+    text = text.replace(
+        "static int cs35l41_fast_switch_en_get(struct snd_kcontrol *kcontrol,",
+        "/* dagu: fast-switch uses snd_kcontrol_chip */\nstatic int cs35l41_fast_switch_en_get(struct snd_kcontrol *kcontrol,",
+        1,
+    )
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.h"
+text = path.read_text()
+marker = "dagu: fast-switch delayed_work"
+if marker not in text:
+    old = """	const char *fast_switch_name;
+	bool fast_switch_en;
+};
+"""
+    new = """	const char *fast_switch_name;
+	bool fast_switch_en;
+	/* dagu: fast-switch delayed_work */
+	struct delayed_work fast_switch_work;
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: fast_switch_en field needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: fast-switch off DAPM"
+if marker not in text:
+    old = """	cs35l41->fast_switch_en = enable;
+	return ret;
+}
+
+static int cs35l41_dsp_audio_ev(struct snd_soc_dapm_widget *w,
+"""
+    new = """	cs35l41->fast_switch_en = enable;
+	return ret;
+}
+
+static void cs35l41_fast_switch_work(struct work_struct *work)
+{
+	struct cs35l41_private *cs35l41 =
+		container_of(work, struct cs35l41_private, fast_switch_work.work);
+
+	/* dagu: fast-switch off DAPM */
+	if (!cs35l41->fast_switch_en || !cs35l41->dsp.cs_dsp.running)
+		return;
+	cs35l41_do_fast_switch(cs35l41);
+}
+
+static int cs35l41_dsp_audio_ev(struct snd_soc_dapm_widget *w,
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: fast_switch workfn needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """		if (!cs35l41->dsp.cs_dsp.running) {
+			/* dagu: fast-switch after first DSP start */
+			ret = wm_adsp_event(w, kcontrol, event);
+			if (ret)
+				return ret;
+			if (cs35l41->fast_switch_en) {
+				ret = cs35l41_do_fast_switch(cs35l41);
+				if (ret)
+					dev_err(cs35l41->dev,
+						"dagu: fast-switch after DSP start: %d\\n",
+						ret);
+			}
+			return 0;
+		}
+"""
+    new = """		if (!cs35l41->dsp.cs_dsp.running) {
+			ret = wm_adsp_event(w, kcontrol, event);
+			if (ret)
+				return ret;
+			if (cs35l41->fast_switch_en)
+				mod_delayed_work(system_wq, &cs35l41->fast_switch_work,
+						 msecs_to_jiffies(80));
+			return 0;
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: first-start defer needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """		ret = cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						CSPL_MBOX_CMD_RESUME);
+		if (ret)
+			return ret;
+		if (cs35l41->fast_switch_en) {
+			ret = cs35l41_do_fast_switch(cs35l41);
+			if (ret)
+				dev_err(cs35l41->dev,
+					"dagu: fast-switch after RESUME: %d\\n",
+					ret);
+		}
+		return 0;
+	case SND_SOC_DAPM_PRE_PMD:
+		return cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						 CSPL_MBOX_CMD_PAUSE);
+"""
+    new = """		ret = cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						CSPL_MBOX_CMD_RESUME);
+		if (ret)
+			return ret;
+		if (cs35l41->fast_switch_en)
+			mod_delayed_work(system_wq, &cs35l41->fast_switch_work,
+					 msecs_to_jiffies(80));
+		return 0;
+	case SND_SOC_DAPM_PRE_PMD:
+		cancel_delayed_work_sync(&cs35l41->fast_switch_work);
+		return cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						 CSPL_MBOX_CMD_PAUSE);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: RESUME defer needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	if (!device_property_read_string(cs35l41->dev, "cirrus,fast-switch",
+					 &cs35l41->fast_switch_name))
+		cs35l41->fast_switch_en = true;
+"""
+    new = """	if (!device_property_read_string(cs35l41->dev, "cirrus,fast-switch",
+					 &cs35l41->fast_switch_name))
+		cs35l41->fast_switch_en = true;
+	INIT_DELAYED_WORK(&cs35l41->fast_switch_work, cs35l41_fast_switch_work);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: INIT_DELAYED_WORK needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """void cs35l41_remove(struct cs35l41_private *cs35l41)
+{
+	pm_runtime_get_sync(cs35l41->dev);
+"""
+    new = """void cs35l41_remove(struct cs35l41_private *cs35l41)
+{
+	cancel_delayed_work_sync(&cs35l41->fast_switch_work);
+	pm_runtime_get_sync(cs35l41->dev);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: remove cancel needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Xiaomi DAGU CAF cs35l41_pcm_hw_params: S24_LE is 24-bit samples in 32-bit
+# TDM slots (Q6 slot_width=32, 4 slots, 6.144 MHz). Mainline wrote
+# params_width (24) into ASP_WIDTH_RX, so the chip framed 24-bit slots
+# against 32-bit Q6 slots — 8 MSB zeros ≈ -48 dB at "full" volume.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: ASP_WIDTH is physical slot, RX_WL is sample"
+if marker not in text:
+    old = """	unsigned int rate = params_rate(params);
+	u8 asp_wl;
+	int i;
+"""
+    new = """	unsigned int rate = params_rate(params);
+	u8 asp_wl, asp_width;
+	int i;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: asp_wl decl needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	asp_wl = params_width(params);
+
+	regmap_update_bits(cs35l41->regmap, CS35L41_GLOBAL_CLK_CTRL,
+			   CS35L41_GLOBAL_FS_MASK,
+			   cs35l41_fs_rates[i].fs_cfg << CS35L41_GLOBAL_FS_SHIFT);
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
+				   CS35L41_ASP_WIDTH_RX_MASK,
+				   asp_wl << CS35L41_ASP_WIDTH_RX_SHIFT);
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_RX_WL,
+				   CS35L41_ASP_RX_WL_MASK,
+				   asp_wl << CS35L41_ASP_RX_WL_SHIFT);
+	} else {
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
+				   CS35L41_ASP_WIDTH_TX_MASK,
+				   asp_wl << CS35L41_ASP_WIDTH_TX_SHIFT);
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_TX_WL,
+				   CS35L41_ASP_TX_WL_MASK,
+				   asp_wl << CS35L41_ASP_TX_WL_SHIFT);
+	}
+"""
+    new = """	asp_wl = params_width(params);
+	/* dagu: ASP_WIDTH is physical slot, RX_WL is sample */
+	asp_width = params_physical_width(params);
+
+	regmap_update_bits(cs35l41->regmap, CS35L41_GLOBAL_CLK_CTRL,
+			   CS35L41_GLOBAL_FS_MASK,
+			   cs35l41_fs_rates[i].fs_cfg << CS35L41_GLOBAL_FS_SHIFT);
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
+				   CS35L41_ASP_WIDTH_RX_MASK,
+				   asp_width << CS35L41_ASP_WIDTH_RX_SHIFT);
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_RX_WL,
+				   CS35L41_ASP_RX_WL_MASK,
+				   asp_wl << CS35L41_ASP_RX_WL_SHIFT);
+	} else {
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
+				   CS35L41_ASP_WIDTH_TX_MASK,
+				   asp_width << CS35L41_ASP_WIDTH_TX_SHIFT);
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_TX_WL,
+				   CS35L41_ASP_TX_WL_MASK,
+				   asp_wl << CS35L41_ASP_TX_WL_SHIFT);
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hw_params ASP_WIDTH needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Android mixer_paths: Boost Class-H Tracking Enable=1, Boost Target Voltage=0.
+# BST_CTL_SEL bit0=Class-H; target 0 is ignored while tracking.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: Boost Class-H Tracking mixers"
+if marker not in text:
+    old = """	SOC_SINGLE_TLV("Analog PCM Volume", CS35L41_AMP_GAIN_CTRL, 5, 0x14, 0,
+		       amp_gain_tlv),
+"""
+    new = """	SOC_SINGLE_TLV("Analog PCM Volume", CS35L41_AMP_GAIN_CTRL, 5, 0x14, 0,
+		       amp_gain_tlv),
+	/* dagu: Boost Class-H Tracking mixers */
+	SOC_SINGLE("Boost Class-H Tracking Enable",
+		   CS35L41_BSTCVRT_VCTRL2, 0, 1, 0),
+	SOC_SINGLE("Boost Target Voltage", CS35L41_BSTCVRT_VCTRL1, 0, 0xAA, 0),
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: Analog PCM Volume needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/power/supply/bq27xxx_battery_i2c.c"
+text = path.read_text()
+marker = "dagu: wake sleeping BQ27Z561"
+if marker not in text:
+    old = """	do {
+		ret = i2c_transfer(client->adapter, msg, ARRAY_SIZE(msg));
+		if (ret == -EBUSY && ++retry < 3) {
+			/* sleep 10 milliseconds when busy */
+			usleep_range(10000, 11000);
+			continue;
+		}
+		break;
+	} while (1);
+"""
+    new = """	do {
+		/* dagu: wake sleeping BQ27Z561 */
+		ret = i2c_transfer(client->adapter, msg, ARRAY_SIZE(msg));
+		if (ret < 0 && ++retry < 6) {
+			usleep_range(2000, 4000);
+			continue;
+		}
+		break;
+	} while (1);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: bq27xxx read retry needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/power/supply/bq27xxx_battery_i2c.c"
+text = path.read_text()
+marker = "dagu: retry BQ27Z561 I2C write"
+if marker not in text:
+    old = """	msg.buf = data;
+	msg.addr = client->addr;
+	msg.flags = 0;
+
+	ret = i2c_transfer(client->adapter, &msg, 1);
+	if (ret < 0)
+		return ret;
+"""
+    new = """	msg.buf = data;
+	msg.addr = client->addr;
+	msg.flags = 0;
+
+	{
+		int retry = 0;
+
+		/* dagu: retry BQ27Z561 I2C write */
+		do {
+			ret = i2c_transfer(client->adapter, &msg, 1);
+			if (ret < 0 && ++retry < 6) {
+				usleep_range(2000, 4000);
+				continue;
+			}
+			break;
+		} while (1);
+	}
+	if (ret < 0)
+		return ret;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: bq27xxx write retry needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/power/supply/bq27xxx_battery_i2c.c"
+text = path.read_text()
+marker = "dagu: retry BQ27Z561 I2C bulk_read"
+if marker not in text:
+    old = """	ret = i2c_smbus_read_i2c_block_data(client, reg, len, data);
+	if (ret < 0)
+		return ret;
+"""
+    new = """	{
+		int retry = 0;
+
+		/* dagu: retry BQ27Z561 I2C bulk_read */
+		do {
+			ret = i2c_smbus_read_i2c_block_data(client, reg, len, data);
+			if (ret < 0 && ++retry < 6) {
+				usleep_range(2000, 4000);
+				continue;
+			}
+			break;
+		} while (1);
+	}
+	if (ret < 0)
+		return ret;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: bq27xxx bulk_read retry needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/qcom/sm8250.c"
+text = path.read_text()
+marker = "dagu: set I2S fmt on every CS35L41"
+if marker not in text:
+    old = """	case TERTIARY_MI2S_RX:
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+		snd_soc_dai_set_sysclk(cpu_dai,
+			Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT,
+			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+		snd_soc_dai_set_fmt(cpu_dai, fmt);
+		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+		break;
+"""
+    new = """	case TERTIARY_MI2S_RX:
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+		snd_soc_dai_set_sysclk(cpu_dai,
+			Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT,
+			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+		snd_soc_dai_set_fmt(cpu_dai, fmt);
+		{
+			int codec_i;
+			/* dagu: set I2S fmt on every CS35L41 */
+			for (codec_i = 0; codec_i < rtd->dai_link->num_codecs; codec_i++)
+				snd_soc_dai_set_fmt(snd_soc_rtd_to_codec(rtd, codec_i),
+						    codec_dai_fmt);
+		}
+		break;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: TERTIARY_MI2S_RX needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# CAF kona.c CONFIG_MACH_XIAOMI_DAGU: TDM_MAX_SLOTS=4, 32-bit @ 48 kHz = 6.144 MHz.
+# CS35L41 channels_max=2 so keep 2ch PCM; map all amps to ASPRX slots 0/1.
+# AFE channel map uses BYTE offsets {0,4} (CAF tert_tdm_dev_config).
+path = root / "sound/soc/qcom/sm8250.c"
+text = path.read_text()
+marker = "dagu: tertiary TDM for CS35L41"
+if marker not in text:
+    old = """#define MI2S_BCLK_RATE		1536000
+"""
+    new = """#define MI2S_BCLK_RATE		1536000
+#define TDM_BCLK_RATE		6144000
+#define TDM_SLOTS		4
+#define TDM_SLOT_WIDTH		32
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MI2S_BCLK_RATE needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	case QUINARY_MI2S_RX:
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+		snd_soc_dai_set_sysclk(cpu_dai,
+			Q6AFE_LPASS_CLK_ID_QUI_MI2S_IBIT,
+			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+		snd_soc_dai_set_fmt(cpu_dai, fmt);
+		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+		break;
+	default:
+		break;
+"""
+    new = """	case QUINARY_MI2S_RX:
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+		snd_soc_dai_set_sysclk(cpu_dai,
+			Q6AFE_LPASS_CLK_ID_QUI_MI2S_IBIT,
+			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+		snd_soc_dai_set_fmt(cpu_dai, fmt);
+		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+		break;
+	case TERTIARY_TDM_RX_0: {
+		/* dagu: tertiary TDM for CS35L41 */
+		static const unsigned int cpu_rx_slots[] = { 0, 4 };
+		static const unsigned int amp_rx_slots[][2] = {
+			{ 0, 1 }, { 0, 1 }, { 0, 1 }, { 0, 1 },
+		};
+		int codec_i;
+
+		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_DSP_A;
+		snd_soc_dai_set_tdm_slot(cpu_dai, 0, 0x03, TDM_SLOTS,
+					 TDM_SLOT_WIDTH);
+		snd_soc_dai_set_channel_map(cpu_dai, 0, NULL,
+					    ARRAY_SIZE(cpu_rx_slots),
+					    cpu_rx_slots);
+		snd_soc_dai_set_sysclk(cpu_dai,
+				       Q6AFE_LPASS_CLK_ID_TER_TDM_IBIT,
+				       TDM_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+		for (codec_i = 0; codec_i < rtd->dai_link->num_codecs; codec_i++) {
+			struct snd_soc_dai *amp = snd_soc_rtd_to_codec(rtd, codec_i);
+
+			snd_soc_dai_set_fmt(amp, codec_dai_fmt);
+			snd_soc_dai_set_channel_map(amp, 0, NULL, 2,
+						    amp_rx_slots[codec_i]);
+			snd_soc_dai_set_sysclk(amp, 0, TDM_BCLK_RATE,
+					       SNDRV_PCM_STREAM_PLAYBACK);
+			snd_soc_component_set_sysclk(amp->component, 0, 0,
+						     TDM_BCLK_RATE,
+						     SND_SOC_CLOCK_IN);
+		}
+		break;
+	}
+	default:
+		break;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: QUINARY_MI2S_RX needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Already-patched trees still have 8-slot / 12.288 MHz from the previous dagu
+# bring-up. CAF kona.c sets TDM_MAX_SLOTS=4 for DAGU (BCLK 6.144 MHz) and
+# tert RX_0 channel map byte offsets {0,4,8,12}.
+path = root / "sound/soc/qcom/sm8250.c"
+text = path.read_text()
+if "#define TDM_SLOTS		8" in text or "#define TDM_BCLK_RATE		12288000" in text:
+    text2 = text.replace("#define TDM_BCLK_RATE		12288000",
+                         "#define TDM_BCLK_RATE		6144000", 1)
+    text2 = text2.replace("#define TDM_SLOTS		8",
+                          "#define TDM_SLOTS		4", 1)
+    text2 = text2.replace("static const unsigned int cpu_rx_slots[] = { 0, 1 };",
+                          "static const unsigned int cpu_rx_slots[] = { 0, 4 };", 1)
+    if "#define TDM_SLOTS		4" not in text2:
+        raise SystemExit(f"{path}: TDM 4-slot rewrite failed")
+    path.write_text(text2)
+    print(f"patched {path}: dagu CAF TDM_MAX_SLOTS is 4")
+
+# Mainline q6afe_tdm_port_prepare drops DT invert-sync / data-delay.
+# CAF tert RX needs invert-sync=1 and 1-BCLK delay (DSP_A) or CS35L41 PLL
+# never locks and PUP_DONE times out.
+path = root / "sound/soc/qcom/qdsp6/q6afe.h"
+text = path.read_text()
+marker = "dagu: TDM invert-sync/data-delay in q6afe_tdm_cfg"
+if marker not in text:
+    old = """	u16	slot_mask;
+	u32	data_align_type;
+	u16	ch_mapping[AFE_MAX_CHAN_COUNT];
+"""
+    new = """	u16	slot_mask;
+	u32	data_align_type;
+	u16	data_out_enable; /* dagu: TDM invert-sync/data-delay in q6afe_tdm_cfg */
+	u16	invert_sync;
+	u16	data_delay;
+	u16	ch_mapping[AFE_MAX_CHAN_COUNT];
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: q6afe_tdm_cfg needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe-dai.c"
+text = path.read_text()
+marker = "dagu: copy TDM invert-sync into port cfg"
+if marker not in text:
+    old = """	tdm->data_align_type = dai_data->priv[dai->id].data_align;
+	tdm->sync_src = dai_data->priv[dai->id].sync_src;
+	tdm->sync_mode = dai_data->priv[dai->id].sync_mode;
+
+	return 0;
+"""
+    new = """	tdm->data_align_type = dai_data->priv[dai->id].data_align;
+	tdm->sync_src = dai_data->priv[dai->id].sync_src;
+	tdm->sync_mode = dai_data->priv[dai->id].sync_mode;
+	/* dagu: copy TDM invert-sync into port cfg */
+	tdm->data_out_enable = dai_data->priv[dai->id].data_out_enable;
+	tdm->invert_sync = dai_data->priv[dai->id].invert_sync;
+	tdm->data_delay = dai_data->priv[dai->id].data_delay;
+
+	return 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: q6tdm_hw_params needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+marker = "dagu: send TDM invert-sync to AFE"
+if marker not in text and "dagu TDM ch=" not in text:
+    old = """	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame;
+
+	pcfg->tdm_cfg.slot_width = cfg->slot_width;
+	pcfg->tdm_cfg.slot_mask = cfg->slot_mask;
+"""
+    new = """	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame;
+	/* dagu: send TDM invert-sync to AFE */
+	pcfg->tdm_cfg.ctrl_data_out_enable = cfg->data_out_enable;
+	pcfg->tdm_cfg.ctrl_invert_sync_pulse = cfg->invert_sync;
+	pcfg->tdm_cfg.ctrl_sync_data_delay = cfg->data_delay;
+
+	pcfg->tdm_cfg.slot_width = cfg->slot_width;
+	pcfg->tdm_cfg.slot_mask = cfg->slot_mask;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: q6afe_tdm_port_prepare needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+# This ADSP returns 0x16 / "Unknown cmd 0x100f4" for LPASS_CORE_HW_VOTE.
+# SWR/txmacro then never get iface/fsgen clocks and the whole sound card
+# defers on "WCD Capture: codec dai not found".
+marker = "dagu: AFE LPASS HW vote is optional"
+if marker not in text:
+    old = """	ret = afe_apr_send_pkt(afe, pkt, NULL,
+			       AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST);
+	if (ret)
+		dev_err(afe->dev, "AFE failed to vote (%d)\\n", hw_block_id);
+
+	return ret;
+"""
+    new = """	ret = afe_apr_send_pkt(afe, pkt, NULL,
+			       AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST);
+	if (ret) {
+		/* dagu: AFE LPASS HW vote is optional */
+		dev_warn(afe->dev, "AFE vote unsupported (%d, %d); continue without vote\\n",
+			 hw_block_id, ret);
+		ret = 0;
+	}
+
+	return ret;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: AFE vote needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Stock mixer_paths speaker: all four CS35L41 ASPRX1=0 ASPRX2=1 (not 0/4, 1/5).
+path = root / "sound/soc/qcom/sm8250.c"
+text = path.read_text()
+marker = "dagu: CS35L41 ASPRX slots 0/1"
+if marker not in text:
+    old = """		static const unsigned int amp_rx_slots[][2] = {
+			{ 0, 4 }, { 1, 5 }, { 0, 4 }, { 1, 5 },
+		};
+"""
+    new = """		static const unsigned int amp_rx_slots[][2] = {
+			/* dagu: CS35L41 ASPRX slots 0/1 */
+			{ 0, 1 }, { 0, 1 }, { 0, 1 }, { 0, 1 },
+		};
+"""
+    if old in text:
+        path.write_text(text.replace(old, new, 1))
+        print(f"patched {path}: {marker}")
+        text = path.read_text()
+
+# Stock TERT_TDM_RX_0 Format = S24_LE, 48 kHz, two channels.
+marker = "dagu: BE fixup S24_LE 48k stereo"
+if marker not in text:
+    old = """	rate->min = rate->max = 48000;
+	channels->min = channels->max = 2;
+	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S16_LE);
+"""
+    new = """	rate->min = rate->max = 48000;
+	channels->min = channels->max = 2;
+	/* dagu: BE fixup S24_LE 48k stereo */
+	snd_mask_none(fmt);
+	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S24_LE);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: BE fixup needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Xiaomi ADSP rejects oversized AFE_PARAM_ID_TDM_CONFIG (union vs tdm_cfg).
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+marker = "dagu: TDM SET_PARAM size is tdm_cfg"
+if marker not in text:
+    old = """	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
+				       AFE_MODULE_AUDIO_DEV_INTERFACE,
+				       sizeof(port->port_cfg));
+"""
+    new = """	{
+		int cfg_size = sizeof(port->port_cfg);
+
+		/* dagu: TDM SET_PARAM size is tdm_cfg */
+		if (param_id == AFE_PARAM_ID_TDM_CONFIG)
+			cfg_size = sizeof(port->port_cfg.tdm_cfg);
+		ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
+					       AFE_MODULE_AUDIO_DEV_INTERFACE,
+					       cfg_size);
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: q6afe_port_start size needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Stock Android rear s5kjn1: 19.2 MHz MCLK, 4080x3060 GBRG preview.
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: s5kjn1 19.2 MHz and 4080x3060 GBRG"
+if marker not in text:
+    old = """#define S5KJN1_MCLK_FREQ_24MHZ		(24 * HZ_PER_MHZ)
+"""
+    new = """#define S5KJN1_MCLK_FREQ_24MHZ		(24 * HZ_PER_MHZ)
+#define S5KJN1_MCLK_FREQ_19_2MHZ	(19200 * HZ_PER_KHZ) /* dagu: s5kjn1 19.2 MHz and 4080x3060 GBRG */
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: S5KJN1_MCLK needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """		.width = 4080,
+		.height = 3072,
+"""
+    new = """		.width = 4080,
+		.height = 3060,
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 4080x3072 mode needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	{ S5KJN1_REG_X_OUTPUT_SIZE, 0x0ff0 },
+	{ S5KJN1_REG_Y_OUTPUT_SIZE, 0x0c00 },
+"""
+    new = """	{ S5KJN1_REG_X_OUTPUT_SIZE, 0x0ff0 },
+	{ S5KJN1_REG_Y_OUTPUT_SIZE, 0x0bf4 },
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: Y_OUTPUT 0x0c00 needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	{ CCI_REG16(0x0136), 0x1800 },
+"""
+    new = """	{ CCI_REG16(0x0136), 0x1333 },
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 0x0136 24MHz needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	s5kjn1->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_HFLIP, 0, 1, 1, 0);
+"""
+    new = """	s5kjn1->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_HFLIP, 0, 1, 1, 1);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hflip default needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	s5kjn1->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_VFLIP, 0, 1, 1, 0);
+"""
+    new = """	s5kjn1->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_VFLIP, 0, 1, 1, 1);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vflip default needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	if (freq != S5KJN1_MCLK_FREQ_24MHZ)
+		return dev_err_probe(s5kjn1->dev, -EINVAL,
+				     "MCLK clock frequency %lu is not supported\\n",
+				     freq);
+"""
+    new = """	if (freq != S5KJN1_MCLK_FREQ_24MHZ &&
+	    freq != S5KJN1_MCLK_FREQ_19_2MHZ)
+		return dev_err_probe(s5kjn1->dev, -EINVAL,
+				     "MCLK clock frequency %lu is not supported\\n",
+				     freq);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MCLK probe check needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# CamX dagu_qtech_s5kjn1 4080x3060 PLL (19.2 MHz EXCK 0x1300).
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: s5kjn1 CamX PLL"
+if marker not in text:
+    camx = """	{ CCI_REG16(0x0136), 0x1300 },
+	{ CCI_REG16(0x013e), 0x00c8 },
+	{ CCI_REG16(0x0300), 0x0006 },
+	{ CCI_REG16(0x0302), 0x0001 },
+	{ CCI_REG16(0x0304), 0x0003 },
+	{ CCI_REG16(0x0306), 0x0083 }, /* dagu: s5kjn1 CamX PLL */
+	{ CCI_REG16(0x0308), 0x0008 },
+	{ CCI_REG16(0x030a), 0x0001 },
+	{ CCI_REG16(0x030c), 0x0000 },
+	{ CCI_REG16(0x030e), 0x0003 },
+	{ CCI_REG16(0x0310), 0x0086 },
+"""
+    old24 = """	{ CCI_REG16(0x0136), 0x1333 },
+	{ CCI_REG16(0x013e), 0x0000 },
+	{ CCI_REG16(0x0300), 0x0006 },
+	{ CCI_REG16(0x0302), 0x0001 },
+	{ CCI_REG16(0x0304), 0x0004 },
+	{ CCI_REG16(0x0306), 0x008c },
+	{ CCI_REG16(0x0308), 0x0008 },
+	{ CCI_REG16(0x030a), 0x0001 },
+	{ CCI_REG16(0x030c), 0x0000 },
+	{ CCI_REG16(0x030e), 0x0004 },
+	{ CCI_REG16(0x0310), 0x0092 },
+"""
+    old192 = """	{ CCI_REG16(0x0136), 0x1333 },
+	{ CCI_REG16(0x013e), 0x0000 },
+	{ CCI_REG16(0x0300), 0x0006 },
+	{ CCI_REG16(0x0302), 0x0001 },
+	{ CCI_REG16(0x0304), 0x0004 },
+	{ CCI_REG16(0x0306), 0x00af }, /* dagu: s5kjn1 PLL for 19.2 MHz MCLK */
+	{ CCI_REG16(0x0308), 0x0008 },
+	{ CCI_REG16(0x030a), 0x0001 },
+	{ CCI_REG16(0x030c), 0x0000 },
+	{ CCI_REG16(0x030e), 0x0004 },
+	{ CCI_REG16(0x0310), 0x00b6 },
+"""
+    if old192 in text:
+        text = text.replace(old192, camx, 1)
+    elif old24 in text:
+        text = text.replace(old24, camx, 1)
+    else:
+        raise SystemExit(f"{path}: s5kjn1 CamX PLL needle missing")
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu s5kjn1 streaming"
+if marker not in text:
+    old = """	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret)
+		goto error;
+
+	return 0;
+"""
+    new = """	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret)
+		goto error;
+
+	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height);
+	return 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: s5kjn1 stream-on needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+# CAF TDM_CONFIG bit_width is 16 or 24 (slot_width is 32). Forcing sample
+# width 32 made SET_PARAM 0x100ef return ADSP_EBADPARAM (0x2).
+marker24 = "dagu: TDM sample bit_width stays 16/24; slot_width is 32"
+marker32 = "dagu: TDM bit_width 32 and dump cfg"
+old32 = """	/* dagu: TDM bit_width 32 and dump cfg */
+	pcfg->tdm_cfg.bit_width = (cfg->bit_width == 24) ? 32 : cfg->bit_width;
+"""
+new24 = """	/* dagu: TDM sample bit_width stays 16/24; slot_width is 32 */
+	pcfg->tdm_cfg.bit_width = cfg->bit_width;
+"""
+if marker24 in text:
+    print(f"already patched {path}: {marker24}")
+elif marker32 in text or old32 in text:
+    if old32 not in text:
+        raise SystemExit(f"{path}: TDM 24->32 conversion needle missing")
+    path.write_text(text.replace(old32, new24, 1))
+    print(f"patched {path}: TDM bit_width keep 24")
+else:
+    old = """	pcfg->tdm_cfg.tdm_cfg_minor_version = AFE_API_VERSION_TDM_CONFIG;
+	pcfg->tdm_cfg.num_channels = cfg->num_channels;
+	pcfg->tdm_cfg.sample_rate = cfg->sample_rate;
+	pcfg->tdm_cfg.bit_width = cfg->bit_width;
+	pcfg->tdm_cfg.data_format = cfg->data_format;
+	pcfg->tdm_cfg.sync_mode = cfg->sync_mode;
+	pcfg->tdm_cfg.sync_src = cfg->sync_src;
+	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame;
+	/* dagu: send TDM invert-sync to AFE */
+	pcfg->tdm_cfg.ctrl_data_out_enable = cfg->data_out_enable;
+	pcfg->tdm_cfg.ctrl_invert_sync_pulse = cfg->invert_sync;
+	pcfg->tdm_cfg.ctrl_sync_data_delay = cfg->data_delay;
+
+	pcfg->tdm_cfg.slot_width = cfg->slot_width;
+	pcfg->tdm_cfg.slot_mask = cfg->slot_mask;
+	port->scfg = kzalloc_obj(*port->scfg);
+	if (!port->scfg)
+		return;
+
+	port->scfg->minor_version = AFE_API_VERSION_SLOT_MAPPING_CONFIG;
+	port->scfg->num_channels = cfg->num_channels;
+	port->scfg->bitwidth = cfg->bit_width;
+"""
+    new = """	pcfg->tdm_cfg.tdm_cfg_minor_version = AFE_API_VERSION_TDM_CONFIG;
+	pcfg->tdm_cfg.num_channels = cfg->num_channels;
+	pcfg->tdm_cfg.sample_rate = cfg->sample_rate;
+	/* dagu: TDM sample bit_width stays 16/24; slot_width is 32 */
+	pcfg->tdm_cfg.bit_width = cfg->bit_width;
+	pcfg->tdm_cfg.data_format = 0;
+	pcfg->tdm_cfg.sync_mode = cfg->sync_mode;
+	pcfg->tdm_cfg.sync_src = cfg->sync_src;
+	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame ?: 4;
+	pcfg->tdm_cfg.ctrl_data_out_enable = cfg->data_out_enable;
+	pcfg->tdm_cfg.ctrl_invert_sync_pulse = cfg->invert_sync;
+	pcfg->tdm_cfg.ctrl_sync_data_delay = cfg->data_delay;
+	pcfg->tdm_cfg.slot_width = cfg->slot_width ?: 32;
+	pcfg->tdm_cfg.slot_mask = cfg->slot_mask ?:
+		((1u << cfg->num_channels) - 1);
+	pr_info("dagu TDM ch=%u rate=%u bw=%u->%u slots=%u sw=%u mask=0x%x sync=%u/%u inv=%u delay=%u dout=%u\\n",
+		pcfg->tdm_cfg.num_channels, pcfg->tdm_cfg.sample_rate,
+		cfg->bit_width, pcfg->tdm_cfg.bit_width,
+		pcfg->tdm_cfg.nslots_per_frame, pcfg->tdm_cfg.slot_width,
+		pcfg->tdm_cfg.slot_mask, pcfg->tdm_cfg.sync_mode,
+		pcfg->tdm_cfg.sync_src, pcfg->tdm_cfg.ctrl_invert_sync_pulse,
+		pcfg->tdm_cfg.ctrl_sync_data_delay,
+		pcfg->tdm_cfg.ctrl_data_out_enable);
+	kfree(port->scfg);
+	port->scfg = kzalloc_obj(*port->scfg);
+	if (!port->scfg)
+		return;
+
+	port->scfg->minor_version = AFE_API_VERSION_SLOT_MAPPING_CONFIG;
+	port->scfg->num_channels = cfg->num_channels;
+	port->scfg->bitwidth = pcfg->tdm_cfg.bit_width;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: TDM dump needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker24}")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+if "q6afe_tdm_group_enable" not in text:
+    raise SystemExit(f"{path}: TDM GROUP helper missing; do not re-extract linux/ without GROUP/V3")
+if "gcfg.slot_mask = 0xFF" in text:
+    text = text.replace("gcfg.slot_mask = 0xFF;",
+                        "gcfg.slot_mask = (1u << gcfg.nslots_per_frame) - 1;", 1)
+    text = text.replace("nslots_per_frame ?: 8", "nslots_per_frame ?: 4")
+    path.write_text(text)
+    print(f"patched {path}: TDM GROUP 4-slot mask")
+
+# SM8250 VFE puts the CAMNOC RCG rates on camnoc_axi_src, but
+# vfe_match_clock_names() only matches camnoc_axi (a branch with rate {0}).
+# Without ICC the RCG stays parked at XO 19.2 MHz and RDI DMA never completes.
+path = root / "drivers/media/platform/qcom/camss/camss-vfe.c"
+text = path.read_text()
+marker = "dagu: scale camnoc_axi_src"
+if marker not in text:
+    old = """	return (!strcmp(clock->name, vfe_name) ||
+		!strcmp(clock->name, vfe_lite_name) ||
+		!strcmp(clock->name, "vfe_lite") ||
+		!strcmp(clock->name, "camnoc_axi") ||
+		!strcmp(clock->name, "camnoc_rt_axi"));
+"""
+    new = """	return (!strcmp(clock->name, vfe_name) ||
+		!strcmp(clock->name, vfe_lite_name) ||
+		!strcmp(clock->name, "vfe_lite") ||
+		!strcmp(clock->name, "camnoc_axi") ||
+		!strcmp(clock->name, "camnoc_axi_src") || /* dagu: scale camnoc_axi_src */
+		!strcmp(clock->name, "camnoc_rt_axi"));
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vfe_match_clock_names needle missing")
+    text = text.replace(old, new, 1)
+    old = """			ret = clk_set_rate(clock->clk, rate);
+			if (ret < 0) {
+				dev_err(dev, "clk set rate failed: %d\\n", ret);
+				return ret;
+			}
+"""
+    new = """			ret = clk_set_rate(clock->clk, rate);
+			if (ret < 0) {
+				dev_err(dev, "clk set rate failed: %d\\n", ret);
+				return ret;
+			}
+			if (!strcmp(clock->name, "camnoc_axi_src"))
+				dev_info(dev, "dagu camnoc_axi_src min=%llu -> %ld\\n",
+					 min_rate, rate);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vfe clk_set_rate needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# CSIPHY MMIO sits on titan AHB. VFE/TPG work with cpas/ife AHB, but
+# core_ahb stayed at enable_count=0 during STREAMON and both sensors
+# produced 0 frames. Enable it with the PHY clocks.
+path = root / "drivers/media/platform/qcom/camss/camss.c"
+text = path.read_text()
+marker = "dagu: csiphy also enable core_ahb"
+if marker not in text:
+    n = 0
+    for i in range(6):
+        old = f'''		.clock = {{ "csiphy{i}", "csiphy{i}_timer" }},
+		.clock_rate = {{ {{ 400000000 }},
+				{{ 300000000 }} }},
+'''
+        new = f'''		.clock = {{ "csiphy{i}", "csiphy{i}_timer", "core_ahb", "cpas_ahb" }}, /* dagu: csiphy also enable core_ahb */
+		.clock_rate = {{ {{ 400000000 }},
+				{{ 300000000 }},
+				{{ 19200000 }},
+				{{ 19200000 }} }},
+'''
+        if old not in text:
+            raise SystemExit(f"{path}: csiphy{i} clock needle missing")
+        text = text.replace(old, new, 1)
+        n += 1
+    path.write_text(text)
+    print(f"patched {path}: {marker} x{n}")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+marker = "dagu: log csiphy settle"
+if marker not in text:
+    old = '''	settle_cnt = csiphy_settle_cnt_calc(link_freq, csiphy->timer_clk_rate);
+
+	val = CSIPHY_3PH_CMN_CSI_COMMON_CTRL5_CLK_ENABLE;
+'''
+    new = '''	settle_cnt = csiphy_settle_cnt_calc(link_freq, csiphy->timer_clk_rate);
+	/* dagu: log csiphy settle */
+	dev_info(csiphy->camss->dev,
+		 "dagu csiphy%d link=%lldHz timer=%u settle=%u nlanes=%u\\n",
+		 csiphy->id, (long long)link_freq, csiphy->timer_clk_rate,
+		 settle_cnt, c->num_data);
+
+	val = CSIPHY_3PH_CMN_CSI_COMMON_CTRL5_CLK_ENABLE;
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: settle_cnt needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+marker = "dagu: Android s5kjn1 D-PHY settle 0x13"
+if marker not in text:
+    replacements = [
+        (
+            "	if (cfg->csi2->cphy)\n"
+            "		settle_cnt = 0x12;\n"
+            "	/* dagu: log csiphy settle */\n",
+            "	if (cfg->csi2->cphy)\n"
+            "		settle_cnt = 0x12;\n"
+            "	else if (csiphy->id == 1)\n"
+            "		settle_cnt = 0x13; /* dagu: Android s5kjn1 D-PHY settle 0x13 */\n"
+            "	/* dagu: log csiphy settle */\n",
+        ),
+        (
+            "	settle_cnt = csiphy_settle_cnt_calc(link_freq, csiphy->timer_clk_rate);\n"
+            "	/* dagu: log csiphy settle */\n",
+            "	settle_cnt = csiphy_settle_cnt_calc(link_freq, csiphy->timer_clk_rate);\n"
+            "	if (!cfg->csi2->cphy && csiphy->id == 1)\n"
+            "		settle_cnt = 0x13; /* dagu: Android s5kjn1 D-PHY settle 0x13 */\n"
+            "	/* dagu: log csiphy settle */\n",
+        ),
+    ]
+    for old, new in replacements:
+        if old in text:
+            text = text.replace(old, new, 1)
+            break
+    else:
+        raise SystemExit(f"{path}: D-PHY settle 0x13 needle missing")
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu s5kjn1 frame counter"
+# Later delay-sweep replacement owns STREAMON; do not re-stitch
+# the intermediate log+return-0 needle.
+if marker not in text and "dagu: 0x2400 delay sweep then 0x4000 mode" not in text:
+    old = '''	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height);
+	return 0;
+'''
+    new = '''	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height);
+	msleep(80);
+	{
+		u64 fc = 0, mode = 0, lanes = 0;
+
+		/* dagu s5kjn1 frame counter */
+		cci_read(s5kjn1->regmap, CCI_REG8(0x0005), &fc, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE, &mode, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0114), &lanes, NULL);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 fc=0x%llx mode=0x%llx r0114=0x%llx\\n",
+			 fc, mode, lanes);
+	}
+	return 0;
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: s5kjn1 streaming log needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: Android live D-PHY 4-lane 0x0115=0"
+# Live Android CSIPHY1 preview is 2PH D-PHY (0x0800=0x02). CamX 4080 C-PHY
+# 0x0114=0x0301 blacks CSID/VFE — do not re-apply it.
+if "dagu: CamX 4080 C-PHY 0x0115=1" in text:
+    text = text.replace(
+        "	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */\n",
+        "	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: Android live D-PHY 4-lane 0x0115=0 */\n",
+    )
+    path.write_text(text)
+    text = path.read_text()
+    print(f"patched {path}: revert C-PHY 0x0114 to Android live D-PHY")
+if marker not in text:
+    replaced = False
+    for old in (
+        "	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */\n",
+        "	{ CCI_REG16(0x0114), 0x0301 },\n",
+        "	{ CCI_REG16(0x0114), 0x0300 },\n",
+    ):
+        if old in text:
+            text = text.replace(old, "	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: Android live D-PHY 4-lane 0x0115=0 */\n", 1)
+            replaced = True
+            break
+    if not replaced:
+        raise SystemExit(f"{path}: 0x0114 D-PHY needle missing")
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+hdr = (root / "drivers/media/i2c/s5kjn1-dagu-regs.h").read_text()
+if "{ CCI_REG16(0x0114), 0x0301 }" in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h 4080 still CamX C-PHY 0x0114=0x0301")
+if marker not in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h missing Android live D-PHY 0x0114")
+if "s5kjn1_dagu_4080x3060_mcu" not in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h missing MCU 0x2400 table")
+if "s5kjn1_dagu_2040x1530_mode" not in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h missing CamX-bin 2040x1530 table")
+if "{ CCI_REG16(0x0900), 0x0144 }" in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h 2040 mode still has guessed 4x4 0x0144")
+if "{ CCI_REG16(0x0348), 0x0fff }" not in hdr or "{ CCI_REG16(0x034a), 0x0c0f }" not in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h 2040 analog window is not CamX 2x2 half-crop")
+if "{ CCI_REG16(0x034c), 0x07f8 }" not in hdr or "{ CCI_REG16(0x034e), 0x05fa }" not in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h 2040 output size missing")
+if "{ CCI_REG16(0x0900), 0x0122 }" not in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h missing CamX 2x2 0x0900=0x0122")
+
+# Mainline lane_regs_sm8250 copies CAF combo-mode 0x?904=0x07.
+# dagu sensors each own a PHY (csiphy1 / csiphy4); CAF non-combo 2PH uses 0x03.
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+marker = "dagu: CSIPHY 2PH non-combo 0x03"
+if marker not in text:
+    n = 0
+    for addr in ("0x0904", "0x0C84", "0x0A04", "0x0B04", "0x0C04"):
+        old = f"\t{{{addr}, 0x07, 0x00, CSIPHY_DEFAULT_PARAMS}},\n"
+        new = f"\t{{{addr}, 0x03, 0x00, CSIPHY_DEFAULT_PARAMS}}, /* dagu: CSIPHY 2PH non-combo 0x03 */\n"
+        if old not in text:
+            raise SystemExit(f"{path}: {addr} 0x07 needle missing")
+        text = text.replace(old, new, 1)
+        n += 1
+    path.write_text(text)
+    print(f"patched {path}: {marker} x{n}")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+marker = "dagu: CSIPHY enable IRQs and dump"
+if marker not in text:
+    old = '''	/* IRQ_MASK registers - disable all interrupts */
+	for (i = 11; i < 22; i++) {
+		writel_relaxed(0, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, i));
+	}
+}
+'''
+    new = '''	/* CAF csiphy_irq_reg_1_2_1: unmask lane IRQs. */
+	for (i = 11; i < 22; i++) {
+		u8 irqv = 0xff;
+
+		if (i == 13)
+			irqv = 0xfb;
+		else if (i == 15)
+			irqv = 0x7f;
+		else if (i == 18)
+			irqv = 0xef;
+		writel_relaxed(irqv, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, i));
+	}
+	{
+		u32 c5, c7, r904, hw;
+
+		c5 = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 5));
+		c7 = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 7));
+		r904 = readl_relaxed(csiphy->base + 0x0904);
+		hw = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
+							  regs->common_status_offset, 12));
+		/* dagu: CSIPHY enable IRQs and dump */
+		dev_info(csiphy->camss->dev,
+			 "dagu csiphy%d mmio c5=0x%x c7=0x%x r0904=0x%x st12=0x%x\\n",
+			 csiphy->id, c5, c7, r904, hw);
+	}
+}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: CSIPHY IRQ disable needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+text = path.read_text()
+marker = "dagu: log CSIPHY ISR"
+if "dagu: do not printk CSIPHY" not in text and marker not in text:
+    old = '''	for (i = 0; i < 11; i++) {
+		int c = i + 22;
+		u8 val = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
+							  regs->common_status_offset, i));
+
+		writel_relaxed(val, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, c));
+	}
+'''
+    new = '''	for (i = 0; i < 11; i++) {
+		int c = i + 22;
+		u8 val = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
+							  regs->common_status_offset, i));
+
+		if (val)
+			dev_info_ratelimited(csiphy->camss->dev,
+					     "dagu csiphy%d irq[%d]=0x%x\\n",
+					     csiphy->id, i, val); /* dagu: log CSIPHY ISR */
+		writel_relaxed(val, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, c));
+	}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: CSIPHY isr needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# CSI2_RX bits 0-7 are per-lane SOT/EOT. 0xffffffff ≈ 60k IRQ/s on D-PHY
+# and Snapshot dies. Bit 17 (0x20000) is C-PHY FIFO status; live poke
+# unmasking it storms CSID (~20k/s) and VFE stays 0 fps. Leave masked.
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "dagu: CSID SOT/EOT stay masked" not in text and "dagu: CSID FIFO bit17" not in text:
+    old_masks = [
+            '''			if (enable) {
+				/* dagu: unmask CSI2 RX IRQs (incl. FIFO) — see SOT vs 0x20000. */
+				writel_relaxed(0xffffffff,
+					       csid->base + CSID_CSI2_RX_IRQ_MASK);
+				writel_relaxed(0xffffffff,
+					       csid->base + CSID_CSI2_RDIN_IRQ_MASK(i));
+				dev_info(csid->camss->dev,
+					 "dagu csid phy=%u lanes=%u assign=0x%x cfg0=0x%x\\n",
+					 csid->phy.csiphy_id, csid->phy.lane_cnt,
+					 csid->phy.lane_assign,
+					 readl_relaxed(csid->base + CSID_CSI2_RX_CFG0)); /* dagu: log CSI2 RX CFG0 */
+			}
+''',
+            '''			if (enable) {
+				/* dagu: unmask CSI2 RX IRQs */
+				writel_relaxed(0xffffffff,
+					       csid->base + CSID_CSI2_RX_IRQ_MASK);
+				dev_info(csid->camss->dev,
+					 "dagu csid phy=%u lanes=%u assign=0x%x\\n",
+					 csid->phy.csiphy_id, csid->phy.lane_cnt,
+					 csid->phy.lane_assign);
+			}
+''',
+    ]
+    new_mask = '''			if (enable) {
+				/* dagu: CSID SOT/EOT stay masked */
+				dev_info(csid->camss->dev,
+					 "dagu csid phy=%u lanes=%u assign=0x%x cfg0=0x%x\\n",
+					 csid->phy.csiphy_id, csid->phy.lane_cnt,
+					 csid->phy.lane_assign,
+					 readl_relaxed(csid->base + CSID_CSI2_RX_CFG0));
+			}
+'''
+    replaced = False
+    for old in old_masks:
+        if old in text:
+            text = text.replace(old, new_mask, 1)
+            replaced = True
+            break
+    if not replaced:
+        old = '''			__csid_configure_rdi_stream(csid, enable, i);
+			__csid_configure_rx(csid, &csid->phy, i);
+			__csid_ctrl_rdi(csid, enable, i);
+'''
+        new = '''			__csid_configure_rdi_stream(csid, enable, i);
+			__csid_configure_rx(csid, &csid->phy, i);
+			__csid_ctrl_rdi(csid, enable, i);
+''' + new_mask
+        if old not in text:
+            raise SystemExit(f"{path}: csid configure_stream needle missing")
+        text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: dagu: CSID SOT/EOT stay masked")
+
+text = path.read_text()
+old_rx_log = '''	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
+	if (val)
+		dev_info_ratelimited(csid->camss->dev,
+				     "dagu csid rx irq=0x%x\\n", val);
+	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
+'''
+new_rx_log = '''	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
+	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
+'''
+if old_rx_log in text:
+    text = text.replace(old_rx_log, new_rx_log, 1)
+old_rdi_log = '''			val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
+			if (val)
+				dev_info_ratelimited(csid->camss->dev,
+						     "dagu csid rdi%d irq=0x%x\\n",
+						     i, val);
+			writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
+'''
+new_rdi_log = '''			val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
+			writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
+'''
+if old_rdi_log in text:
+    text = text.replace(old_rdi_log, new_rdi_log, 1)
+path.write_text(text)
+
+# --- dagu C-PHY (CamX 4080 preview) ---
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy.h"
+text = path.read_text()
+if "struct csiphy_csi2_cfg {\n\tu8 cphy;" not in text:
+    old = """struct csiphy_csi2_cfg {
+	struct csiphy_lanes_cfg lane_cfg;
+};
+"""
+    new = """struct csiphy_csi2_cfg {
+	u8 cphy;
+	struct csiphy_lanes_cfg lane_cfg;
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: csiphy_csi2_cfg needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: cphy field")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid.h"
+text = path.read_text()
+if "\tu8 cphy;\n};" not in text.split("struct csid_phy_config", 1)[-1][:400]:
+    old = """	u32 en_vc;
+	u8 need_vc_update;
+};
+"""
+    new = """	u32 en_vc;
+	u8 need_vc_update;
+	u8 cphy;
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: csid_phy_config needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: cphy field")
+
+path = root / "drivers/media/platform/qcom/camss/camss.c"
+text = path.read_text()
+if "V4L2_MBUS_CSI2_CPHY" not in text:
+    old = """	/*
+	 * Most SoCs support both D-PHY and C-PHY standards, but currently only
+	 * D-PHY is supported in the driver.
+	 */
+	if (vep.bus_type != V4L2_MBUS_CSI2_DPHY) {
+		dev_err(dev, "Unsupported bus type %d\\n", vep.bus_type);
+		return -EINVAL;
+	}
+
+	csd->interface.csiphy_id = vep.base.port;
+"""
+    new = """	if (vep.bus_type != V4L2_MBUS_CSI2_DPHY &&
+	    vep.bus_type != V4L2_MBUS_CSI2_CPHY) {
+		dev_err(dev, "Unsupported bus type %d\\n", vep.bus_type);
+		return -EINVAL;
+	}
+
+	csd->interface.csiphy_id = vep.base.port;
+	csd->interface.csi2.cphy = (vep.bus_type == V4L2_MBUS_CSI2_CPHY);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: C-PHY bus_type needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: accept C-PHY")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid.c"
+text = path.read_text()
+if "csid->phy.cphy =" not in text:
+    old = """		csid->phy.lane_cnt = lane_cfg->num_data;
+		csid->phy.lane_assign = csid_get_lane_assign(lane_cfg);
+"""
+    new = """		csid->phy.lane_cnt = lane_cfg->num_data;
+		csid->phy.lane_assign = csid_get_lane_assign(lane_cfg);
+		csid->phy.cphy = csiphy->cfg.csi2->cphy;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: csid cphy copy needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: copy cphy")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "if (phy->cphy)" not in text:
+    old = """	val |= phy->csiphy_id << CSI2_RX_CFG0_PHY_NUM_SEL;
+	writel_relaxed(val, csid->base + CSID_CSI2_RX_CFG0);
+"""
+    new = """	val |= phy->csiphy_id << CSI2_RX_CFG0_PHY_NUM_SEL;
+	if (phy->cphy)
+		val |= 1 << CSI2_RX_CFG0_PHY_TYPE_SEL;
+	writel_relaxed(val, csid->base + CSID_CSI2_RX_CFG0);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: PHY_TYPE_SEL needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: C-PHY PHY_TYPE_SEL")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if ".hts = 5888" not in text:
+    old = """		.width = 4080,
+		.height = 3060,
+		.hts = 4352,
+		.vts = 4288,
+"""
+    new = """		.width = 4080,
+		.height = 3060,
+		.hts = 5888,
+		.vts = 3164,
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 4080 hts/vts needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: CamX 4080 HTS/VTS")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: default <= VTS-margin" not in text:
+    old = """		.hts = 5888,
+		.vts = 3164,
+		.exposure = 3840,
+"""
+    new = """		.hts = 5888,
+		.vts = 3164,
+		.exposure = 3000, /* dagu: default <= VTS-margin (3164-22) */
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 4080 exposure needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: CamX 4080 exposure default")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "stop MCU init on 0x2400" not in text:
+    old_4000_tail = """	{ CCI_REG16(0x6f12), 0x9600 },
+	{ CCI_REG16(0x6028), 0x4000 },
+	{ CCI_REG16(0xf44e), 0x0011 },
+	{ CCI_REG16(0xf44c), 0x0b0b },
+	{ CCI_REG16(0xf44a), 0x0006 },
+	{ CCI_REG16(0x0118), 0x0002 },
+	{ CCI_REG16(0x011a), 0x0001 },
+	{ CCI_REG16(0x6028), 0x4000 },
+	{ CCI_REG16(0x0106), 0x0001 },
+	/* dagu: omit 0x0bcc / trailing 0x2400 — Qtech NACKs after 0x4000 tail */
+};
+"""
+    old_4000_vanilla = """	{ CCI_REG16(0x6f12), 0x9600 },
+	{ CCI_REG16(0x6028), 0x4000 },
+	{ CCI_REG16(0xf44e), 0x0011 },
+	{ CCI_REG16(0xf44c), 0x0b0b },
+	{ CCI_REG16(0xf44a), 0x0006 },
+	{ CCI_REG16(0x0118), 0x0002 },
+	{ CCI_REG16(0x011a), 0x0001 },
+	{ CCI_REG16(0x6028), 0x4000 },
+	{ CCI_REG16(0x0106), 0x0001 },
+	{ CCI_REG16(0x0bcc), 0x0000 },
+	{ CCI_REG16(0x6028), 0x2400 },
+	{ CCI_REG16(0x602a), 0x2174 },
+	{ CCI_REG16(0x6f12), 0x0400 },
+};
+"""
+    new = """	{ CCI_REG16(0x6f12), 0x9600 },
+	/* dagu: stop MCU init on 0x2400; 0x4000 tail kills MCU page on Qtech */
+};
+"""
+    if old_4000_tail in text:
+        text = text.replace(old_4000_tail, new, 1)
+    elif old_4000_vanilla in text:
+        text = text.replace(old_4000_vanilla, new, 1)
+    else:
+        raise SystemExit(f"{path}: MCU 0x2400 cut needle missing")
+    path.write_text(text)
+    print(f"patched {path}: stop MCU init on 0x2400")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: mode table while MCU page" not in text and \
+   "dagu: 0x2400 delay sweep then 0x4000 mode" not in text:
+    old_retry = """	cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
+			    ARRAY_SIZE(init_array_setting), &ret);
+	if (ret)
+		goto error;
+	/* Qtech: 0x4000 tail then 0x2400 often NACKs; retry before CamX mode. */
+	{
+		int i;
+
+		for (i = 0; i < 20; i++) {
+			ret = 0;
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &ret);
+			if (!ret)
+				break;
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 post-init 0x2400 retry %d: %d\\n",
+				 i, ret);
+			msleep(10);
+		}
+		if (ret)
+			goto error;
+	}
+	cci_multi_reg_write(s5kjn1->regmap, reg_list->regs,
+			    reg_list->num_regs, &ret);
+	if (ret)
+		goto error;
+"""
+    old_plain = """	cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
+			    ARRAY_SIZE(init_array_setting), &ret);
+	cci_multi_reg_write(s5kjn1->regmap, reg_list->regs,
+			    reg_list->num_regs, &ret);
+	if (ret)
+		goto error;
+"""
+    new = """	cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
+			    ARRAY_SIZE(init_array_setting), &ret);
+	if (ret)
+		goto error;
+	/* dagu: mode table while MCU page 0x2400 is still alive. */
+	cci_multi_reg_write(s5kjn1->regmap, reg_list->regs,
+			    reg_list->num_regs, &ret);
+	if (ret)
+		goto error;
+"""
+    if old_retry in text:
+        text = text.replace(old_retry, new, 1)
+    elif old_plain in text:
+        text = text.replace(old_plain, new, 1)
+    else:
+        raise SystemExit(f"{path}: mode table MCU page needle missing")
+    path.write_text(text)
+    print(f"patched {path}: mode table while MCU page 0x2400")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "MODE_SELECT before 0x2174" not in text and \
+   "dagu: 0x2400 delay sweep then 0x4000 mode" not in text:
+    new = """	ret = __v4l2_ctrl_handler_setup(s5kjn1->sd.ctrl_handler);
+
+	/* 0x0a70 then MODE_SELECT while MCU is halted, then 0x2174. */
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x0a70, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0001, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x0a72, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0100, &ret);
+	if (ret)
+		goto error;
+	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret) {
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 MODE_SELECT before 0x2174 NACK %d\\n", ret);
+		goto error;
+	}
+	{
+		int page_ret = 0;
+
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &page_ret);
+		if (!page_ret) {
+			cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x2174, &page_ret);
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0401, &page_ret);
+			if (page_ret)
+				dev_info(s5kjn1->dev, "dagu s5kjn1 0x2174 NACK %d\\n",
+					 page_ret);
+		} else {
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 post-mode 0x2400 NACK %d\\n",
+				 page_ret);
+		}
+	}
+
+	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
+"""
+    olds = [
+        """	ret = __v4l2_ctrl_handler_setup(s5kjn1->sd.ctrl_handler);
+
+	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret)
+		goto error;
+
+	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
+""",
+    ]
+    for old in olds:
+        if old in text:
+            text = text.replace(old, new, 1)
+            break
+    else:
+        raise SystemExit(f"{path}: stream-on MODE_SELECT-continue needle missing")
+    path.write_text(text)
+    print(f"patched {path}: MODE_SELECT before 0x2174; NACK continues")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "num_data_lanes != 3 &&" not in text:
+    old = """	if (bus_cfg.bus.mipi_csi2.num_data_lanes != S5KJN1_DATA_LANES) {
+"""
+    new = """	if (bus_cfg.bus.mipi_csi2.num_data_lanes != 3 &&
+	    bus_cfg.bus.mipi_csi2.num_data_lanes != S5KJN1_DATA_LANES) {
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: DATA_LANES check needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: allow 3 C-PHY trios")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: accept C-PHY in check_hwcfg" not in text:
+    old = """		.bus_type = V4L2_MBUS_CSI2_DPHY,
+	};
+	unsigned long freq_bitmap;
+	int ret;
+"""
+    new = """		.bus_type = V4L2_MBUS_UNKNOWN, /* dagu: accept C-PHY in check_hwcfg */
+	};
+	unsigned long freq_bitmap;
+	int ret;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: check_hwcfg bus_type needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: accept C-PHY in check_hwcfg")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: CCI settle after XSHUTDOWN" not in text and \
+   "dagu: VIO then VANA then VDIG" not in text:
+    old = """	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 0);
+	usleep_range(10 * USEC_PER_MSEC, 15 * USEC_PER_MSEC);
+
+	return 0;
+"""
+    new = """	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 1);
+	usleep_range(1000, 2000);
+	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 0);
+	msleep(20); /* dagu: CCI settle after XSHUTDOWN */
+
+	return 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: reset deassert needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: XSHUTDOWN pulse")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu s5kjn1 0x6028 retry" not in text:
+    old = """	/* Page pointer */
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+
+	/* Set version */
+"""
+    new = """	/* Page pointer. First CCI access often NACKs; retry. */
+	{
+		int i;
+
+		for (i = 0; i < 10; i++) {
+			ret = 0;
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+			if (!ret)
+				break;
+			dev_info(s5kjn1->dev, "dagu s5kjn1 0x6028 retry %d: %d\\n",
+				 i, ret);
+			msleep(10);
+		}
+		if (ret)
+			goto error;
+	}
+
+	/* Set version */
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 0x6028 page pointer needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: 0x6028 retry")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if '#include "s5kjn1-dagu-regs.h"' not in text:
+    old = """#include <media/v4l2-fwnode.h>
+"""
+    new = """#include <media/v4l2-fwnode.h>
+
+#include "s5kjn1-dagu-regs.h"
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: v4l2-fwnode include needle missing")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: include s5kjn1-dagu-regs.h")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "s5kjn1_dagu_2040x1530_mode" not in text and "s5kjn1_dagu_4080x3060_mode" not in text:
+    old = """			.regs = s5kjn1_4080x3072_30fps_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_4080x3072_30fps_mode),
+"""
+    new = """			.regs = s5kjn1_dagu_4080x3060_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_dagu_4080x3060_mode),
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 4080 mode pointer needle missing")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: use CamX 4080 mode table")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "s5kjn1_4080x3072_30fps_mode[] __maybe_unused" not in text:
+    old = "static const struct cci_reg_sequence s5kjn1_4080x3072_30fps_mode[] = {"
+    new = "static const struct cci_reg_sequence s5kjn1_4080x3072_30fps_mode[] __maybe_unused = {"
+    if old not in text:
+        raise SystemExit(f"{path}: 4080 array decl needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: mark leftover 4080 array unused")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: CamX 0x6010/0x6226 SW reset" not in text and \
+   "dagu: 0x2400 delay sweep then 0x4000 mode" not in text:
+    old_skip = """	/* dagu: skip 0x6010/0x6226 SW reset — post-reset 0x6028 NACKs */
+
+	/* Sensor init settings */
+"""
+    old_vanilla = """	/* Set version */
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), 0x0003, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), S5KJN1_CHIP_ID, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x001e), 0x0007, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6010), 0x0001, &ret);
+	if (ret)
+		goto error;
+
+	usleep_range(5 * USEC_PER_MSEC, 6 * USEC_PER_MSEC);
+
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6226), 0x0001, &ret);
+	if (ret)
+		goto error;
+
+	usleep_range(10 * USEC_PER_MSEC, 11 * USEC_PER_MSEC);
+
+	/* Sensor init settings */
+"""
+    new = """	/* CamX: 0x0000=1, chip id, 0x001e=7, 0x6010 then 5 ms, 0x6226=1 then 10 ms. */
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), 0x0001, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), S5KJN1_CHIP_ID, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x001e), 0x0007, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6010), 0x0001, &ret);
+	if (ret)
+		goto error;
+	usleep_range(5 * USEC_PER_MSEC, 6 * USEC_PER_MSEC);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6226), 0x0001, &ret);
+	if (ret)
+		goto error;
+	usleep_range(10 * USEC_PER_MSEC, 11 * USEC_PER_MSEC);
+	/* dagu: CamX 0x6010/0x6226 SW reset; retry 0x2400 while MCU wakes */
+	{
+		int i;
+
+		for (i = 0; i < 20; i++) {
+			ret = 0;
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &ret);
+			if (!ret)
+				break;
+			dev_info(s5kjn1->dev, "dagu s5kjn1 0x2400 retry %d: %d\\n",
+				 i, ret);
+			msleep(10);
+		}
+		if (ret)
+			goto error;
+	}
+
+	/* Sensor init settings */
+"""
+    if old_skip in text:
+        text = text.replace(old_skip, new, 1)
+    elif old_vanilla in text:
+        text = text.replace(old_vanilla, new, 1)
+    else:
+        raise SystemExit(f"{path}: SW reset needle missing")
+    path.write_text(text)
+    print(f"patched {path}: CamX SW reset + 0x2400 retry")
+if "dagu: CamX 0x6010/0x6226 SW reset" not in path.read_text() and \
+   "dagu: 0x2400 delay sweep then 0x4000 mode" not in path.read_text():
+    raise SystemExit(f"{path}: CamX SW reset missing after patch")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+if "lane_regs_sm8250_cphy" not in text or "cphy=%u" not in text:
+    raise SystemExit(f"{path}: C-PHY 3PH table / lanes_enable missing (CamX 4080)")
+if "dagu: CAF 1.2.1 C-PHY data-rate" not in text:
+    raise SystemExit(f"{path}: CAF 1.2.1 C-PHY data-rate missing")
+if "0x09AC, 0x35" not in text or "0x0144, 0x22" not in text:
+    raise SystemExit(f"{path}: Luca 3PH + CAF 2.5G AEQ missing")
+if "dagu: hold CTRL0=0 until analog" not in text:
+    raise SystemExit(f"{path}: C-PHY CTRL0 hold-0 missing")
+if "dagu: C-PHY CTRL0 after analog" not in text:
+    raise SystemExit(f"{path}: C-PHY CTRL0 after analog missing")
+if "dagu: 2PH CTRL0 after analog" not in text:
+    old = """	/* dagu: C-PHY CTRL0 after analog */
+	if (cfg->csi2->cphy) {
+		udelay(50);
+		writel_relaxed(0x0E, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 0));
+	}
+"""
+    new = """	/* dagu: C-PHY CTRL0 after analog */
+	if (cfg->csi2->cphy) {
+		udelay(50);
+		writel_relaxed(0x0E, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 0));
+	} else {
+		/* dagu: 2PH CTRL0 after analog — Android s5kjn1 preview 0x0800=0x02 */
+		writel_relaxed(0x02, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 0));
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 2PH CTRL0 after analog needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: 2PH CTRL0 after analog")
+    text = path.read_text()
+if "dagu: Android s5kjn1 D-PHY settle 0x13" not in text:
+    raise SystemExit(f"{path}: D-PHY settle 0x13 missing")
+if "if (phy->cphy)" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
+    raise SystemExit("camss-csid-gen2.c: C-PHY PHY_TYPE_SEL missing")
+
+# UFS clk scaling + OPP rpmhpd deadlocks exception_event vs devfreq on this
+# QHEE (no ICC). Keep gating/hibern8; just do not register devfreq.
+path = root / "drivers/ufs/host/ufs-qcom.c"
+text = path.read_text()
+marker = "dagu: skip UFSHCD_CAP_CLK_SCALING"
+if marker not in text:
+    old = """	hba->caps |= UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING;
+	hba->caps |= UFSHCD_CAP_CLK_SCALING | UFSHCD_CAP_WB_WITH_CLK_SCALING;
+	hba->caps |= UFSHCD_CAP_AUTO_BKOPS_SUSPEND;
+"""
+    new = """	hba->caps |= UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING;
+	/* dagu: skip UFSHCD_CAP_CLK_SCALING — OPP rpmhpd + devfreq vs
+	 * exception_event_handler clk_scaling_lock hung_task panic.
+	 */
+	hba->caps |= UFSHCD_CAP_AUTO_BKOPS_SUSPEND;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: UFSHCD_CAP_CLK_SCALING needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# dagu: Venus ICC stub. No CONFIG_INTERCONNECT_QCOM_SM8250 on this QHEE.
+# icc_set_bw(NULL) is a no-op; do not EPROBE_DEFER video-mem / cpu-cfg.
+path = root / "drivers/media/platform/qcom/venus/core.c"
+text = path.read_text()
+marker = "dagu: ICC video-mem stubbed"
+if marker not in text:
+    old = """	core->video_path = devm_of_icc_get(dev, "video-mem");
+	if (IS_ERR(core->video_path))
+		return PTR_ERR(core->video_path);
+
+	core->cpucfg_path = devm_of_icc_get(dev, "cpu-cfg");
+	if (IS_ERR(core->cpucfg_path))
+		return PTR_ERR(core->cpucfg_path);
+"""
+    new = """	core->video_path = devm_of_icc_get(dev, "video-mem");
+	if (IS_ERR(core->video_path)) {
+		/* dagu: ICC video-mem stubbed — no SM8250 ICC provider.
+		 * icc_set_bw(NULL) is a no-op. Do not EPROBE_DEFER.
+		 */
+		dev_warn(dev, "ICC video-mem stubbed, ignoring bandwidth voting\\n");
+		core->video_path = NULL;
+	}
+
+	core->cpucfg_path = devm_of_icc_get(dev, "cpu-cfg");
+	if (IS_ERR(core->cpucfg_path)) {
+		/* dagu: ICC cpu-cfg stubbed */
+		dev_warn(dev, "ICC cpu-cfg stubbed, ignoring bandwidth voting\\n");
+		core->cpucfg_path = NULL;
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: Venus ICC get needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+if marker not in path.read_text():
+    raise SystemExit(f"{path}: Venus ICC stub missing after patch")
+
+# dagu: MPEG2 OPB is 256-byte stride; VP8/MPEG2 DPB min=32 breaks dmabuf.
+path = root / "drivers/media/platform/qcom/venus/helpers.h"
+text = path.read_text()
+if "venus_helper_set_opb_stride" not in text:
+    old = """int venus_helper_set_stride(struct venus_inst *inst, unsigned int aligned_width,
+			    unsigned int aligned_height);
+#endif
+"""
+    new = """int venus_helper_set_stride(struct venus_inst *inst, unsigned int aligned_width,
+			    unsigned int aligned_height);
+int venus_helper_set_opb_stride(struct venus_inst *inst, u32 stride, u32 height);
+#endif
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: set_stride prototype needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: venus_helper_set_opb_stride")
+
+path = root / "drivers/media/platform/qcom/venus/helpers.c"
+text = path.read_text()
+if "venus_helper_set_opb_stride" not in text:
+    old = """	return hfi_session_set_property(inst, ptype, &plane_actual_info);
+}
+EXPORT_SYMBOL_GPL(venus_helper_set_stride);
+"""
+    new = """	return hfi_session_set_property(inst, ptype, &plane_actual_info);
+}
+EXPORT_SYMBOL_GPL(venus_helper_set_stride);
+
+int venus_helper_set_opb_stride(struct venus_inst *inst, u32 stride, u32 height)
+{
+	const u32 ptype = HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_INFO;
+	struct hfi_uncompressed_plane_actual_info plane_actual_info;
+
+	if (!inst->opb_buftype)
+		return 0;
+
+	plane_actual_info.buffer_type = inst->opb_buftype;
+	plane_actual_info.num_planes = 2;
+	plane_actual_info.plane_format[0].actual_stride = stride;
+	plane_actual_info.plane_format[0].actual_plane_buffer_height = height;
+	plane_actual_info.plane_format[1].actual_stride = stride;
+	plane_actual_info.plane_format[1].actual_plane_buffer_height = height / 2;
+
+	return hfi_session_set_property(inst, ptype, &plane_actual_info);
+}
+EXPORT_SYMBOL_GPL(venus_helper_set_opb_stride);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: set_stride body needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: venus_helper_set_opb_stride")
+
+path = root / "drivers/media/platform/qcom/venus/helpers.c"
+text = path.read_text()
+if "dagu: MPEG2 1080p uses WORK_MODE_2" in text:
+    old = """		/* dagu: MPEG2 1080p uses WORK_MODE_2 (same as H.264).
+		 * This QHEE firmware's MODE_1 OPB wraps the next 128px
+		 * onto the right edge. Xiaomi SM8250 always programmed MODE_2.
+		 */
+		if (inst->pic_struct != HFI_INTERLACE_FRAME_PROGRESSIVE ||
+		    num_mbs <= NUM_MBS_720P)
+			mode = VIDC_WORK_MODE_1;
+"""
+    new = """		/* dagu: CAF Iris2 MPEG2 uses WORK_MODE_1 + work_route=1. */
+		if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 ||
+		    inst->pic_struct != HFI_INTERLACE_FRAME_PROGRESSIVE ||
+		    num_mbs <= NUM_MBS_720P)
+			mode = VIDC_WORK_MODE_1;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: revert WORK_MODE_2 needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 WORK_MODE_1")
+
+text = path.read_text()
+if "is_dec && inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2" not in text:
+    old = """	params.version = version;
+	params.num_vpp_pipes = inst->core->res->num_vpp_pipes;
+
+	if (is_dec) {
+"""
+    new = """	params.version = version;
+	params.num_vpp_pipes = inst->core->res->num_vpp_pipes;
+	if (is_dec && inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2)
+		params.num_vpp_pipes = 1;
+
+	if (is_dec) {
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MPEG2 num_vpp_pipes needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 scratch 1 VPP pipe")
+
+path = root / "drivers/media/platform/qcom/venus/vdec.c"
+text = path.read_text()
+# Do not program HFI stride 2048 for MPEG2 — firmware then emits a
+# layout that looks destiled. V4L2 bytesperline 2048 is still required.
+old_hfi256_nl = """	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2) {
+		u32 mpeg2_w = ALIGN(width, 256);
+
+		inst->output2_buf_size =
+			venus_helper_get_framesz_raw(out2_fmt, mpeg2_w, height);
+		ret = venus_helper_set_opb_stride(inst, mpeg2_w, height);
+		if (ret)
+			dev_dbg(inst->core->dev_dec,
+				"MPEG2 OPB stride %u: %d\\n", mpeg2_w, ret);
+	}
+
+	if (inst->dpb_fmt) {
+""".replace("\\n", "\n")
+new_hfi = """	if (inst->dpb_fmt) {
+"""
+if old_hfi256_nl in text:
+    path.write_text(text.replace(old_hfi256_nl, new_hfi, 1))
+    print(f"patched {path}: drop MPEG2 HFI 256 OPB stride")
+    text = path.read_text()
+
+text = path.read_text()
+if "dagu: CAF msm_vidc_decide_work_route_iris2" not in text:
+    old = """	wr.video_work_route = inst->core->res->num_vpp_pipes;
+
+	return hfi_session_set_property(inst, ptype, &wr);
+"""
+    new = """	wr.video_work_route = inst->core->res->num_vpp_pipes;
+	/*
+	 * dagu: CAF msm_vidc_decide_work_route_iris2() forces route=1 for
+	 * MPEG2 (and interlaced). Default 4 VPP pipes destile 1920 as 16
+	 * 128px tiles and the last tile wraps onto the first.
+	 */
+	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 ||
+	    inst->pic_struct != HFI_INTERLACE_FRAME_PROGRESSIVE)
+		wr.video_work_route = 1;
+
+	ret = hfi_session_set_property(inst, ptype, &wr);
+	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2)
+		dev_info(inst->core->dev_dec,
+			 "dagu mpeg2 work_route=%u: %d\\n",
+			 wr.video_work_route, ret);
+	return ret;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vdec_set_work_route needle missing")
+    # vanilla function has no local ret
+    if "int ret;" not in path.read_text().split("static int vdec_set_work_route")[1].split("static int")[0]:
+        old_sig = """static int vdec_set_work_route(struct venus_inst *inst)
+{
+	u32 ptype = HFI_PROPERTY_PARAM_WORK_ROUTE;
+	struct hfi_video_work_route wr;
+
+	if (!(IS_IRIS2(inst->core) || IS_IRIS2_1(inst->core)))
+		return 0;
+"""
+        new_sig = """static int vdec_set_work_route(struct venus_inst *inst)
+{
+	u32 ptype = HFI_PROPERTY_PARAM_WORK_ROUTE;
+	struct hfi_video_work_route wr;
+	int ret;
+
+	if (!(IS_IRIS2(inst->core) || IS_IRIS2_1(inst->core)))
+		return 0;
+"""
+        text = path.read_text()
+        if old_sig not in text:
+            raise SystemExit(f"{path}: vdec_set_work_route signature needle missing")
+        path.write_text(text.replace(old_sig, new_sig, 1))
+    text = path.read_text()
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 work_route=1")
+
+text = path.read_text()
+if "dagu: MPEG2 firmware reports 32-aligned" not in text:
+    old = """	} else {
+		inst->crop.left = 0;
+		inst->crop.top = 0;
+		inst->crop.width = ev_data->width;
+		inst->crop.height = ev_data->height;
+	}
+"""
+    new = """	} else {
+		inst->crop.left = 0;
+		inst->crop.top = 0;
+		inst->crop.width = ev_data->width;
+		inst->crop.height = ev_data->height;
+	}
+	/*
+	 * dagu: MPEG2 firmware reports 32-aligned height (1088 for 1080p)
+	 * and no input_crop. COMPOSE==1088 makes GStreamer advertise 1088
+	 * and waylandsink fail linux-dmabuf import (H.264 compose is 1080).
+	 */
+	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 &&
+	    inst->crop.height == 1088)
+		inst->crop.height = 1080;
+	/*
+	 * dagu: Iris2 MPEG2 destile repeats the left 128px tile on the
+	 * right of 1920 OPB. Compose 1792 hides the duplicate; 1792 is
+	 * 128-aligned so waylandsink can still import dmabuf.
+	 */
+	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 &&
+	    inst->crop.width == 1920)
+		inst->crop.width = 1792;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vdec_event_change crop needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 compose 1080")
+
+text = path.read_text()
+if "inst->crop.width = 1792" not in text:
+    old = """	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 &&
+	    inst->crop.height == 1088)
+		inst->crop.height = 1080;
+"""
+    new = """	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 &&
+	    inst->crop.height == 1088)
+		inst->crop.height = 1080;
+	/*
+	 * dagu: Iris2 MPEG2 destile repeats the left 128px tile on the
+	 * right of 1920 OPB. Compose 1792 hides the duplicate; 1792 is
+	 * 128-aligned so waylandsink can still import dmabuf.
+	 */
+	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 &&
+	    inst->crop.width == 1920)
+		inst->crop.width = 1792;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MPEG2 compose 1792 needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 compose 1792")
+
+text = path.read_text()
+if "dagu: Iris2 default linear NV12 stride" not in text:
+    old = """	ret = venus_helper_set_dyn_bufmode(inst);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+"""
+    new = """	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2) {
+		u32 stride = ALIGN(width, 128);
+
+		/*
+		 * dagu: Iris2 default linear NV12 stride is 256-aligned
+		 * (2048 for 1080p). Destile then writes 16 128px tiles into
+		 * a 1920 OPB and the 16th tile lands on the first (wrap).
+		 */
+		ret = venus_helper_set_opb_stride(inst, stride, height);
+		dev_info(inst->core->dev_dec,
+			 "dagu mpeg2 opb=%u fmt=%#x dpb=%#x stride=%u: %d\\n",
+			 inst->opb_buftype, inst->opb_fmt, inst->dpb_fmt,
+			 stride, ret);
+		if (ret)
+			return ret;
+	}
+
+	ret = venus_helper_set_dyn_bufmode(inst);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MPEG2 OPB stride 1920 needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 OPB stride 1920")
+
+text = path.read_text()
+if "else if (out2_fmt && !out_fmt)" not in text:
+    old = """	} else if (is_ubwc_fmt(out2_fmt) || is_10bit_ubwc_fmt(out_fmt)) {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT;
+		inst->opb_fmt = out_fmt;
+		inst->dpb_buftype = HFI_BUFFER_OUTPUT2;
+		inst->dpb_fmt = out2_fmt;
+	} else {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT;
+		inst->opb_fmt = out_fmt;
+		inst->dpb_buftype = 0;
+		inst->dpb_fmt = 0;
+	}
+"""
+    new = """	} else if (is_ubwc_fmt(out2_fmt) || is_10bit_ubwc_fmt(out_fmt)) {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT;
+		inst->opb_fmt = out_fmt;
+		inst->dpb_buftype = HFI_BUFFER_OUTPUT2;
+		inst->dpb_fmt = out2_fmt;
+	} else if (out2_fmt && !out_fmt) {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT2;
+		inst->opb_fmt = out2_fmt;
+		inst->dpb_buftype = 0;
+		inst->dpb_fmt = 0;
+	} else {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT;
+		inst->opb_fmt = out_fmt;
+		inst->dpb_buftype = 0;
+		inst->dpb_fmt = 0;
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MPEG2 OUTPUT2-only OPB needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 OUTPUT2-only OPB")
+
+text = path.read_text()
+if "else if (inst->opb_buftype == HFI_BUFFER_OUTPUT2)" not in text:
+    old = """	if (inst->dpb_fmt) {
+		ret = venus_helper_set_multistream(inst, false, true);
+		if (ret)
+			return ret;
+
+		ret = venus_helper_set_raw_format(inst, inst->dpb_fmt,
+						  inst->dpb_buftype);
+		if (ret)
+			return ret;
+
+		ret = venus_helper_set_output_resolution(inst, width, height,
+							 HFI_BUFFER_OUTPUT2);
+		if (ret)
+			return ret;
+	}
+
+	if (IS_V3(core) || IS_V4(core) || IS_V6(core)) {
+		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+		if (ret)
+			return ret;
+
+		if (bufreq.size > inst->output_buf_size)
+			return -EINVAL;
+
+		if (inst->dpb_fmt) {
+			ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT2,
+						      &bufreq);
+			if (ret)
+				return ret;
+
+			if (bufreq.size > inst->output2_buf_size)
+				return -EINVAL;
+		}
+"""
+    new = """	if (inst->dpb_fmt) {
+		ret = venus_helper_set_multistream(inst, false, true);
+		if (ret)
+			return ret;
+
+		ret = venus_helper_set_raw_format(inst, inst->dpb_fmt,
+						  inst->dpb_buftype);
+		if (ret)
+			return ret;
+
+		ret = venus_helper_set_output_resolution(inst, width, height,
+							 HFI_BUFFER_OUTPUT2);
+		if (ret)
+			return ret;
+	} else if (inst->opb_buftype == HFI_BUFFER_OUTPUT2) {
+		ret = venus_helper_set_multistream(inst, false, true);
+		if (ret)
+			return ret;
+
+		ret = venus_helper_set_output_resolution(inst, width, height,
+							 HFI_BUFFER_OUTPUT2);
+		if (ret)
+			return ret;
+	}
+
+	if (IS_V3(core) || IS_V4(core) || IS_V6(core)) {
+		if (inst->output_buf_size) {
+			ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT,
+						      &bufreq);
+			if (ret)
+				return ret;
+
+			if (bufreq.size > inst->output_buf_size)
+				return -EINVAL;
+		}
+
+		if (inst->output2_buf_size) {
+			ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT2,
+						      &bufreq);
+			if (ret)
+				return ret;
+
+			if (bufreq.size > inst->output2_buf_size)
+				return -EINVAL;
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MPEG2 OUTPUT2 bufreq needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: MPEG2 OUTPUT2 bufreq")
+
+text = path.read_text()
+if "static void vdec_capture_plane" not in text:
+    old = """	return &fmt[i];
+}
+
+static const struct venus_format *
+vdec_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+"""
+    new = """	return &fmt[i];
+}
+
+/*
+ * G_FMT sizeimage and vb2 CAPTURE alloc must use the same stride.
+ * dagu: MPEG2 firmware still fills 128-aligned OPB (1920 for 1080p).
+ * Advertising 2048 shears the packed payload. Compose 1088→1080 lets
+ * waylandsink import dmabuf.
+ */
+static void vdec_capture_plane(struct venus_inst *inst, u32 pixfmt,
+			       u32 width, u32 height, u32 *bytesperline,
+			       u32 *sizeimage)
+{
+	u32 stride = width;
+
+	if (pixfmt == V4L2_PIX_FMT_P010)
+		stride *= 2;
+	stride = ALIGN(stride, 128);
+	if (bytesperline)
+		*bytesperline = stride;
+	if (sizeimage)
+		*sizeimage = venus_helper_get_framesz(pixfmt, stride, height);
+}
+
+static const struct venus_format *
+vdec_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vdec_capture_plane insert needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: vdec_capture_plane")
+
+text = path.read_text()
+if "vdec_capture_plane(inst, pixmp->pixelformat" not in text:
+    old_helper = """	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		vdec_capture_plane(inst, pixmp->pixelformat, pixmp->width,
+				   pixmp->height, &pfmt[0].bytesperline,
+				   &pfmt[0].sizeimage);
+	} else {
+"""
+    candidates = [
+"""	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		unsigned int stride = pixmp->width;
+		unsigned int stride_align = 128;
+
+		if (pixmp->pixelformat == V4L2_PIX_FMT_P010)
+			stride *= 2;
+
+		/*
+		 * dagu: MPEG2 firmware writes OPB with 256-byte stride
+		 * (2048 for 1080p). Mapping as 1920 wraps the next row onto
+		 * the right 128px.
+		 */
+		if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2)
+			stride_align = 256;
+
+		pfmt[0].bytesperline = ALIGN(stride, stride_align);
+		if (stride_align > 128)
+			szimage = venus_helper_get_framesz(pixmp->pixelformat,
+							   pfmt[0].bytesperline,
+							   pixmp->height);
+		pfmt[0].sizeimage = szimage;
+	} else {
+""",
+"""	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		unsigned int stride = pixmp->width;
+
+		if (pixmp->pixelformat == V4L2_PIX_FMT_P010)
+			stride *= 2;
+
+		pfmt[0].sizeimage = szimage;
+		pfmt[0].bytesperline = ALIGN(stride, 128);
+""",
+    ]
+    for old in candidates:
+        if old in text:
+            path.write_text(text.replace(old, old_helper if "sizeimage = szimage" not in old[:80] else old_helper, 1))
+            # second candidate's replacement should still be helper call; first already includes "} else {"
+            print(f"patched {path}: try_fmt uses vdec_capture_plane")
+            break
+    else:
+        raise SystemExit(f"{path}: try_fmt capture plane needle missing")
+    # Fix the virgin candidate: it doesn't include "} else {", so replace with helper+else
+    text = path.read_text()
+    if "vdec_capture_plane(inst, pixmp->pixelformat" not in text:
+        raise SystemExit(f"{path}: try_fmt still missing vdec_capture_plane")
+
+text = path.read_text()
+if "output2_buf_size = format.fmt.pix_mp.plane_fmt[0].sizeimage" not in text:
+    old = """		inst->fmt_cap = fmt;
+		inst->output2_buf_size =
+			venus_helper_get_framesz(pixfmt_cap, orig_pixmp.width, orig_pixmp.height);
+"""
+    new = """		inst->fmt_cap = fmt;
+		inst->output2_buf_size = format.fmt.pix_mp.plane_fmt[0].sizeimage;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: s_fmt output2_buf_size needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: s_fmt OPB sizeimage")
+
+text = path.read_text()
+if "vdec_capture_plane(inst, inst->fmt_cap->pixfmt" not in text:
+    old = """	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+		*num_planes = inst->fmt_cap->num_planes;
+		sizes[0] = venus_helper_get_framesz(inst->fmt_cap->pixfmt,
+						    inst->width,
+						    inst->height);
+		inst->output_buf_size = sizes[0];
+		*num_buffers = max(*num_buffers, out_num);
+		inst->num_output_bufs = *num_buffers;
+
+		mutex_lock(&inst->lock);
+		if (inst->codec_state == VENUS_DEC_STATE_CAPTURE_SETUP)
+			inst->codec_state = VENUS_DEC_STATE_STOPPED;
+		mutex_unlock(&inst->lock);
+		break;
+"""
+    new = """	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE: {
+		u32 cap_sz;
+
+		*num_planes = inst->fmt_cap->num_planes;
+		vdec_capture_plane(inst, inst->fmt_cap->pixfmt, inst->width,
+				   inst->height, NULL, &cap_sz);
+		sizes[0] = cap_sz;
+		if (inst->output2_buf_size)
+			sizes[0] = max(sizes[0], inst->output2_buf_size);
+		inst->output_buf_size = sizes[0];
+		*num_buffers = max(*num_buffers, out_num);
+		inst->num_output_bufs = *num_buffers;
+
+		mutex_lock(&inst->lock);
+		if (inst->codec_state == VENUS_DEC_STATE_CAPTURE_SETUP)
+			inst->codec_state = VENUS_DEC_STATE_STOPPED;
+		mutex_unlock(&inst->lock);
+		break;
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: queue_setup capture size needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: queue_setup MPEG2 stride size")
+
+path = root / "drivers/media/platform/qcom/venus/vdec_ctrls.c"
+text = path.read_text()
+# Marker is split across two comment lines ("Do not clamp" / "H.264").
+if "only VP8/MPEG2" not in text:
+    old_all = """			/*
+			 * dagu: GST uses this as CAPTURE/OPB count. VP8/MPEG2
+			 * firmware DPB min is 32; 32 OPB mmap buffers never
+			 * become dmabuf and waylandsink cannot import them.
+			 * H.264 reports ~16 and dmabuf import works.
+			 */
+			if (ctrl->val > 16)
+				ctrl->val = 16;
+"""
+    old_up = """	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+		if (!ret)
+			ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
+		break;
+"""
+    new_clamp = """			/*
+			 * dagu: GST uses this as CAPTURE/OPB count. Clamp
+			 * only VP8/MPEG2 (firmware DPB min 32). Do not clamp
+			 * H.264 (~19) or VP9 — those already dmabuf-import.
+			 */
+			if ((inst->hfi_codec == HFI_VIDEO_CODEC_VP8 ||
+			     inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2) &&
+			    ctrl->val > 16)
+				ctrl->val = 16;
+"""
+    new_full = """	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+		if (!ret) {
+			ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
+			/*
+			 * dagu: GST uses this as CAPTURE/OPB count. Clamp
+			 * only VP8/MPEG2 (firmware DPB min 32). Do not clamp
+			 * H.264 (~19) or VP9 — those already dmabuf-import.
+			 */
+			if ((inst->hfi_codec == HFI_VIDEO_CODEC_VP8 ||
+			     inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2) &&
+			    ctrl->val > 16)
+				ctrl->val = 16;
+		}
+		break;
+"""
+    if old_all in text:
+        path.write_text(text.replace(old_all, new_clamp, 1))
+        print(f"patched {path}: clamp MIN_BUFFERS VP8/MPEG2 only")
+    elif old_up in text:
+        path.write_text(text.replace(old_up, new_full, 1))
+        print(f"patched {path}: clamp MIN_BUFFERS_FOR_CAPTURE")
+    else:
+        raise SystemExit(f"{path}: MIN_BUFFERS_FOR_CAPTURE needle missing")
+
+# dagu: Venus=m cannot select prompt-less helpers to =y. CAMSS is already
+text = path.read_text()
+if "dagu: GST uses this as CAPTURE" not in text:
+    old = """	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+		if (!ret)
+			ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
+		break;
+"""
+    new = """	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+		if (!ret) {
+			ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
+			/*
+			 * dagu: GST uses this as CAPTURE/OPB count. VP8/MPEG2
+			 * firmware DPB min is 32; 32 OPB mmap buffers never
+			 * become dmabuf and waylandsink cannot import them.
+			 * H.264 reports ~16 and dmabuf import works.
+			 */
+			if (ctrl->val > 16)
+				ctrl->val = 16;
+		}
+		break;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: MIN_BUFFERS_FOR_CAPTURE needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: clamp MIN_BUFFERS_FOR_CAPTURE")
+
+# dagu: Venus=m cannot select prompt-less helpers to =y. CAMSS is already
+# built-in; pull mem2mem / contig / h264 / vp9 into the Image so Venus
+# modules only link against vmlinux.
+path = root / "drivers/media/platform/qcom/camss/Kconfig"
+text = path.read_text()
+marker = "select V4L2_MEM2MEM_DEV"
+if marker not in text:
+    old = """	select VIDEOBUF2_DMA_SG
+	select V4L2_FWNODE
+"""
+    new = """	select VIDEOBUF2_DMA_SG
+	select VIDEOBUF2_DMA_CONTIG
+	select V4L2_MEM2MEM_DEV
+	select V4L2_H264
+	select V4L2_VP9
+	select V4L2_FWNODE
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: CAMSS select needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+if marker not in path.read_text():
+    raise SystemExit(f"{path}: CAMSS Venus helper selects missing")
+PY
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "S5KJN1_AGAIN_SHIFT		8" not in text:
+    old = """#define S5KJN1_AGAIN_MAX		64
+#define S5KJN1_AGAIN_STEP		1
+#define S5KJN1_AGAIN_DEFAULT		6
+#define S5KJN1_AGAIN_SHIFT		5
+"""
+    new = """#define S5KJN1_AGAIN_MAX		16 /* dagu: CamX analog gain <<8; 16x=0x1000 */
+#define S5KJN1_AGAIN_STEP		1
+#define S5KJN1_AGAIN_DEFAULT		6
+#define S5KJN1_AGAIN_SHIFT		8
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: AGAIN_SHIFT needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: dagu: CamX analog gain <<8")
+    text = path.read_text()
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if '#include <linux/types.h>' not in text:
+    old = '#include <linux/units.h>\n'
+    if old not in text:
+        raise SystemExit(f"{path}: linux/units.h needle missing")
+    path.write_text(text.replace(old, old + '#include <linux/types.h>\n', 1))
+    print(f"patched {path}: include linux/types.h")
+    text = path.read_text()
+
+S5KJN1_ENABLE_STREAMS_HEAD = r'''static int s5kjn1_enable_streams(struct v4l2_subdev *sd,
+				 struct v4l2_subdev_state *state, u32 pad,
+				 u64 streams_mask)
+{
+	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
+	const struct s5kjn1_reg_list *reg_list = &s5kjn1->mode->reg_list;
+	static const unsigned int mcu_delays_ms[] = { 10, 20, 50, 100 };
+	bool mcu_ok = false;
+	int i, ret;
+
+	ret = pm_runtime_resume_and_get(s5kjn1->dev);
+	if (ret)
+		return ret;
+
+	dev_info(s5kjn1->dev, "dagu s5kjn1 mclk=%lu Hz\n",
+		 clk_get_rate(s5kjn1->mclk));
+
+	for (i = 0; i < 10; i++) {
+		ret = 0;
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+		if (!ret)
+			break;
+		dev_info(s5kjn1->dev, "dagu s5kjn1 0x6028 retry %d: %d\n",
+			 i, ret);
+		msleep(10);
+	}
+	if (ret)
+		goto error;
+
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), 0x0001, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), S5KJN1_CHIP_ID, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x001e), 0x0007, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6010), 0x0001, &ret);
+	if (ret)
+		goto error;
+	usleep_range(5 * USEC_PER_MSEC, 6 * USEC_PER_MSEC);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6226), 0x0001, &ret);
+	if (ret)
+		goto error;
+	usleep_range(10 * USEC_PER_MSEC, 11 * USEC_PER_MSEC);
+
+	/*
+	 * dagu: MODE_SELECT then 0x2174
+	 * dagu: 0x2400 delay sweep then 0x4000 mode. MCU NACK is not
+	 * STREAMON failure — Android D-PHY preview lives on page 0x4000.
+	 */
+	for (i = 0; i < ARRAY_SIZE(mcu_delays_ms); i++) {
+		msleep(mcu_delays_ms[i]);
+		ret = 0;
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &ret);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 0x2400 retry %d delay=%u ret=%d\n",
+			 i, mcu_delays_ms[i], ret);
+		if (!ret) {
+			mcu_ok = true;
+			break;
+		}
+	}
+	ret = 0;
+
+	if (mcu_ok) {
+		cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
+				    ARRAY_SIZE(init_array_setting), &ret);
+		if (!ret)
+			cci_multi_reg_write(s5kjn1->regmap,
+					    s5kjn1_dagu_4080x3060_mcu,
+					    ARRAY_SIZE(s5kjn1_dagu_4080x3060_mcu),
+					    &ret);
+		if (ret) {
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 MCU table NACK %d; continue 0x4000\n",
+				 ret);
+			ret = 0;
+			mcu_ok = false;
+		}
+	} else {
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 MCU 0x2400 NACK; 0x4000 D-PHY mode only\n");
+	}
+
+	{
+		int afe_ret = 0;
+
+		/*
+		 * dagu: CamX analog gain <<8
+		 * dagu: CamX AFE tail after MCU before analog. initSettings
+		 * 0x4000 tail: 16-bit 0xf44e pack, then 8-bit 0x0106=0x01.
+		 * Skip 0x0bcc (Qtech NACK). Do not put this in the analog
+		 * table (0x6226 NACK) or after 0x2174 (CCI reads 0).
+		 */
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &afe_ret);
+		cci_write(s5kjn1->regmap, CCI_REG16(0xf44e), 0x0011, &afe_ret);
+		cci_write(s5kjn1->regmap, CCI_REG16(0xf44c), 0x0b0b, &afe_ret);
+		cci_write(s5kjn1->regmap, CCI_REG16(0xf44a), 0x0006, &afe_ret);
+		cci_write(s5kjn1->regmap, CCI_REG16(0x0118), 0x0002, &afe_ret);
+		cci_write(s5kjn1->regmap, CCI_REG16(0x011a), 0x0001, &afe_ret);
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &afe_ret);
+		cci_write(s5kjn1->regmap, CCI_REG8(0x0106), 0x01, &afe_ret);
+		if (afe_ret)
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 AFE tail NACK %d\n", afe_ret);
+	}
+
+	/*
+	 * dagu: 0x4000 page retry after MCU. Qtech NACKs analog 0x6028
+	 * immediately after the 0x2400 dump; delay-sweep like the MCU page.
+	 */
+	ret = -EIO;
+	for (i = 0; i < ARRAY_SIZE(mcu_delays_ms); i++) {
+		msleep(mcu_delays_ms[i]);
+		ret = 0;
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 0x4000 retry %d delay=%u ret=%d\n",
+			 i, mcu_delays_ms[i], ret);
+		if (!ret)
+			break;
+	}
+	if (ret)
+		goto error;
+
+	cci_multi_reg_write(s5kjn1->regmap, reg_list->regs,
+			    reg_list->num_regs, &ret);
+	if (ret)
+		goto error;
+
+	ret = __v4l2_ctrl_handler_setup(s5kjn1->sd.ctrl_handler);
+
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x0a70, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0001, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x0a72, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0100, &ret);
+	if (ret)
+		goto error;
+	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret) {
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 MODE_SELECT NACK %d\n", ret);
+		goto error;
+	}
+
+	if (mcu_ok) {
+		int page_ret = 0;
+
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &page_ret);
+		if (!page_ret) {
+			cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x2174,
+				  &page_ret);
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0401,
+				  &page_ret);
+			if (page_ret)
+				dev_info(s5kjn1->dev,
+					 "dagu s5kjn1 0x2174 NACK %d\n",
+					 page_ret);
+		} else {
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 post-mode 0x2400 NACK %d\n",
+				 page_ret);
+		}
+	}
+
+	/*
+	 * dagu: analog page after STREAM
+	 * dagu: no AFE after 0x2174. Writing 0xf44e here makes analog
+	 * CCI reads return 0; Linaro AFE in the analog table NACKs 0x6226.
+	 * dagu: drop AFE analog table. Same NACK if written after analog mode.
+	 * dagu: CamX analog gain <<8
+	 * dagu: CamX AFE tail after MCU before analog
+	 */
+	ret = -EIO;
+	for (i = 0; i < ARRAY_SIZE(mcu_delays_ms); i++) {
+		msleep(mcu_delays_ms[i]);
+		ret = 0;
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+		if (!ret)
+			break;
+	}
+	if (ret) {
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 analog page after 0x2174 NACK %d\n", ret);
+		ret = 0;
+	}
+
+	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u mcu=%d\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height, mcu_ok);
+	msleep(80);
+	{
+		u64 fc = 0, mode = 0, lanes = 0, exp = 0, again = 0, tpg = 0;
+		u64 afe = 0, dual = 0;
+
+		cci_read(s5kjn1->regmap, CCI_REG8(0x0005), &fc, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE, &mode, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0114), &lanes, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_EXPOSURE, &exp, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_AGAIN, &again, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_TEST_PATTERN, &tpg, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0xf44e), &afe, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0106), &dual, NULL);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 fc=0x%llx mode=0x%llx r0114=0x%llx exp=0x%llx again=0x%llx tpg=0x%llx f44e=0x%llx r0106=0x%llx\n",
+			 fc, mode, lanes, exp, again, tpg, afe, dual);
+	}
+	return 0;
+
+error:
+	dev_err(s5kjn1->dev, "failed to start streaming: %d\n", ret);
+	pm_runtime_put_autosuspend(s5kjn1->dev);
+
+	return ret;
+}
+
+'''
+
+marker = "dagu: 0x2400 delay sweep then 0x4000 mode"
+if marker not in text:
+    start = text.find("static int s5kjn1_enable_streams(")
+    end = text.find("static int s5kjn1_disable_streams(")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: enable_streams bounds missing")
+    path.write_text(text[:start] + S5KJN1_ENABLE_STREAMS_HEAD + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: VIO then VANA then VDIG"
+if marker not in text:
+    start = text.find("static int s5kjn1_power_on(struct device *dev)")
+    end = text.find("static int s5kjn1_power_off(struct device *dev)")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: power_on bounds missing")
+    new = r'''static int s5kjn1_power_on(struct device *dev)
+{
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
+	int ret;
+
+	/*
+	 * dagu: VIO then VANA then VDIG. CAF cam_vio / cam_vana / cam_vdig.
+	 * VDIG before AVDD left the Qtech array at optical black while
+	 * CCI/MIPI still produced RAW10 — same failure as imx596.
+	 */
+	if (s5kjn1->vddio) {
+		ret = regulator_enable(s5kjn1->vddio);
+		if (ret)
+			return ret;
+		usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
+	}
+
+	if (s5kjn1->vdda) {
+		ret = regulator_enable(s5kjn1->vdda);
+		if (ret)
+			goto disable_vddio;
+		usleep_range(5 * USEC_PER_MSEC, 6 * USEC_PER_MSEC);
+	}
+
+	if (s5kjn1->vddd) {
+		ret = regulator_enable(s5kjn1->vddd);
+		if (ret)
+			goto disable_vdda;
+		usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
+	}
+
+	if (s5kjn1->afvdd) {
+		ret = regulator_enable(s5kjn1->afvdd);
+		if (ret)
+			goto disable_vddd;
+	}
+
+	ret = clk_prepare_enable(s5kjn1->mclk);
+	if (ret)
+		goto disable_regulators;
+
+	usleep_range(1000, 2000);
+	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 1);
+	usleep_range(2000, 3000);
+	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 0);
+	usleep_range(50 * USEC_PER_MSEC, 55 * USEC_PER_MSEC);
+	dev_info(s5kjn1->dev,
+		 "dagu s5kjn1 rails VIO-VANA-VDIG mclk=%lu Hz after XSHUTDOWN\n",
+		 clk_get_rate(s5kjn1->mclk));
+
+	return 0;
+
+disable_regulators:
+	if (s5kjn1->afvdd)
+		regulator_disable(s5kjn1->afvdd);
+
+disable_vddd:
+	if (s5kjn1->vddd) {
+		usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
+		regulator_disable(s5kjn1->vddd);
+	}
+
+disable_vdda:
+	if (s5kjn1->vdda)
+		regulator_disable(s5kjn1->vdda);
+
+disable_vddio:
+	if (s5kjn1->vddio)
+		regulator_disable(s5kjn1->vddio);
+
+	return ret;
+}
+
+'''
+    path.write_text(text[:start] + new + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: drop VDIG then VANA then VIO"
+if marker not in text:
+    old = """static int s5kjn1_power_off(struct device *dev)
+{
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
+
+	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 1);
+
+	clk_disable_unprepare(s5kjn1->mclk);
+
+	if (s5kjn1->afvdd)
+		regulator_disable(s5kjn1->afvdd);
+
+	if (s5kjn1->vddio)
+		regulator_disable(s5kjn1->vddio);
+
+	if (s5kjn1->vdda)
+		regulator_disable(s5kjn1->vdda);
+
+	if (s5kjn1->vddd) {
+		usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
+		regulator_disable(s5kjn1->vddd);
+	}
+
+	return 0;
+}
+"""
+    new = """static int s5kjn1_power_off(struct device *dev)
+{
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
+
+	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 1);
+
+	clk_disable_unprepare(s5kjn1->mclk);
+
+	if (s5kjn1->afvdd)
+		regulator_disable(s5kjn1->afvdd);
+
+	/* dagu: drop VDIG then VANA then VIO */
+	if (s5kjn1->vddd) {
+		usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
+		regulator_disable(s5kjn1->vddd);
+	}
+
+	if (s5kjn1->vdda)
+		regulator_disable(s5kjn1->vdda);
+
+	if (s5kjn1->vddio)
+		regulator_disable(s5kjn1->vddio);
+
+	return 0;
+}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: s5kjn1 power_off needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: s5kjn1 native crop is mode WxH" not in text:
+    old = """	if (sel->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
+
+	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+		sel->r.left = 0;
+		sel->r.top = 0;
+		sel->r.width = s5kjn1->mode->width;
+		sel->r.height = s5kjn1->mode->width;
+		return 0;
+"""
+    old_height = """	if (sel->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
+
+	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+		sel->r.left = 0;
+		sel->r.top = 0;
+		sel->r.width = s5kjn1->mode->width;
+		sel->r.height = s5kjn1->mode->height;
+		return 0;
+"""
+    new = """	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+	case V4L2_SEL_TGT_NATIVE_SIZE:
+	case V4L2_SEL_TGT_CROP_DEFAULT:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+		/* dagu: s5kjn1 native crop is mode WxH */
+		sel->r.left = 0;
+		sel->r.top = 0;
+		sel->r.width = s5kjn1->mode->width;
+		sel->r.height = s5kjn1->mode->height;
+		return 0;
+"""
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif old_height in text:
+        text = text.replace(old_height, new, 1)
+    else:
+        raise SystemExit(f"{path}: s5kjn1 get_selection needle missing")
+    path.write_text(text)
+    print(f"patched {path}: native crop WxH")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: preview 2040x1530, do not enum 8160"
+# Retired: analog half-crop 2040 does not change Qtech MIPI. Keep 4080-only.
+if False and marker not in text:
+    old = """static const struct s5kjn1_mode s5kjn1_supported_modes[] = {
+	{
+		.width = 4080,
+		.height = 3060,
+		.hts = 5888,
+		.vts = 3164,
+		.exposure = 3000, /* dagu: default <= VTS-margin (3164-22) */
+		.exposure_margin = 22,
+		.reg_list = {
+			.regs = s5kjn1_dagu_4080x3060_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_dagu_4080x3060_mode),
+		},
+	},
+	{
+		.width = 8160,
+		.height = 6144,
+		.hts = 8688,
+		.vts = 6400,
+		.exposure = 6144,
+		.exposure_margin = 44,
+		.reg_list = {
+			.regs = s5kjn1_8160x6144_10fps_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_8160x6144_10fps_mode),
+		},
+	},
+};
+"""
+    new = """static const struct s5kjn1_mode s5kjn1_supported_modes[] = {
+	{
+		/* dagu: preview 2040x1530, do not enum 8160 */
+		.width = 2040,
+		.height = 1530,
+		.hts = 5888,
+		.vts = 3164,
+		.exposure = 1500, /* dagu: default <= VTS-margin (3164-22) */
+		.exposure_margin = 22,
+		.reg_list = {
+			.regs = s5kjn1_dagu_2040x1530_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_dagu_2040x1530_mode),
+		},
+	},
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: supported_modes 4080+8160 needle missing")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "s5kjn1_8160x6144_10fps_mode[] __maybe_unused" not in text:
+    old = "static const struct cci_reg_sequence s5kjn1_8160x6144_10fps_mode[] = {"
+    new = "static const struct cci_reg_sequence s5kjn1_8160x6144_10fps_mode[] __maybe_unused = {"
+    if old not in text:
+        raise SystemExit(f"{path}: 8160 array decl needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: mark leftover 8160 array unused")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: pin HV-flip 0x0101"
+# Retired: READ_ONLY made IPA Permission denied (exposure/gain).
+if False and marker not in text:
+    old = """	if (s5kjn1->hflip)
+		s5kjn1->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
+
+	s5kjn1->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_VFLIP, 0, 1, 1, 1);
+	if (s5kjn1->vflip)
+		s5kjn1->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
+"""
+    new = """	if (s5kjn1->hflip)
+		s5kjn1->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT |
+				       V4L2_CTRL_FLAG_READ_ONLY; /* dagu: pin HV-flip 0x0101 */
+
+	s5kjn1->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_VFLIP, 0, 1, 1, 1);
+	if (s5kjn1->vflip)
+		s5kjn1->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT |
+				       V4L2_CTRL_FLAG_READ_ONLY;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hflip MODIFY_LAYOUT needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: pin 0x0101 HV-flip on STREAMON"
+# Retired: extra 0x0101 write; HEAD relies on ctrl_handler_setup default 1.
+if False and marker not in text:
+    old = """	ret = __v4l2_ctrl_handler_setup(s5kjn1->sd.ctrl_handler);
+
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+"""
+    new = """	ret = __v4l2_ctrl_handler_setup(s5kjn1->sd.ctrl_handler);
+
+	/* dagu: pin 0x0101 HV-flip on STREAMON */
+	cci_write(s5kjn1->regmap, S5KJN1_REG_ORIENTATION,
+		  S5KJN1_HFLIP | S5KJN1_VFLIP, &ret);
+
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: handler_setup STREAMON needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u mcu=%d\\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height, mcu_ok);
+	msleep(80);
+	{
+		u64 fc = 0, mode = 0, lanes = 0;
+
+		cci_read(s5kjn1->regmap, CCI_REG8(0x0005), &fc, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE, &mode, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0114), &lanes, NULL);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 fc=0x%llx mode=0x%llx r0114=0x%llx\\n",
+			 fc, mode, lanes);
+	}
+"""
+    new = """	dev_info(s5kjn1->dev,
+		 "dagu s5kjn1 streaming %ux%u mcu=%d hflip=%d vflip=%d\\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height, mcu_ok,
+		 s5kjn1->hflip->val, s5kjn1->vflip->val);
+	msleep(80);
+	{
+		u64 fc = 0, mode = 0, lanes = 0, orient = 0;
+
+		cci_read(s5kjn1->regmap, CCI_REG8(0x0005), &fc, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE, &mode, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0114), &lanes, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_ORIENTATION, &orient, NULL);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 fc=0x%llx mode=0x%llx r0114=0x%llx r0101=0x%llx\\n",
+			 fc, mode, lanes, orient);
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: streaming log needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: restamp analog crop after MCU 0x2174"
+# Retired: 0x2174 before STREAM + analog restamp desynced Qtech packer.
+if False and marker not in text:
+    old = """	if (ret)
+		goto error;
+	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret) {
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 MODE_SELECT NACK %d\\n", ret);
+		goto error;
+	}
+	if (mcu_ok) {
+		int page_ret = 0;
+
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &page_ret);
+		if (!page_ret) {
+			cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x2174,
+				  &page_ret);
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0401,
+				  &page_ret);
+			if (page_ret)
+				dev_info(s5kjn1->dev,
+					 "dagu s5kjn1 0x2174 NACK %d\\n",
+					 page_ret);
+		} else {
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 post-mode 0x2400 NACK %d\\n",
+				 page_ret);
+		}
+	}
+
+	dev_info(s5kjn1->dev,
+		 "dagu s5kjn1 streaming %ux%u mcu=%d hflip=%d vflip=%d\\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height, mcu_ok,
+		 s5kjn1->hflip->val, s5kjn1->vflip->val);
+	msleep(80);
+	{
+		u64 fc = 0, mode = 0, lanes = 0, orient = 0;
+
+		cci_read(s5kjn1->regmap, CCI_REG8(0x0005), &fc, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE, &mode, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0114), &lanes, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_ORIENTATION, &orient, NULL);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 fc=0x%llx mode=0x%llx r0114=0x%llx r0101=0x%llx\\n",
+			 fc, mode, lanes, orient);
+	}
+	return 0;
+"""
+    new = """	if (ret)
+		goto error;
+	if (mcu_ok) {
+		int page_ret = 0;
+
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &page_ret);
+		if (!page_ret) {
+			cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x2174,
+				  &page_ret);
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0401,
+				  &page_ret);
+			if (page_ret)
+				dev_info(s5kjn1->dev,
+					 "dagu s5kjn1 0x2174 NACK %d\\n",
+					 page_ret);
+		} else {
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 post-mode 0x2400 NACK %d\\n",
+				 page_ret);
+		}
+	}
+
+	/* dagu: restamp analog crop after MCU 0x2174 */
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_multi_reg_write(s5kjn1->regmap, reg_list->regs,
+			    reg_list->num_regs, &ret);
+	cci_write(s5kjn1->regmap, S5KJN1_REG_ORIENTATION,
+		  S5KJN1_HFLIP | S5KJN1_VFLIP, &ret);
+	if (ret)
+		goto error;
+	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret) {
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 MODE_SELECT NACK %d\\n", ret);
+		goto error;
+	}
+
+	dev_info(s5kjn1->dev,
+		 "dagu s5kjn1 streaming %ux%u mcu=%d hflip=%d vflip=%d\\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height, mcu_ok,
+		 s5kjn1->hflip->val, s5kjn1->vflip->val);
+	msleep(80);
+	{
+		u64 fc = 0, mode = 0, lanes = 0, orient = 0;
+		u64 x0 = 0, y0 = 0, x1 = 0, y1 = 0, ow = 0, oh = 0, bin = 0;
+
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG8(0x0005), &fc, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE, &mode, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0114), &lanes, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_ORIENTATION, &orient, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0344), &x0, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0346), &y0, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0348), &x1, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x034a), &y1, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x034c), &ow, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x034e), &oh, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0900), &bin, NULL);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 fc=0x%llx mode=0x%llx r0114=0x%llx r0101=0x%llx\\n",
+			 fc, mode, lanes, orient);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 analog=0x%llx,0x%llx..0x%llx,0x%llx out=%llux%llx bin=0x%llx\\n",
+			 x0, y0, x1, y1, ow, oh, bin);
+	}
+	return 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 0x2174 restamp needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: 2040 skips CamX 4080 MCU table"
+# Retired: width-gated MCU skip. HEAD always writes MCU when mcu_ok.
+if False and marker not in text and "dagu: 2040 is 0x4000 analog only" not in text:
+    old = """		if (!ret)
+			cci_multi_reg_write(s5kjn1->regmap,
+					    s5kjn1_dagu_4080x3060_mcu,
+					    ARRAY_SIZE(s5kjn1_dagu_4080x3060_mcu),
+					    &ret);
+"""
+    new = """		/* dagu: 2040 skips CamX 4080 MCU table */
+		if (!ret && s5kjn1->mode->width >= 4080)
+			cci_multi_reg_write(s5kjn1->regmap,
+					    s5kjn1_dagu_4080x3060_mcu,
+					    ARRAY_SIZE(s5kjn1_dagu_4080x3060_mcu),
+					    &ret);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 4080 MCU table write needle missing")
+    text = text.replace(old, new, 1)
+    old = """	if (mcu_ok) {
+		int page_ret = 0;
+
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &page_ret);
+		if (!page_ret) {
+			cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x2174,
+				  &page_ret);
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0401,
+				  &page_ret);
+"""
+    new = """	if (mcu_ok && s5kjn1->mode->width >= 4080) {
+		int page_ret = 0;
+
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &page_ret);
+		if (!page_ret) {
+			cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x2174,
+				  &page_ret);
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0401,
+				  &page_ret);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 0x2174 2040-skip needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: 2040 is 0x4000 analog only"
+# Retired: skipped MCU init on analog-only path.
+if False and marker not in text:
+    old = """	if (mcu_ok) {
+		cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
+				    ARRAY_SIZE(init_array_setting), &ret);
+		/* dagu: 2040 skips CamX 4080 MCU table */
+		if (!ret && s5kjn1->mode->width >= 4080)
+			cci_multi_reg_write(s5kjn1->regmap,
+					    s5kjn1_dagu_4080x3060_mcu,
+					    ARRAY_SIZE(s5kjn1_dagu_4080x3060_mcu),
+					    &ret);
+"""
+    new = """	/* dagu: 2040 is 0x4000 analog only */
+	if (mcu_ok && s5kjn1->mode->width >= 4080) {
+		cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
+				    ARRAY_SIZE(init_array_setting), &ret);
+		if (!ret)
+			cci_multi_reg_write(s5kjn1->regmap,
+					    s5kjn1_dagu_4080x3060_mcu,
+					    ARRAY_SIZE(s5kjn1_dagu_4080x3060_mcu),
+					    &ret);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: 2040 skip-all-MCU needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: preview 4080x3060 CamX, do not enum 8160"
+if marker not in text:
+    old_2040 = """static const struct s5kjn1_mode s5kjn1_supported_modes[] = {
+	{
+		/* dagu: preview 2040x1530, do not enum 8160 */
+		.width = 2040,
+		.height = 1530,
+		.hts = 5888,
+		.vts = 3164,
+		.exposure = 1500, /* dagu: default <= VTS-margin (3164-22) */
+		.exposure_margin = 22,
+		.reg_list = {
+			.regs = s5kjn1_dagu_2040x1530_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_dagu_2040x1530_mode),
+		},
+	},
+};
+"""
+    old_both = """static const struct s5kjn1_mode s5kjn1_supported_modes[] = {
+	{
+		.width = 4080,
+		.height = 3060,
+		.hts = 5888,
+		.vts = 3164,
+		.exposure = 3000, /* dagu: default <= VTS-margin (3164-22) */
+		.exposure_margin = 22,
+		.reg_list = {
+			.regs = s5kjn1_dagu_4080x3060_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_dagu_4080x3060_mode),
+		},
+	},
+	{
+		.width = 8160,
+		.height = 6144,
+		.hts = 8688,
+		.vts = 6400,
+		.exposure = 6144,
+		.exposure_margin = 44,
+		.reg_list = {
+			.regs = s5kjn1_8160x6144_10fps_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_8160x6144_10fps_mode),
+		},
+	},
+};
+"""
+    new = """static const struct s5kjn1_mode s5kjn1_supported_modes[] = {
+	{
+		/* dagu: preview 4080x3060 CamX, do not enum 8160 */
+		.width = 4080,
+		.height = 3060,
+		.hts = 5888,
+		.vts = 3164,
+		.exposure = 3000, /* dagu: default <= VTS-margin (3164-22) */
+		.exposure_margin = 22,
+		.reg_list = {
+			.regs = s5kjn1_dagu_4080x3060_mode,
+			.num_regs = ARRAY_SIZE(s5kjn1_dagu_4080x3060_mode),
+		},
+	},
+};
+"""
+    if old_2040 in text:
+        text = text.replace(old_2040, new, 1)
+    elif old_both in text:
+        text = text.replace(old_both, new, 1)
+    else:
+        raise SystemExit(f"{path}: 4080-only supported_modes needle missing")
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: MODE_SELECT then 0x2174"
+if marker not in text:
+    start = text.find("static int s5kjn1_enable_streams(")
+    end = text.find("static int s5kjn1_disable_streams(")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: enable_streams bounds missing")
+    path.write_text(text[:start] + S5KJN1_ENABLE_STREAMS_HEAD + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: analog page after 0x2174"
+if marker not in text:
+    start = text.find("static int s5kjn1_enable_streams(")
+    end = text.find("static int s5kjn1_disable_streams(")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: enable_streams bounds missing")
+    path.write_text(text[:start] + S5KJN1_ENABLE_STREAMS_HEAD + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: 0x2174 start 0x0401 after analog rails"
+if marker not in text:
+    start = text.find("static int s5kjn1_enable_streams(")
+    end = text.find("static int s5kjn1_disable_streams(")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: enable_streams bounds missing")
+    path.write_text(text[:start] + S5KJN1_ENABLE_STREAMS_HEAD + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: 0x4000 page retry after MCU"
+if marker not in text:
+    start = text.find("static int s5kjn1_enable_streams(")
+    end = text.find("static int s5kjn1_disable_streams(")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: enable_streams bounds missing")
+    path.write_text(text[:start] + S5KJN1_ENABLE_STREAMS_HEAD + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: no AFE after 0x2174"
+if marker not in text:
+    start = text.find("static int s5kjn1_enable_streams(")
+    end = text.find("static int s5kjn1_disable_streams(")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: enable_streams bounds missing")
+    path.write_text(text[:start] + S5KJN1_ENABLE_STREAMS_HEAD + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: drop AFE analog table"
+if marker not in text:
+    start = text.find("static int s5kjn1_enable_streams(")
+    end = text.find("static int s5kjn1_disable_streams(")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: enable_streams bounds missing")
+    path.write_text(text[:start] + S5KJN1_ENABLE_STREAMS_HEAD + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: CamX AFE tail after MCU before analog"
+if marker not in text:
+    start = text.find("static int s5kjn1_enable_streams(")
+    end = text.find("static int s5kjn1_disable_streams(")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: enable_streams bounds missing")
+    path.write_text(text[:start] + S5KJN1_ENABLE_STREAMS_HEAD + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: analog page 0x4000 before CSI regs"
+if marker not in text:
+    old = """	if (!pm_runtime_get_if_active(s5kjn1->dev))
+		return 0;
+
+	switch (ctrl->id) {
+"""
+    new = """	if (!pm_runtime_get_if_active(s5kjn1->dev))
+		return 0;
+
+	/* dagu: analog page 0x4000 before CSI regs */
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, NULL);
+
+	switch (ctrl->id) {
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: set_ctrl runtime needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+old_ro = """	if (s5kjn1->hflip)
+		s5kjn1->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT |
+				       V4L2_CTRL_FLAG_READ_ONLY; /* dagu: pin HV-flip 0x0101 */
+
+	s5kjn1->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_VFLIP, 0, 1, 1, 1);
+	if (s5kjn1->vflip)
+		s5kjn1->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT |
+				       V4L2_CTRL_FLAG_READ_ONLY;
+"""
+new_rw = """	if (s5kjn1->hflip)
+		s5kjn1->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
+
+	s5kjn1->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &s5kjn1_ctrl_ops,
+					  V4L2_CID_VFLIP, 0, 1, 1, 1);
+	if (s5kjn1->vflip)
+		s5kjn1->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
+"""
+if old_ro in text:
+    path.write_text(text.replace(old_ro, new_rw, 1))
+    print(f"patched {path}: unpin HV-flip READ_ONLY")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if ".regs = s5kjn1_8160x6144_10fps_mode" in text:
+    raise SystemExit(f"{path}: 8160 still enumerated to userspace")
+if ".regs = s5kjn1_dagu_2040x1530_mode" in text:
+    raise SystemExit(f"{path}: 2040 still enumerated; analog crop does not change MIPI")
+if ".regs = s5kjn1_dagu_4080x3060_mode" not in text:
+    raise SystemExit(f"{path}: CamX 4080 preview mode not wired")
+if "dagu: MODE_SELECT then 0x2174" not in text:
+    raise SystemExit(f"{path}: STREAMON not MODE_SELECT then 0x2174")
+if "dagu: restamp analog crop after MCU 0x2174" in text:
+    raise SystemExit(f"{path}: restamp still in STREAMON")
+if "V4L2_CTRL_FLAG_READ_ONLY; /* dagu: pin HV-flip 0x0101 */" in text:
+    raise SystemExit(f"{path}: HV-flip still READ_ONLY")
+if "dagu: 2040 is 0x4000 analog only" in text:
+    raise SystemExit(f"{path}: analog-only MCU skip still present")
+if "dagu: no AFE after 0x2174" not in text:
+    raise SystemExit(f"{path}: STREAMON still writes AFE after 0x2174")
+if "dagu: drop AFE analog table" not in text:
+    raise SystemExit(f"{path}: AFE analog-table write still in STREAMON")
+if "dagu: CamX analog gain <<8" not in text:
+    raise SystemExit(f"{path}: analog gain still Linaro <<5")
+if "dagu: CamX AFE tail after MCU before analog" not in text:
+    raise SystemExit(f"{path}: STREAMON missing CamX AFE tail after MCU")
+if "S5KJN1_AGAIN_SHIFT		8" not in text:
+    raise SystemExit(f"{path}: AGAIN_SHIFT is not CamX <<8")
+if "S5KJN1_AGAIN_MAX		16" not in text:
+    raise SystemExit(f"{path}: AGAIN_MAX is not CamX 16x")
+_fn = text[text.find("static int s5kjn1_enable_streams("):
+           text.find("static int s5kjn1_disable_streams(")]
+if "cci_write(s5kjn1->regmap, CCI_REG16(0x0106)" in _fn:
+    raise SystemExit(f"{path}: STREAMON still writes 0x0106 as 16-bit")
+if "CCI_REG8(0x0106)" not in _fn:
+    raise SystemExit(f"{path}: STREAMON missing CCI_REG8(0x0106)")
+if "CCI_REG16(0x0816)" in _fn:
+    raise SystemExit(f"{path}: STREAMON still writes Linaro 0x0816")
+if "CCI_REG16(0xf44e)" not in _fn:
+    raise SystemExit(f"{path}: STREAMON missing CamX 0xf44e AFE")
+if "dagu: AFE on live analog page after 0x2174" in text:
+    raise SystemExit(f"{path}: live-page AFE still present")
+if "dagu: analog-only STREAM no remosaic start" in text:
+    raise SystemExit(f"{path}: analog-only skip still present; CSID overflows without MCU")
+if "dagu: analog page after STREAM" not in text:
+    raise SystemExit(f"{path}: STREAMON did not restore analog page after STREAM")
+if "dagu: analog AFE after STREAM" in text:
+    raise SystemExit(f"{path}: AFE after STREAM still present; analog CCI reads zero")
+if "dagu: 0x4000 page retry after MCU" not in text:
+    raise SystemExit(f"{path}: STREAMON missing 0x4000 page retry after MCU")
+if "dagu: analog AFE 0xf44e after mode table" in text:
+    raise SystemExit(f"{path}: AFE still before analog table; 0x4000 NACKs")
+if "dagu: VIO then VANA then VDIG" not in text:
+    raise SystemExit(f"{path}: s5kjn1 still enables VDIG before AVDD")
+if "dagu: drop VDIG then VANA then VIO" not in text:
+    raise SystemExit(f"{path}: s5kjn1 power_off still drops VIO first")
+if "dagu: analog page 0x4000 before CSI regs" not in text:
+    raise SystemExit(f"{path}: set_ctrl still writes CSI regs without analog page")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+marker = "csiphy4 imx596: keep T_hs"
+if marker not in text:
+    old = """	else if (csiphy->id == 1)
+		settle_cnt = 0x13; /* dagu: Android s5kjn1 D-PHY settle 0x13 */
+	/* dagu: log csiphy settle */
+"""
+    new = """	else if (csiphy->id == 1)
+		settle_cnt = 0x13; /* dagu: Android s5kjn1 D-PHY settle 0x13 */
+	/* csiphy4 imx596: keep T_hs from 678.4 MHz; do not copy rear 0x13. */
+	/* dagu: log csiphy settle */
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: csiphy4 settle comment needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY

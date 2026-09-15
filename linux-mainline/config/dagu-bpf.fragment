@@ -1,0 +1,13 @@
+# BCC / bpftrace / offcputime. Merge last so olddefconfig cannot drop BTF.
+# Do NOT enable FUNCTION_TRACER — a nop at every function perturbs 120 Hz DSC.
+CONFIG_KPROBES=y
+CONFIG_KPROBE_EVENTS=y
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_BPF_EVENTS=y
+CONFIG_IKHEADERS=y
+# CONFIG_DEBUG_INFO_REDUCED is not set
+CONFIG_DEBUG_INFO_BTF=y
+CONFIG_DEBUG_INFO_BTF_MODULES=y
+# CONFIG_FUNCTION_TRACER is not set

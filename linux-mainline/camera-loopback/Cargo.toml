@@ -1,0 +1,11 @@
+[package]
+name = "dagu-camera-loopback"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"

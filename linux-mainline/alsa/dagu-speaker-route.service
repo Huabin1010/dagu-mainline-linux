@@ -1,0 +1,12 @@
+[Unit]
+Description=dagu CS35L41 TDM mixer route
+After=sound.target systemd-udev-settle.service
+Wants=sound.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-speaker-route.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

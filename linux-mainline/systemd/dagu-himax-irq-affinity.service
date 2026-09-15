@@ -1,0 +1,14 @@
+[Unit]
+Description=dagu: Himax IRQ affinity CPU4-7 (spi-gpio vs SoftISP)
+DefaultDependencies=no
+After=sysinit.target
+Before=display-manager.service gdm.service
+# Himax IRQ is enabled ~2 s after spi probe; the script retries.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-himax-irq-affinity.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

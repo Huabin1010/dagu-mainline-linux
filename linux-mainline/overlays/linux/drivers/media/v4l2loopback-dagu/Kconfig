@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VIDEO_V4L2LOOPBACK_DAGU
+	tristate "v4l2loopback (dagu NV12 app bridge)"
+	depends on VIDEO_DEV
+	help
+	  Userspace NV12 sink at /dev/video20 and /dev/video21 for
+	  apps that only open classic V4L2 capture. Not an ISP.

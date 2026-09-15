@@ -1,0 +1,38 @@
+From: dagu
+Subject: [PATCH] wayland: keep frame-callback loop alive after PENDING emit (v5)
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2).
+
+Type B identity kickoff hole: on_after_update pays wl_callback.done
+on CLUTTER_FRAME_RESULT_PENDING_PRESENTED then disarms the per-view
+GSource. GTK freeze_updates waiting for the *next* done; notify_presented
+goes IDLE with pending_reschedule=0. On 120 Hz that is a 75-225 ms
+dpu_enc_kickoff gap.
+
+v1–v3 deferred the PENDING emit (misread Weston). Identity got worse
+(v3: 54 Hz). Wayland and Weston post-repaint: send done *now*, then
+give the client a draw window without idling the compositor.
+
+v4 kept the emit and armed the GSource at expected_present + interval.
+That timestamp can sit ~100 ms in the future when expected_us is stale,
+and dispatch always disarmed, so an empty fire killed the source.
+
+v5 (this patch), matching:
+  - Wayland: send done so the client can hit the next refresh
+  - Weston repaint-window: do not idle after paying done
+  - KWin hasFrameCallbacks → scheduleRepaint
+  - Mutter !2823: GSource at frame_deadline, not present+1
+
+  1. PENDING: still emit + wl_display_flush_clients
+  2. clutter_stage_view_schedule_update so present does not IDLE
+  3. GSource armed at frame_deadline (clamped to 2 intervals), not
+     expected+interval
+  4. v6: do not schedule_update from after_update (v5 extra empty
+     dispatch disarmed the GSource on deadline<=now)
+  5. dispatch keep_alive=12 extra fires; empty after_update does not
+     disarm while keep_alive>0
+  6. presented: emit if list non-empty + schedule_update; do not disarm
+
+Acceptance: same 8s identity window, kickoff≈120 and gaps_gt_50ms=0.
+---
+ src/wayland/meta-wayland.c | v5

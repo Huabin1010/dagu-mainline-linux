@@ -1,0 +1,95 @@
+From: dagu
+Subject: [PATCH] dagu: discarded wp_presentation on skipped-paint
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2).
+
+Chrome Ozone WaitForSwap sits 80-180 ms when Mutter skips paint:
+on_after_paint is the only place that moves surface feedback onto
+the present list. skipped-paint never discarded, so
+wp_presentation_feedback stays pending and has_value() is false.
+
+Discard is a valid completion. Connect skipped-paint on the stage
+(same object as after-paint). finalize must disconnect the stage,
+not monitor_manager.
+
+Must be compiled into libmutter-18.so.0.0.0. static functions
+cannot LD_PRELOAD wrap.
+
+---
+ src/wayland/meta-wayland-presentation-time.c | 47 +++++++++++++++++++++++++---
+ 1 file changed, 44 insertions(+), 3 deletions(-)
+--- src/wayland/meta-wayland-presentation-time.c	2026-04-14 21:37:46.000000000 +0800
++++ src/wayland/meta-wayland-presentation-time.c	2026-09-13 20:20:39.655214274 +0800
+@@ -117,6 +117,46 @@
+                                                  int64_t                      view_frame_counter);
+ 
+ static void
++dagu_discard_pending_presentation (MetaWaylandCompositor *compositor)
++{
++  GList *l;
++
++  /* skipped-paint never runs after-paint, so Chrome's
++   * wp_presentation_feedback stays pending and Ozone WaitForSwap
++   * blocks 80–180 ms. Discard is a valid completion. */
++  l = compositor->presentation_time.feedback_surfaces;
++  while (l)
++    {
++      GList *l_cur = l;
++      MetaWaylandSurface *surface = l->data;
++
++      l = l->next;
++
++      while (!wl_list_empty (&surface->presentation_time.feedback_list))
++        {
++          MetaWaylandPresentationFeedback *feedback =
++            wl_container_of (surface->presentation_time.feedback_list.next,
++                             feedback, link);
++
++          meta_wayland_presentation_feedback_discard (feedback);
++        }
++
++      compositor->presentation_time.feedback_surfaces =
++        g_list_delete_link (compositor->presentation_time.feedback_surfaces,
++                            l_cur);
++    }
++}
++
++static void
++on_skipped_paint (ClutterStage          *stage,
++                  ClutterStageView      *stage_view,
++                  ClutterFrame          *frame,
++                  MetaWaylandCompositor *compositor)
++{
++  dagu_discard_pending_presentation (compositor);
++}
++
++static void
+ on_after_paint (ClutterStage          *stage,
+                 ClutterStageView      *stage_view,
+                 ClutterFrame          *frame,
+@@ -190,13 +230,14 @@
+   MetaBackend *backend = meta_context_get_backend (compositor->context);
+   MetaMonitorManager *monitor_manager =
+     meta_backend_get_monitor_manager (backend);
++  ClutterActor *stage = meta_backend_get_stage (backend);
+ 
+   g_hash_table_destroy (compositor->presentation_time.feedbacks);
+ 
+   g_signal_handlers_disconnect_by_func (monitor_manager, on_monitors_changed,
+                                         compositor);
+-  g_signal_handlers_disconnect_by_func (monitor_manager, on_after_paint,
+-                                        compositor);
++  g_signal_handlers_disconnect_by_func (stage, on_after_paint, compositor);
++  g_signal_handlers_disconnect_by_func (stage, on_skipped_paint, compositor);
+ }
+ 
+ void
+@@ -217,6 +258,8 @@
+ 
+   g_signal_connect (stage, "after-paint",
+                     G_CALLBACK (on_after_paint), compositor);
++  g_signal_connect (stage, "skipped-paint",
++                    G_CALLBACK (on_skipped_paint), compositor);
+ 
+   if (wl_global_create (compositor->wayland_display,
+                         &wp_presentation_interface,

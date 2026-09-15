@@ -1,0 +1,573 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Xiaomi Pad 5 Pro 12.4 (dagu / 22081281AC / SM8250)
+ *
+ * Skeleton: mainline elish-common. Board-id, L81A DPHY, Himax, dual FG
+ * 5000 mAh, QCA6390, CS35L41 from live FDT + CAF dagu-sm8250.dtsi.
+ *
+ * Dagu deltas vs elish: dual KTZ8866, L7A panel vddio, USB3+DP, PS5169,
+ * nanosic keyboard, BQ2597x / P9418. Do not enable uart2: QUP SE2 is i2c2.
+ */
+
+/dts-v1/;
+
+#include "sm8250-xiaomi-elish-common.dtsi"
+#include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/phy/phy.h>
+#include <dt-bindings/phy/phy-qcom-qmp.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
+
+/ {
+	model = "Xiaomi Pad 5 Pro 12.4";
+	compatible = "xiaomi,dagu", "qcom,sm8250";
+
+	qcom,board-id = <0x33 0>;
+
+	/*
+	 * CAF ABL patches a node named "memory", not memory@80000000.
+	 * sm8250.dtsi leaves size 0 there; Linux then panics with 0 RAM.
+	 * Live HyperOS FDT (dagu dump): two banks, ~8 GiB.
+	 */
+	/delete-node/ memory@80000000;
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x3bb00000>,
+		      <0x0 0xc0000000 0x1 0xc0000000>;
+	};
+
+	chosen {
+		stdout-path = "tty0";
+	};
+};
+
+/*
+ * CPU writes to 0x9c000000 never moved the Logo: MDSS is not scanning that
+ * PA (SMMU / different buffer). simple-framebuffer is a dead end — delete it
+ * so DRM fbdev can own fbcon. Do not wait on KTZ8866: ABL already lit BL.
+ */
+/delete-node/ &framebuffer;
+
+/* Give the real qcom-wdt driver a long bite once it probes. */
+&{/soc@0/watchdog@17c10000} {
+	timeout-sec = <60>;
+};
+
+&battery_l {
+	charge-full-design-microamp-hours = <5000000>;
+	energy-full-design-microwatt-hours = <19350000>;
+};
+
+&battery_r {
+	charge-full-design-microamp-hours = <5000000>;
+	energy-full-design-microwatt-hours = <19350000>;
+};
+
+/* CAF L7A 1.832 V panel vddio. elish left L7 unused and fed L14A 1.88 V. */
+&apps_rsc {
+	regulators-0 {
+		vreg_l7a_1p83: ldo7 {
+			regulator-name = "vreg_l7a_1p83";
+			regulator-min-microvolt = <1832000>;
+			regulator-max-microvolt = <1832000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+};
+
+&gpio_keys {
+	hall-lid {
+		label = "hall_key";
+		gpios = <&tlmm 110 GPIO_ACTIVE_LOW>;
+		linux,input-type = <EV_SW>;
+		linux,code = <SW_LID>;
+		wakeup-source;
+		debounce-interval = <15>;
+	};
+
+	hall-tablet {
+		label = "hall_key1";
+		gpios = <&tlmm 121 GPIO_ACTIVE_LOW>;
+		linux,input-type = <EV_SW>;
+		linux,code = <SW_TABLET_MODE>;
+		wakeup-source;
+		debounce-interval = <15>;
+	};
+};
+
+/*
+ * Logo is frozen on this ABL splash map; EL1 cannot modeset MDSS.
+ * Keep the whole display graph off so probe cannot hang USB bring-up.
+ */
+&mdss {
+	status = "disabled";
+};
+
+&mdss_dsi0 {
+	status = "okay";
+};
+
+&mdss_dsi1 {
+	status = "okay";
+};
+
+&mdss_dsi0_phy {
+	phy-type = <PHY_TYPE_DPHY>;
+	status = "okay";
+};
+
+&mdss_dsi1_phy {
+	phy-type = <PHY_TYPE_DPHY>;
+	status = "okay";
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi1_out {
+	data-lanes = <0 1 2 3>;
+};
+
+&display_panel {
+	compatible = "xiaomi,dagu-l81a";
+	vddio-supply = <&vreg_l7a_1p83>;
+	reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
+	/delete-property/ backlight;
+	/delete-property/ rotation;
+	status = "okay";
+};
+
+/*
+ * Leave both KTZ8866 alone this boot: drm_panel_of_backlight EPROBE_DEFERs
+ * forever if the I2C chip never registers, and a probe can drop ABL's BL.
+ */
+&backlight {
+	status = "disabled";
+};
+
+/* Second KTZ8866: CAF qupv3_se9. Share HWEN GPIO139 with i2c11. Off until fbcon. */
+&i2c9 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	backlight_b: backlight@11 {
+		compatible = "kinetic,ktz8866";
+		reg = <0x11>;
+		vddpos-supply = <&bl_vddpos_5p5>;
+		vddneg-supply = <&bl_vddneg_5p5>;
+		current-num-sinks = <5>;
+		kinetic,current-ramp-delay-ms = <128>;
+		kinetic,led-enable-ramp-delay-ms = <1>;
+		status = "disabled";
+	};
+};
+
+&gpu {
+	status = "disabled";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8250/xiaomi/dagu/a650_zap.mbn";
+};
+
+&pcie0 {
+	status = "disabled";
+};
+
+&pcie0_phy {
+	status = "disabled";
+};
+
+&pcieport0 {
+	wifi@0 {
+		/* board.bin = dump bd_l81a.elf; do not use board-2.bin */
+		/delete-property/ qcom,calibration-variant;
+		/* Station MAC: dts/local-addresses.dtsi (gitignored, from persist). */
+	};
+};
+
+/*
+ * USB graph: P0 tree (sm8250-xiaomi-dagu.dts) forces HS peripheral
+ * without role-switch. Keep this file as the full board overlay.
+ */
+&usb_1 {
+	qcom,select-utmi-as-pipe-clk;
+	status = "okay";
+};
+
+&usb_1_hsphy {
+	status = "okay";
+};
+
+&usb_1_qmpphy {
+	status = "disabled";
+};
+
+&pm8150b_typec {
+	status = "disabled";
+};
+
+&usb_1_dwc3 {
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+	/delete-property/ usb-role-switch;
+	/delete-property/ iommus;
+};
+
+&ufs_mem_hc {
+	status = "disabled";
+};
+
+&ufs_mem_phy {
+	status = "disabled";
+};
+
+/*
+ * Remoteproc: firmware-name is dagu-specific. Keep disabled until
+ * stage-firmware.sh finds adsp.mdt / slpi.mdt / venus.mdt in dumps.
+ * Missing firmware-name stalls boot ~60s.
+ */
+&adsp {
+	firmware-name = "qcom/sm8250/xiaomi/dagu/adsp.mbn";
+	status = "disabled";
+};
+
+&cdsp {
+	status = "disabled";
+};
+
+&slpi {
+	firmware-name = "qcom/sm8250/xiaomi/dagu/slpi.mbn";
+	status = "disabled";
+};
+
+&venus {
+	firmware-name = "qcom/sm8250/xiaomi/dagu/venus.mbn";
+	status = "disabled";
+};
+
+&gpi_dma0 {
+	status = "okay";
+};
+
+&gpi_dma2 {
+	status = "okay";
+};
+
+/* Himax HX83121 on QUP0 SE4 = spi4 @ 0x990000. P0: off until RNDIS lives. */
+&spi4 {
+	status = "disabled";
+	pinctrl-names = "default";
+	pinctrl-0 = <&qup_spi4_data_clk>, <&qup_spi4_cs>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	himax_ts: touchscreen@0 {
+		compatible = "himax,hx83121-dagu", "himax,hxcommon";
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+		spi-cpha;
+		interrupt-parent = <&tlmm>;
+		interrupts = <39 IRQ_TYPE_EDGE_FALLING>;
+		reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+		touchscreen-size-x = <1600>;
+		touchscreen-size-y = <2560>;
+		himax,display-coords = <0 1600 0 2560>;
+	};
+};
+
+/*
+ * Nanosic 803 keyboard MCU. CAF qupv3_se2_i2c @4c.
+ * Same QUP @0x988000 as uart2 — do not enable uart2 / earlycon there.
+ */
+&i2c2 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	keyboard@4c {
+		compatible = "nanosic,803";
+		reg = <0x4c>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <83 IRQ_TYPE_EDGE_FALLING>;
+		reset-gpios = <&tlmm 141 GPIO_ACTIVE_HIGH>;
+		status-gpios = <&tlmm 46 GPIO_ACTIVE_HIGH>;
+		vdd-gpios = <&tlmm 127 GPIO_ACTIVE_HIGH>;
+		sleep-gpios = <&tlmm 155 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/* Four CS35L41: CAF qupv3_se1 = i2c1, se3 = i2c3 */
+&i2c1 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	cs35l41_br: speaker-amp@40 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x40>;
+		reset-gpios = <&tlmm 6 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <7 IRQ_TYPE_LEVEL_LOW>;
+		VA-supply = <&vreg_s4a_1p8>;
+		VP-supply = <&vph_pwr>;
+		cirrus,boost-peak-milliamp = <4000>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,gpio2-src-select = <4>;
+		cirrus,gpio2-output-enable;
+		sound-name-prefix = "BR";
+		#sound-dai-cells = <1>;
+	};
+
+	cs35l41_bl: speaker-amp@41 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x41>;
+		reset-gpios = <&tlmm 62 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <67 IRQ_TYPE_LEVEL_LOW>;
+		VA-supply = <&vreg_s4a_1p8>;
+		VP-supply = <&vph_pwr>;
+		cirrus,boost-peak-milliamp = <4000>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,gpio2-src-select = <4>;
+		cirrus,gpio2-output-enable;
+		sound-name-prefix = "BL";
+		#sound-dai-cells = <1>;
+	};
+};
+
+&i2c3 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	cs35l41_tl: speaker-amp@41 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x41>;
+		reset-gpios = <&tlmm 78 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <92 IRQ_TYPE_LEVEL_LOW>;
+		VA-supply = <&vreg_s4a_1p8>;
+		VP-supply = <&vph_pwr>;
+		cirrus,boost-peak-milliamp = <4000>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,gpio2-src-select = <4>;
+		cirrus,gpio2-output-enable;
+		sound-name-prefix = "TL";
+		#sound-dai-cells = <1>;
+	};
+
+	cs35l41_tr: speaker-amp@43 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x43>;
+		reset-gpios = <&tlmm 144 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <129 IRQ_TYPE_LEVEL_LOW>;
+		VA-supply = <&vreg_s4a_1p8>;
+		VP-supply = <&vph_pwr>;
+		cirrus,boost-peak-milliamp = <4000>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,gpio2-src-select = <4>;
+		cirrus,gpio2-output-enable;
+		sound-name-prefix = "TR";
+		#sound-dai-cells = <1>;
+	};
+};
+
+/* IDT P9418 wireless charger: CAF qupv3_se8 @3b */
+&i2c8 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	wireless-charger@3b {
+		compatible = "idt,p9418";
+		reg = <0x3b>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <113 IRQ_TYPE_EDGE_FALLING>;
+		enable-gpios = <&tlmm 47 GPIO_ACTIVE_HIGH>;
+		det-gpios = <&tlmm 145 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/* BQ2597x master: CAF qupv3_se15 @66, IRQ GPIO68 */
+&i2c15 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	charger-pump-master@66 {
+		compatible = "ti,bq25970";
+		reg = <0x66>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <68 IRQ_TYPE_EDGE_FALLING>;
+		ti,bq2597x,master;
+	};
+};
+
+/* BQ2597x slave: CAF qupv3_se16 @66 */
+&i2c16 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	charger-pump-slave@66 {
+		compatible = "ti,bq25970";
+		reg = <0x66>;
+		ti,bq2597x,slave;
+	};
+};
+
+/* PS5169 USB/DP redriver: CAF qupv3_se17 @28, EN GPIO69 */
+&i2c17 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	redriver@28 {
+		compatible = "parade,ps5169";
+		reg = <0x28>;
+		enable-gpios = <&tlmm 69 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/*
+ * IMU / mag / ALS live on SLPI in Android. Do not guess an AP I2C bus:
+ * a wrong bus only wastes probe time. Enable &slpi when slpi.mbn is staged.
+ * Persist names: lsm6dso, ak0991x, bu27030, tcs3701, sx932x.
+ */
+
+/* CAF tert TDM/MI2S → four CS35L41. P0: off until RNDIS lives. */
+&sound {
+	status = "disabled";
+	compatible = "qcom,sm8250-sndcard";
+	model = "Xiaomi-dagu-CS35L41";
+
+	mm1-dai-link {
+		link-name = "MultiMedia1";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+		};
+	};
+
+	tert-mi2s-dai-link {
+		link-name = "Tertiary MI2S Playback";
+		cpu {
+			sound-dai = <&q6afedai TERTIARY_MI2S_RX>;
+		};
+		codec {
+			sound-dai = <&cs35l41_tl 0>, <&cs35l41_tr 0>,
+				    <&cs35l41_bl 0>, <&cs35l41_br 0>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+	};
+};
+
+&uart6 {
+	bluetooth {
+		firmware-name = "qca/htbtfw20.tlv";
+	};
+};
+
+/*
+ * Cameras from persist.vendor.camera.mi.module.info:
+ * back_main=s5kjn1 (csiphy1, reset GPIO93), back_depth=ov02b1b (csiphy0, reset GPIO26),
+ * front_main=imx596 (csiphy4, reset GPIO109). No mainline sensor drivers yet;
+ * enable CCI/CAMSS so media graph can attach overlays later.
+ */
+&camcc {
+	status = "disabled";
+};
+
+&cci0 {
+	status = "disabled";
+};
+
+&cci1 {
+	status = "disabled";
+};
+
+&camss {
+	status = "disabled";
+};
+
+/*
+ * Sensor models from persist.vendor.camera.mi.module.info.
+ * No mainline drivers yet — nodes stay disabled so CAMSS still probes.
+ * GPIO/csiphy from live FDT qcom,cam-sensor@0/1/2.
+ */
+&cci0_i2c0 {
+	/* back_main s5kjn1: csiphy1, reset GPIO93, mclk GPIO94 */
+	camera@10 {
+		compatible = "samsung,s5kjn1";
+		reg = <0x10>;
+		reset-gpios = <&tlmm 93 GPIO_ACTIVE_LOW>;
+		status = "disabled";
+	};
+};
+
+&cci0_i2c1 {
+	/* back_depth ov02b1b: csiphy0, reset GPIO26, mclk GPIO95 */
+	camera@10 {
+		compatible = "ovti,ov02b10";
+		reg = <0x10>;
+		reset-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>;
+		status = "disabled";
+	};
+};
+
+&cci1_i2c1 {
+	/* front_main imx596: csiphy4, reset GPIO109, mclk GPIO97 */
+	camera@1a {
+		compatible = "sony,imx596";
+		reg = <0x1a>;
+		reset-gpios = <&tlmm 109 GPIO_ACTIVE_LOW>;
+		status = "disabled";
+	};
+};
+
+/*
+ * P0 bring-up: disable every leftover elish okay node that can probe
+ * before PID1. USB is already off. Goal this boot: ~25s back to
+ * fastboot (ramdisk WDT, no UDC).
+ */
+&i2c0 { status = "disabled"; };
+&i2c1 { status = "disabled"; };
+&i2c2 { status = "disabled"; };
+&i2c3 { status = "disabled"; };
+&i2c8 { status = "disabled"; };
+&i2c9 { status = "disabled"; };
+&i2c11 { status = "disabled"; };
+&i2c13 { status = "disabled"; };
+&i2c15 { status = "disabled"; };
+&i2c16 { status = "disabled"; };
+&i2c17 { status = "disabled"; };
+&gpi_dma0 { status = "disabled"; };
+&gpi_dma1 { status = "disabled"; };
+&gpi_dma2 { status = "disabled"; };
+&qupv3_id_0 { status = "disabled"; };
+&qupv3_id_1 { status = "disabled"; };
+&qupv3_id_2 { status = "disabled"; };
+&uart6 { status = "disabled"; };
+&gmu { status = "disabled"; };
+&gpu { status = "disabled"; };
+&mdss_dsi0 { status = "disabled"; };
+&mdss_dsi1 { status = "disabled"; };
+&mdss_dsi0_phy { status = "disabled"; };
+&mdss_dsi1_phy { status = "disabled"; };
+&display_panel { status = "disabled"; };
+&apps_smmu { status = "disabled"; };
+&gpio_keys { status = "disabled"; };
+
+/* elish-common; pcie0 is already off, but the PMU still probes. */
+&{/qca6390-pmu} {
+	status = "disabled";
+};

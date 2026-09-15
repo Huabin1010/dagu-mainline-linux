@@ -1,0 +1,60 @@
+{
+  "boot_a": {
+    "path": "boot_a.img",
+    "file_size": 201326592,
+    "magic": "ANDROID!",
+    "header_version": 3,
+    "header_size": 1580,
+    "kernel_size": 54849552,
+    "ramdisk_size": 18944605,
+    "os_version_raw": "0x1a000196",
+    "reserved": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "head_hex": "414e44524f49442110f044035d1221019601001a2c060000000000000000000000000000000000000300000000000000"
+  },
+  "vendor_boot_a": {
+    "path": "vendor_boot_a.img",
+    "file_size": 100663296,
+    "magic": "VNDRBOOT",
+    "header_version": 3,
+    "page_size": 4096,
+    "kernel_addr": "0x8000",
+    "ramdisk_addr": "0x1000000",
+    "vendor_ramdisk_size": 2314,
+    "header_size": 2112,
+    "dtb_size": 1613904,
+    "dtb_addr": "0x1f00000",
+    "cmdline": "console=ttyMSM0,115200n8 androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 video=vfb:640x400,bpp=32,memsize=3072000 msm_rtb.filter=0x237 service_locator.enable=1 androidboot.usbcontroller=a600000.dwc3 swiotlb=2048 loop.max_part=7 cgroup.memory=nokmem,nosocket reboot=panic_warm cnss2.disable_nv_mac=1 buildvariant=user",
+    "head_hex": "564e4452424f4f54030000000010000000800000000000010a090000636f6e736f6c653d7474794d534d302c31313532"
+  },
+  "dtbo_a": {
+    "path": "dtbo_a.img",
+    "file_size": 33554432,
+    "magic": "0xd7b7ab1e",
+    "dt_entry_count": 29,
+    "total_size_in_header": 14056795,
+    "page_size": 4096,
+    "entries_preview": [
+      {
+        "idx": 14,
+        "size": 467769,
+        "offset": 6995085
+      },
+      {
+        "idx": 15,
+        "size": 494331,
+        "offset": 7462854
+      },
+      {
+        "idx": 16,
+        "size": 464484,
+        "offset": 7957185
+      }
+    ],
+    "head_hex": "d7b7ab1e00d67d5b00000020000000200000001d000000200000100000000000"
+  }
+}

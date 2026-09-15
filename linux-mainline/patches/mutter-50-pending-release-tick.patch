@@ -1,0 +1,111 @@
+From: dagu
+Subject: [PATCH] dagu: wake the clock on attach; signal syncobj when Cogl has no fd
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2), from
+gitlab.gnome.org/GNOME/mutter tag 50.1.
+
+2026-09-13 A/B on SM8250 dagu
+-----------------------------
+* LD_PRELOAD force dec_use_count → kickoff max 658–986 ms. Do not ship.
+* DAGU_CHROME_NO_SYNCOBJ=1 → slow 64 Hz / max 217 ms. Keep syncobj on.
+* libdagu-cogl-syncfd.so (dummy fd on -1) did not remove the 4 holes
+  (warm 084215 still gt50=4). The -1 bail is still a real mutter bug
+  (handle_release_points returns without signaling). This patch keeps
+  that fix. It does not decrement live dmabuf use_count.
+
+What this changes
+-----------------
+1. meta_wayland_actor_surface_apply_state only called
+   meta_surface_actor_schedule_update() for frame_callback / fifo_wait.
+   Chrome + WaylandLinuxDrmSyncobj can attach a dmabuf with damage and
+   a release timeline but no wl_surface.frame. Wake the clock on
+   newly_attached so a skipped paint is not the first time we notice.
+   Do not queue a 1×1 stage damage from this path.
+
+2. handle_release_points() used to return when
+   cogl_context_get_latest_sync_fd() is -1, leaving the client's
+   wp_linux_drm_syncobj release point unsignaled. Protocol allows
+   releasing without reading; import a signaled dummy sync_file.
+
+Do not apply to the running tablet until a cross-built libmutter-18
+is swapped in a spare window. Rootfs has ~250 MB free; do not
+apt-get source / build on the tablet.
+
+---
+ src/wayland/meta-wayland-actor-surface.c |  5 +++--
+ src/wayland/meta-wayland-buffer.c        | 42 +++++++++++++++++++++++++++++++-
+ 2 files changed, 44 insertions(+), 3 deletions(-)
+
+diff --git a/src/wayland/meta-wayland-actor-surface.c b/src/wayland/meta-wayland-actor-surface.c
+index 8e9bb806..dagu0001 100644
+--- a/src/wayland/meta-wayland-actor-surface.c
++++ b/src/wayland/meta-wayland-actor-surface.c
+@@ -318,8 +318,9 @@ meta_wayland_actor_surface_apply_state (MetaWaylandSurfaceRole  *surface_role,
+   MetaWaylandActorSurfacePrivate *priv =
+     meta_wayland_actor_surface_get_instance_private (actor_surface);
+ 
+   if (priv->actor &&
+-      (!wl_list_empty (&pending->frame_callback_list) || pending->fifo_wait))
++      (!wl_list_empty (&pending->frame_callback_list) ||
++       pending->fifo_wait ||
++       pending->newly_attached))
+     meta_surface_actor_schedule_update (priv->actor);
+ 
+   meta_wayland_actor_surface_queue_frame_callbacks (actor_surface, pending);
+diff --git a/src/wayland/meta-wayland-buffer.c b/src/wayland/meta-wayland-buffer.c
+index 8e9bb806..dagu0002 100644
+--- a/src/wayland/meta-wayland-buffer.c
++++ b/src/wayland/meta-wayland-buffer.c
+@@ -714,6 +714,40 @@ meta_wayland_buffer_inc_use_count (MetaWaylandBuffer *buffer)
+   buffer->use_count++;
+ }
+ 
++static int
++dagu_signaled_sync_fd (void)
++{
++  /* Already-signaled sync_file for "we are not going to read this
++   * buffer". Used only when Cogl has no latest GPU work. */
++  g_autofd int drm_fd = -1;
++  uint32_t handle = 0;
++  int sync_fd = -1;
++
++  drm_fd = open ("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
++  if (drm_fd < 0)
++    drm_fd = open ("/dev/dri/card0", O_RDWR | O_CLOEXEC);
++  if (drm_fd < 0)
++    return -1;
++
++  if (drmSyncobjCreate (drm_fd, DRM_SYNCOBJ_CREATE_SIGNALED, &handle) != 0)
++    return -1;
++
++  if (drmSyncobjExportSyncFile (drm_fd, handle, &sync_fd) != 0)
++    sync_fd = -1;
++
++  drmSyncobjDestroy (drm_fd, handle);
++  return sync_fd;
++}
++
+ static void
+ handle_release_points (MetaWaylandBuffer *buffer)
+ {
+   MetaContext *context = meta_wayland_compositor_get_context (buffer->compositor);
+@@ -731,8 +765,14 @@ handle_release_points (MetaWaylandBuffer *buffer)
+   cogl_context = clutter_backend_get_cogl_context (clutter_backend);
+   sync_fd = cogl_context_get_latest_sync_fd (cogl_context);
+   if (sync_fd < 0)
+     {
+-      meta_topic (META_DEBUG_WAYLAND, "Invalid Sync Fd returned by COGL");
+-      return;
++      meta_topic (META_DEBUG_WAYLAND,
++                  "Cogl has no latest sync fd; signaling release immediately");
++      sync_fd = dagu_signaled_sync_fd ();
++      if (sync_fd < 0)
++        {
++          g_warning ("dagu: cannot make a signaled sync_file for drm-syncobj release");
++          return;
++        }
+     }
+ 
+   for (int i = 0; i < buffer->release_points->len; i++)
+-- 
+2.43.0

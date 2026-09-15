@@ -1,0 +1,11 @@
+[Unit]
+Description=dagu: load qcom-venus decoder
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-venus-load.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

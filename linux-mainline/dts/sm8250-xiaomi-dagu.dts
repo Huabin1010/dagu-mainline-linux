@@ -1,0 +1,1618 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Xiaomi Pad 5 Pro 12.4 (dagu) — P0 ramdisk + RNDIS.
+ *
+ * Include elish-common for PMIC / RPMH / USB2 PHY supplies. Override
+ * board-id, RAM, and turn off everything that is not needed to reach
+ * PID1 and register a HS UDC.
+ *
+ * USB gadget stays independent of Type-C (graph cut at the end) so DWC3
+ * still comes up as peripheral. Type-C is on for CC Rd / PD sink; the
+ * PM8150B SMB5 overlay charges from VBUS. ABL already trained the HS PHY.
+ * Full board tree: sm8250-xiaomi-dagu-full.dts.
+ */
+
+/dts-v1/;
+
+#include "sm8250-xiaomi-elish-common.dtsi"
+#include <dt-bindings/clock/qcom,camcc-sm8250.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/phy/phy.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
+#include <dt-bindings/media/video-interfaces.h>
+
+/ {
+	model = "Xiaomi Pad 5 Pro 12.4";
+	compatible = "xiaomi,dagu", "qcom,sm8250";
+
+	qcom,board-id = <0x33 0>;
+
+	/delete-node/ memory@80000000;
+	/delete-node/ reserved-memory;
+
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x3bb00000>,
+		      <0x0 0xc0000000 0x1 0xc0000000>;
+	};
+
+	chosen {
+		stdout-path = "tty0";
+	};
+
+	/*
+	 * Replace sm8250.dtsi reserved-memory (wrong xbl_aop/adsp/slpi offsets on
+	 * dagu) with stock fdt from dumps/dagu-20260826-linux-bringup/dt-extract/.
+	 */
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+#include "dagu-reserved-memory-stock.dtsi"
+
+		ramoops@b0000000 {
+			compatible = "ramoops";
+			reg = <0x0 0xb0000000 0x0 0x400000>;
+			record-size = <0x100000>;
+			console-size = <0x100000>;
+			ftrace-size = <0x100000>;
+			pmsg-size = <0x100000>;
+			no-map;
+		};
+	};
+
+	/*
+	 * CAF &qupv3_se4_spi @ 0x990000, pins gpio8–11 function qup4.
+	 * Mainline GENI SPI (firmware load / geni_se_init) writes QUP
+	 * registers this QHEE rejects and the board watchdogs to fastboot.
+	 * Bit-bang the same pads: protocol/IRQ/coords stay CAF.
+	 *
+	 * QUP v3 SPI lanes (Qualcomm): L0=MISO L1=MOSI L2=SCLK L3=CS.
+	 * gpio8–11 are QUP0 SE4 L0–L3, so MOSI is gpio9, not pingroup order.
+	 */
+	himax_spi: spi {
+		compatible = "spi-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&himax_spi_gpio_default>;
+		miso-gpios = <&tlmm 8 GPIO_ACTIVE_HIGH>;
+		mosi-gpios = <&tlmm 9 GPIO_ACTIVE_HIGH>;
+		sck-gpios = <&tlmm 10 GPIO_ACTIVE_HIGH>;
+		cs-gpios = <&tlmm 11 GPIO_ACTIVE_LOW>;
+		num-chipselects = <1>;
+
+		himax_ts: touchscreen@0 {
+			compatible = "himax,hx83121-dagu", "himax,hxcommon";
+			reg = <0>;
+			spi-max-frequency = <4000000>;
+			/* CAF probe forces SPI_MODE_3 (CPOL|CPHA), not DT CPHA. */
+			spi-cpol;
+			spi-cpha;
+			pinctrl-names = "default";
+			pinctrl-0 = <&himax_irq_default>;
+			interrupt-parent = <&tlmm>;
+			/*
+			 * Idle high, asserted low until the 0x30 read. EDGE+
+			 * ONESHOT drops the next pulse while spi-gpio bitbangs
+			 * (断触). LEVEL_LOW retriggers if the line is still low.
+			 */
+			interrupts = <39 IRQ_TYPE_LEVEL_LOW>;
+			touchscreen-size-x = <1600>;
+			touchscreen-size-y = <2560>;
+			himax,display-coords = <0 1600 0 2560>;
+			/* GPIO100 is panel tp-reset; do not bind it here. */
+		};
+	};
+
+	/*
+	 * CAF qupv3_se1 / se3 CS35L41. GENI I2C (i2c1/i2c3) would call
+	 * geni_load_se_firmware / geni_se_init on this QHEE — same hang as SPI.
+	 * Bit-bang the dump pads: gpio4/5 (SE1) and gpio119/120 (SE3).
+	 */
+	amp_i2c_se1: i2c-gpio-se1 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cs35l41_i2c_se1_default>;
+		sda-gpios = <&tlmm 4 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+		clock-frequency = <400000>;
+
+		cs35l41_br: speaker-amp@40 {
+			compatible = "cirrus,cs35l41";
+			reg = <0x40>;
+			reset-gpios = <&tlmm 6 GPIO_ACTIVE_HIGH>;
+			interrupt-parent = <&tlmm>;
+			interrupts = <7 IRQ_TYPE_LEVEL_LOW>;
+			VA-supply = <&vreg_s4a_1p8>;
+			VP-supply = <&vph_pwr>;
+			cirrus,boost-peak-milliamp = <4000>;
+			cirrus,boost-ind-nanohenry = <1000>;
+			cirrus,boost-cap-microfarad = <15>;
+			cirrus,asp-sdout-hiz = <3>;
+			cirrus,gpio2-src-select = <4>;
+			cirrus,gpio2-output-enable;
+			cirrus,subsystem-id = "dagu";
+			cirrus,fast-switch = "cirrus/BR-music.txt";
+			/* persist cs35l41_cal_spk3: 6.93 ohm */
+			cirrus,cal-r = <9696>;
+			cirrus,cal-ambient = <23>;
+			cirrus,vpbr-config = <33575690>;
+			sound-name-prefix = "BR";
+			#sound-dai-cells = <1>;
+		};
+
+		cs35l41_bl: speaker-amp@41 {
+			compatible = "cirrus,cs35l41";
+			reg = <0x41>;
+			reset-gpios = <&tlmm 62 GPIO_ACTIVE_HIGH>;
+			interrupt-parent = <&tlmm>;
+			interrupts = <67 IRQ_TYPE_LEVEL_LOW>;
+			VA-supply = <&vreg_s4a_1p8>;
+			VP-supply = <&vph_pwr>;
+			cirrus,boost-peak-milliamp = <4000>;
+			cirrus,boost-ind-nanohenry = <1000>;
+			cirrus,boost-cap-microfarad = <15>;
+			cirrus,asp-sdout-hiz = <3>;
+			cirrus,gpio2-src-select = <4>;
+			cirrus,gpio2-output-enable;
+			cirrus,right-channel-amp;
+			cirrus,subsystem-id = "dagu";
+			cirrus,fast-switch = "cirrus/BL-music.txt";
+			/* persist cs35l41_cal_spk4: 6.79 ohm */
+			cirrus,cal-r = <9497>;
+			cirrus,cal-ambient = <23>;
+			cirrus,vpbr-config = <33575690>;
+			sound-name-prefix = "BL";
+			#sound-dai-cells = <1>;
+		};
+	};
+
+	amp_i2c_se3: i2c-gpio-se3 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cs35l41_i2c_se3_default>;
+		sda-gpios = <&tlmm 119 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 120 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+		clock-frequency = <400000>;
+
+		cs35l41_tl: speaker-amp@41 {
+			compatible = "cirrus,cs35l41";
+			reg = <0x41>;
+			reset-gpios = <&tlmm 78 GPIO_ACTIVE_HIGH>;
+			interrupt-parent = <&tlmm>;
+			interrupts = <92 IRQ_TYPE_LEVEL_LOW>;
+			VA-supply = <&vreg_s4a_1p8>;
+			VP-supply = <&vph_pwr>;
+			cirrus,boost-peak-milliamp = <4000>;
+			cirrus,boost-ind-nanohenry = <1000>;
+			cirrus,boost-cap-microfarad = <15>;
+			cirrus,asp-sdout-hiz = <3>;
+			cirrus,gpio2-src-select = <4>;
+			cirrus,gpio2-output-enable;
+			cirrus,subsystem-id = "dagu";
+			cirrus,fast-switch = "cirrus/TL-music.txt";
+			/* persist cs35l41_cal_spk1: 6.81 ohm */
+			cirrus,cal-r = <9524>;
+			cirrus,cal-ambient = <23>;
+			cirrus,vpbr-config = <33575689>;
+			sound-name-prefix = "TL";
+			#sound-dai-cells = <1>;
+		};
+
+		cs35l41_tr: speaker-amp@43 {
+			compatible = "cirrus,cs35l41";
+			reg = <0x43>;
+			reset-gpios = <&tlmm 144 GPIO_ACTIVE_HIGH>;
+			interrupt-parent = <&tlmm>;
+			interrupts = <129 IRQ_TYPE_LEVEL_LOW>;
+			VA-supply = <&vreg_s4a_1p8>;
+			VP-supply = <&vph_pwr>;
+			cirrus,boost-peak-milliamp = <4000>;
+			cirrus,boost-ind-nanohenry = <1000>;
+			cirrus,boost-cap-microfarad = <15>;
+			cirrus,asp-sdout-hiz = <3>;
+			cirrus,gpio2-src-select = <4>;
+			cirrus,gpio2-output-enable;
+			cirrus,subsystem-id = "dagu";
+			cirrus,fast-switch = "cirrus/TR-music.txt";
+			/* persist cs35l41_cal_spk2: 6.89 ohm */
+			cirrus,cal-r = <9632>;
+			cirrus,cal-ambient = <23>;
+			cirrus,vpbr-config = <33575689>;
+			sound-name-prefix = "TR";
+			#sound-dai-cells = <1>;
+		};
+	};
+
+	/*
+	 * Dual BQ27Z561 (CAF qupv3_se0 slave + se13 master). GENI I2C hangs
+	 * this QHEE — bit-bang the same pads as sm8250.dtsi qup_i2c0/13.
+	 * Dump charge-full-design = 5000000 uAh per cell.
+	 */
+	fg_i2c_se0: i2c-gpio-se0 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&fg_i2c_se0_default>;
+		sda-gpios = <&tlmm 28 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 29 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <20>;
+		clock-frequency = <100000>;
+
+		fg_slave: fuel-gauge-r@55 {
+			compatible = "ti,bq27z561";
+			reg = <0x55>;
+			monitored-battery = <&battery_r>;
+		};
+	};
+
+	fg_i2c_se13: i2c-gpio-se13 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&fg_i2c_se13_default>;
+		sda-gpios = <&tlmm 36 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 37 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <20>;
+		clock-frequency = <100000>;
+
+		fg_master: fuel-gauge-l@55 {
+			compatible = "ti,bq27z561";
+			reg = <0x55>;
+			monitored-battery = <&battery_l>;
+		};
+	};
+
+	/* BQ25970 master CAF qupv3_se15 @66, IRQ GPIO68. */
+	chg_i2c_se15: i2c-gpio-se15 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&chg_i2c_se15_default>;
+		sda-gpios = <&tlmm 44 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 45 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		clock-frequency = <400000>;
+
+		charger-pump-master@66 {
+			compatible = "ti,bq25970";
+			reg = <0x66>;
+			interrupt-parent = <&tlmm>;
+			interrupts = <68 IRQ_TYPE_EDGE_FALLING>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&bq2597x_master_int_default>;
+			ti,bq2597x,master;
+		};
+	};
+
+	/* BQ25970 slave CAF qupv3_se16 @66. */
+	chg_i2c_se16: i2c-gpio-se16 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&chg_i2c_se16_default>;
+		sda-gpios = <&tlmm 48 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 49 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		clock-frequency = <400000>;
+
+		charger-pump-slave@66 {
+			compatible = "ti,bq25970";
+			reg = <0x66>;
+		};
+	};
+
+	/* IDT P9418 wireless CAF qupv3_se8 @3b, IRQ GPIO113. */
+	wls_i2c_se8: i2c-gpio-se8 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&wls_i2c_se8_default>;
+		sda-gpios = <&tlmm 24 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 25 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		clock-frequency = <400000>;
+
+		wireless-charger@3b {
+			compatible = "idt,p9418";
+			reg = <0x3b>;
+			interrupt-parent = <&tlmm>;
+			interrupts = <113 IRQ_TYPE_EDGE_FALLING>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&p9418_int_default>;
+			enable-gpios = <&tlmm 47 GPIO_ACTIVE_HIGH>;
+			det-gpios = <&tlmm 145 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	/*
+	 * Dual KTZ8866: CAF qupv3_se11 (gpio60/61) + se9 (gpio125/126).
+	 * GENI i2c9/i2c11 would geni_se_init-hang this QHEE. Bit-bang.
+	 * Do not bind enable-gpios (GPIO139): panel owns HWEN.
+	 */
+	ktz_i2c_se11: i2c-gpio-se11 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ktz_i2c_se11_default>;
+		sda-gpios = <&tlmm 60 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 61 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		clock-frequency = <400000>;
+
+		ktz8866_a: backlight@11 {
+			compatible = "kinetic,ktz8866";
+			reg = <0x11>;
+			vddpos-supply = <&bl_vddpos_5p5>;
+			vddneg-supply = <&bl_vddneg_5p5>;
+			current-num-sinks = <5>;
+			kinetic,internal;
+		};
+	};
+
+	ktz_i2c_se9: i2c-gpio-se9 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ktz_i2c_se9_default>;
+		sda-gpios = <&tlmm 125 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 126 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		clock-frequency = <400000>;
+
+		ktz8866_b: backlight@11 {
+			compatible = "kinetic,ktz8866";
+			reg = <0x11>;
+			vddpos-supply = <&bl_vddpos_5p5>;
+			vddneg-supply = <&bl_vddneg_5p5>;
+			current-num-sinks = <5>;
+			kinetic,internal;
+		};
+	};
+
+	/*
+	 * Nanosic 803 keyboard MCU. CAF qupv3_se2_i2c @ 0x988000 / 0x4c,
+	 * pins gpio115/116 function qup2. GENI i2c2 is the same SE as uart2
+	 * and geni_se_init hangs this QHEE — bit-bang the dump pads.
+	 * IRQ GPIO83 falling, wakeup GPIO46 rising, vdd 127, reset 141,
+	 * sleep 155. Hall GPIO110/121 stay on gpio_keys.
+	 */
+	kb_i2c_se2: i2c-gpio-se2 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&kb_i2c_se2_default>;
+		sda-gpios = <&tlmm 115 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 116 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+		clock-frequency = <400000>;
+
+		keyboard@4c {
+			compatible = "nanosic,803";
+			reg = <0x4c>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&nanosic_gpio_default>;
+			interrupt-parent = <&tlmm>;
+			interrupts = <83 IRQ_TYPE_EDGE_FALLING>;
+			reset-gpios = <&tlmm 141 GPIO_ACTIVE_HIGH>;
+			status-gpios = <&tlmm 46 GPIO_ACTIVE_HIGH>;
+			vdd-gpios = <&tlmm 127 GPIO_ACTIVE_HIGH>;
+			sleep-gpios = <&tlmm 155 GPIO_ACTIVE_HIGH>;
+			wakeup-source;
+		};
+	};
+
+	/*
+	 * CAF dual-FuelGauge: weighted SoC, max(V), sum(I/charge).
+	 * Do not request fg-master-disable-gpio (117) / fg-slave-disable-gpio
+	 * (91) — CAF uses them to isolate a cell; hogging would drop a pack.
+	 */
+	dual-fuel-gauge {
+		compatible = "xiaomi,dual-fuel-gauge";
+		master-fg = <&fg_master>;
+		slave-fg = <&fg_slave>;
+	};
+
+	/* Dump ncp3902 GPIO152: wired OTG / reverse-wireless VBUS path. */
+	otg_vbus_boost: otg-vbus-boost-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "otg_vbus_boost";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpio = <&tlmm 152 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		vin-supply = <&pm8150b_vbus>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&otg_vbus_boost_default>;
+	};
+
+	/* Userspace: echo enabled > /sys/devices/platform/otg-vbus-export/state */
+	otg-vbus-export {
+		compatible = "regulator-output";
+		vout-supply = <&otg_vbus_boost>;
+	};
+
+	/* Dump wcd938x_reset on GPIO32; supplies match sm8250-mtp. */
+	wcd938x: audio-codec {
+		compatible = "qcom,wcd9385-codec";
+		reset-gpios = <&tlmm 32 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&wcd938x_reset_default>;
+		vdd-buck-supply = <&vreg_s4a_1p8>;
+		vdd-rxtx-supply = <&vreg_s4a_1p8>;
+		vdd-io-supply = <&vreg_s4a_1p8>;
+		vdd-mic-bias-supply = <&vreg_bob>;
+		qcom,micbias1-microvolt = <2750000>;
+		qcom,micbias2-microvolt = <2750000>;
+		qcom,micbias3-microvolt = <2750000>;
+		qcom,micbias4-microvolt = <2750000>;
+		qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
+		qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
+		qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
+		qcom,rx-device = <&wcd_rx>;
+		qcom,tx-device = <&wcd_tx>;
+		#sound-dai-cells = <1>;
+	};
+
+	/* CAF camera_wide/front_vana_ldo: BOB + GPIO31 / GPIO84, 2.8 V. */
+	camera_wide_vana: camera-wide-vana-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_wide_vana";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 31 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <135>;
+		vin-supply = <&vreg_bob>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_wide_vana_default>;
+	};
+
+	camera_front_vana: camera-front-vana-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_front_vana";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 84 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <135>;
+		vin-supply = <&vreg_bob>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_front_vana_default>;
+	};
+};
+
+/*
+ * CAF dagu: GPIO 130/131 = LCD bias ENP/ENN (±5.5 V), not WLED HWEN.
+ * elish-common names them bl_vddpos/bl_vddneg with regulator-boot-on.
+ */
+&bl_vddpos_5p5 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&display_enp_default>;
+	regulator-always-on;
+};
+
+&bl_vddneg_5p5 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&display_enn_default>;
+	regulator-always-on;
+};
+
+&tlmm {
+	display_enp_default: display-enp-default-state {
+		pins = "gpio130";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+		output-high;
+	};
+
+	display_enn_default: display-enn-default-state {
+		pins = "gpio131";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+		output-high;
+	};
+
+	/* CAF qcom,platform-tp-reset-gpio = GPIO 100, driven high in power_on. */
+	tp_reset_default: tp-reset-default-state {
+		pins = "gpio100";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+		output-high;
+	};
+
+	/*
+	 * CAF himax,irq-gpio = GPIO 39 (0x2008 = input / pull-up).
+	 * Active-low until event 0x30 is read; in-cell HX83121 shares the
+	 * panel, not a second reset.
+	 */
+	himax_irq_default: himax-irq-default-state {
+		pins = "gpio39";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-up;
+		input-enable;
+	};
+
+	/*
+	 * QUP0 SE4 SPI pads as GPIO. GENI MMIO hangs this QHEE, so Himax
+	 * rides spi-gpio on the same CAF pins (MOSI/MISO/CLK/CS).
+	 */
+	himax_spi_gpio_default: himax-spi-gpio-default-state {
+		pins = "gpio8", "gpio9", "gpio10", "gpio11";
+		function = "gpio";
+		drive-strength = <6>;
+		bias-disable;
+	};
+
+	/* Dump qupv3_se1_i2c: gpio4/5 function qup1. Bit-bang as GPIO. */
+	cs35l41_i2c_se1_default: cs35l41-i2c-se1-default-state {
+		pins = "gpio4", "gpio5";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cs35l41_i2c_se3_default: cs35l41-i2c-se3-default-state {
+		pins = "gpio119", "gpio120";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/* CAF qupv3_se0/13/15/16/8 I2C pads as GPIO (no GENI MMIO). */
+	fg_i2c_se0_default: fg-i2c-se0-default-state {
+		pins = "gpio28", "gpio29";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	fg_i2c_se13_default: fg-i2c-se13-default-state {
+		pins = "gpio36", "gpio37";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	chg_i2c_se15_default: chg-i2c-se15-default-state {
+		pins = "gpio44", "gpio45";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	chg_i2c_se16_default: chg-i2c-se16-default-state {
+		pins = "gpio48", "gpio49";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	wls_i2c_se8_default: wls-i2c-se8-default-state {
+		pins = "gpio24", "gpio25";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	ktz_i2c_se11_default: ktz-i2c-se11-default-state {
+		pins = "gpio60", "gpio61";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	ktz_i2c_se9_default: ktz-i2c-se9-default-state {
+		pins = "gpio125", "gpio126";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/* Dump qupv3_se2_i2c: gpio115/116 function qup2. Bit-bang as GPIO. */
+	kb_i2c_se2_default: kb-i2c-se2-default-state {
+		pins = "gpio115", "gpio116";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/*
+	 * CAF nanosic_keyboard_mcu: gpio46/141/127 default, gpio155 sleep,
+	 * irq GPIO83. Keep the MCU awake (sleep driven high in the driver).
+	 */
+	nanosic_gpio_default: nanosic-gpio-default-state {
+		ctrl-pins {
+			pins = "gpio127", "gpio141", "gpio155";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		irq-pins {
+			pins = "gpio46", "gpio83";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+			input-enable;
+		};
+	};
+
+	bq2597x_master_int_default: bq2597x-master-int-default-state {
+		pins = "gpio68";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+		input-enable;
+	};
+
+	p9418_int_default: p9418-int-default-state {
+		pins = "gpio113";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+		input-enable;
+	};
+
+	otg_vbus_boost_default: otg-vbus-boost-default-state {
+		pins = "gpio152";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+		output-low;
+	};
+
+	/*
+	 * CAF vbus_disable GPIO74: high = cut USB VBUS into SMB5.
+	 * Hold low so 5 V / PD input can reach the charger.
+	 */
+	vbus_path_enable: vbus-path-enable-state {
+		pins = "gpio74";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+		output-low;
+	};
+
+	hall_pins: hall-default-state {
+		pins = "gpio110", "gpio121";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+		input-enable;
+	};
+
+	wcd938x_reset_default: wcd938x-reset-default-state {
+		pins = "gpio32";
+		function = "gpio";
+		drive-strength = <16>;
+		output-high;
+	};
+
+	/*
+	 * CAF tert_tdm: SCK gpio133 mi2s2_sck, WS gpio135 mi2s2_ws,
+	 * DIN gpio134 mi2s2_data0 (SoC input), DOUT gpio137 mi2s2_data1
+	 * (SoC → CS35L41). MI2S 2ch 默认走 SD0，数据会打到 DIN，功放无声。
+	 */
+	tert_mi2s_dagu: tert-mi2s-dagu-state {
+		sck-pins {
+			pins = "gpio133";
+			function = "mi2s2_sck";
+			drive-strength = <8>;
+			bias-disable;
+			output-high;
+		};
+
+		data0-pins {
+			pins = "gpio134";
+			function = "mi2s2_data0";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		ws-pins {
+			pins = "gpio135";
+			function = "mi2s2_ws";
+			drive-strength = <8>;
+			bias-disable;
+			output-high;
+		};
+
+		data1-pins {
+			pins = "gpio137";
+			function = "mi2s2_data1";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
+
+	cam_mclk0_default: cam-mclk0-default-state {
+		pins = "gpio94";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-disable;
+	};
+
+	cam_mclk3_default: cam-mclk3-default-state {
+		pins = "gpio97";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-disable;
+	};
+
+	cam_wide_reset_default: cam-wide-reset-default-state {
+		pins = "gpio93";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_front_reset_default: cam-front-reset-default-state {
+		pins = "gpio109";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_wide_vana_default: cam-wide-vana-default-state {
+		pins = "gpio31";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_front_vana_default: cam-front-vana-default-state {
+		pins = "gpio84";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};
+
+/*
+ * simplefb on ABL's splash buffer is a dead end now that apps_smmu is back for
+ * USB: arm_smmu_device_reset() disables every boot context bank, QHEE handed
+ * the display stream over as TRANS ("preserved 0 boot mappings"), and MDP's
+ * scanout stops resolving 26ms after fbcon takes over — black panel, backlight
+ * still on. DRM_MSM drives MDSS through its own iommus instead, and DRM fbdev
+ * gets fbcon. cont_splash_region keeps no-map so ABL can scan out until then.
+ */
+/delete-node/ &framebuffer;
+
+/*
+ * qcom,kpss-wdt caps BITE_TIME at 20 bits, so 0xfffff / 32764 Hz = 32 s is
+ * the ceiling; 40 was rejected as "out of range" and silently fell back.
+ */
+&{/soc@0/watchdog@17c10000} {
+	timeout-sec = <30>;
+};
+
+/*
+ * P0 USB: PID1 proven (PID1-ping bounced to fastboot ~6s).
+ * HS-only peripheral g_serial (0525:a4a7 / ttyGS0), no role-switch,
+ * Matches sm8250-xiaomi-dagu-full.dts recipe.
+ *
+ * icc paths deleted: the BCM voter's rpmh_write_batch() never gets its AMC
+ * completion on this QHEE chain (-ETIMEDOUT), and dwc3_qcom_probe() tears
+ * the core back down on that error, so no UDC ever appears. of_icc_get()
+ * returns NULL when "interconnects" is absent, so the driver just skips the
+ * vote — ABL already trained this NoC path to run fastboot over it.
+ */
+&usb_1 {
+	qcom,select-utmi-as-pipe-clk;
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	status = "okay";
+};
+
+&usb_1_hsphy {
+	status = "okay";
+};
+
+&usb_1_qmpphy {
+	status = "disabled";
+};
+
+/*
+ * Type-C TCPM presents Rd and does PD. Do NOT reconnect the USB graph —
+ * waiting on pm8150b_typec previously left DWC3 in otg with no UDC.
+ * DWC3 stays peripheral via role-switch-default-mode below.
+ */
+&pm8150b_typec {
+	vdd-pdphy-supply = <&vreg_l2a_3p1>;
+	status = "okay";
+};
+
+/*
+ * OTG: dwc3 provides usb-role-switch, default peripheral so g_serial
+ * (0525:a4a7) still comes up. Do NOT wire the Type-C graph — waiting on
+ * pm8150b_typec previously left DWC3 in otg with no UDC.
+ * Host: echo host > /sys/class/usb_role/<name>/role (use Wi-Fi SSH).
+ */
+&usb_1_dwc3 {
+	dr_mode = "otg";
+	role-switch-default-mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+	usb-role-switch;
+};
+
+&pm8150b_vbus {
+	regulator-min-microamp = <500000>;
+	regulator-max-microamp = <3000000>;
+	status = "okay";
+};
+
+/*
+ * CAF qcom,qpnp-smb5 @ SID 2. Mainline qcom_smbx is SMB2 (25 mA ICL /
+ * 7.5 mV float) — wrong for PM8150B. Overlay uses 50 mA / 10 mV.
+ */
+&{/soc@0/spmi@c440000/pmic@2} {
+	charger@1000 {
+		compatible = "qcom,pm8150b-charger-dagu";
+		reg = <0x1000>;
+		interrupts = <0x2 0x13 0x4 IRQ_TYPE_EDGE_BOTH>,
+			     <0x2 0x12 0x2 IRQ_TYPE_EDGE_BOTH>,
+			     <0x2 0x16 0x1 IRQ_TYPE_EDGE_RISING>,
+			     <0x2 0x13 0x6 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "usb-plugin", "bat-ov", "wdog-bark",
+				  "usbin-icl-change";
+		pinctrl-names = "default";
+		pinctrl-0 = <&vbus_path_enable>;
+		monitored-battery = <&battery_l>;
+		status = "okay";
+	};
+};
+
+/* P0 bisect: off until PID1 proven — I2C wait can block probe queue. */
+&i2c17 {
+	status = "disabled";
+};
+
+/* L81A dual-DPHY 4-lane (not elish NT36523 CPHY — that SErrors). */
+&apps_rsc {
+	regulators-0 {
+		vreg_l7a_1p83: ldo7 {
+			regulator-name = "vreg_l7a_1p83";
+			regulator-min-microvolt = <1832000>;
+			regulator-max-microvolt = <1832000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+
+	/*
+	 * Dump rpmh ldoc1/ldoc2/ldoc3 = CAF pm8150a_l1/l2/l3 (PM8150L, pmic-id
+	 * "c"). elish-common leaves L2/L3 unused because elish cameras sit on
+	 * pm8009. Do NOT retune vreg_l3a_0p9 — that rail is CX and setting it
+	 * to 1.104 V hard-resets this board to 18d1:d00d.
+	 */
+	regulators-1 {
+		vreg_l2c_1p15: ldo2 {
+			regulator-name = "vreg_l2c_1p15";
+			regulator-min-microvolt = <1152000>;
+			regulator-max-microvolt = <1152000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l3c_1p1: ldo3 {
+			regulator-name = "vreg_l3c_1p1";
+			regulator-min-microvolt = <1104000>;
+			regulator-max-microvolt = <1104000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+
+	/*
+	 * dagu is not stuffed with pm8009 (elish's camera PMIC): RPMh has no
+	 * "smpf1" resource and SPMI reads to usid 0xa/0xb all time out. Cut the
+	 * rpmh-regulator node here and both spmi devices below.
+	 */
+	regulators-2 {
+		status = "disabled";
+	};
+};
+
+&{/soc@0/spmi@c440000/pmic@a} {
+	status = "disabled";
+};
+
+&{/soc@0/spmi@c440000/pmic@b} {
+	status = "disabled";
+};
+
+/* &gpu/&gmu need SM_GPUCC_8250; zap is dump a650_zap.mbn. */
+&adreno_smmu {
+	status = "okay";
+};
+
+/*
+ * icc paths deleted for the same reason as usb_1: msm_mdss asks for mdp0-mem /
+ * mdp1-mem, the BCM voter turns that into rpmh_write_batch(), and it never gets
+ * its AMC completion here. ABL already trained MASTER_MDP_PORT0/1 for the
+ * splash, so skipping the vote is fine.
+ */
+&mdss {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	status = "okay";
+};
+/*
+ * apps_smmu back on for USB. With it off, QHEE's leftover stream config
+ * stays in charge of DWC3's DMA: the gadget pulls up (host logs a HS
+ * device) but never answers EP0 — "Device not responding to setup
+ * address", error -71 — and the unread event buffer storms the core IRQ
+ * until the KPSS WDT resets us. GPI-DMA / QUP stay off (Route-2 bisect).
+ */
+
+/*
+ * elish-common sets qcom,sync-dual-dsi. Mainline then skips DSI_0 TX and
+ * only broadcasts from DSI_1. Dual write already talks to both hosts.
+ */
+&mdss_dsi0 {
+	/delete-property/ qcom,sync-dual-dsi;
+	status = "okay";
+};
+
+&mdss_dsi1 {
+	/delete-property/ qcom,sync-dual-dsi;
+	status = "okay";
+};
+
+&mdss_dsi0_phy {
+	phy-type = <PHY_TYPE_DPHY>;
+	status = "okay";
+};
+
+&mdss_dsi1_phy {
+	phy-type = <PHY_TYPE_DPHY>;
+	status = "okay";
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi1_out {
+	data-lanes = <0 1 2 3>;
+};
+
+&display_panel {
+	compatible = "xiaomi,dagu-l81a";
+	pinctrl-names = "default";
+	pinctrl-0 = <&tp_reset_default>;
+	vddio-supply = <&vreg_l7a_1p83>;
+	enp-supply = <&bl_vddpos_5p5>;
+	enn-supply = <&bl_vddneg_5p5>;
+	reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
+	tp-reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
+	/* Dual KTZ HWEN. ABL leaves it high; never drop it this session. */
+	hwen-gpios = <&tlmm 139 GPIO_ACTIVE_HIGH>;
+	backlight = <&ktz8866_a>;
+	backlight-aux = <&ktz8866_b>;
+	/delete-property/ rotation;
+	status = "okay";
+};
+
+/* P0 bisect: KTZ8866 I2C can hang probe if bias rails are not ready. */
+&backlight {
+	status = "disabled";
+};
+
+&i2c9 {
+	status = "disabled";
+};
+
+&gpu {
+	status = "okay";
+};
+
+&gmu {
+	status = "okay";
+};
+
+/*
+ * CPU interconnects pull gem_noc/epss_l3. INTERCONNECT_QCOM_SM8250 is off
+ * (BCM voter hangs this QHEE), and of_icc_get() then EPROBE_DEFER inside
+ * _allocate_opp_table(), so even LUT-only dev_pm_opp_add() cannot create a
+ * table. Drop the paths; EPSS still programs frequency in the HW LUT.
+ */
+&cpu0 { /delete-property/ interconnects; };
+&cpu1 { /delete-property/ interconnects; };
+&cpu2 { /delete-property/ interconnects; };
+&cpu3 { /delete-property/ interconnects; };
+&cpu4 { /delete-property/ interconnects; };
+&cpu5 { /delete-property/ interconnects; };
+&cpu6 { /delete-property/ interconnects; };
+&cpu7 { /delete-property/ interconnects; };
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8250/xiaomi/dagu/a650_zap.mbn";
+};
+
+/*
+ * elish-common already sets vcc/vccq and status=okay. Drop interconnects so
+ * ufshcd's of_icc_get() skips the BCM voter (same QHEE AMC timeout as USB/MDSS).
+ * PID1 stays on ramdisk forever without a block device.
+ *
+ * Keep operating-points-v2: ufshcd_init_clocks() needs it to set 300 MHz
+ * and vote rpmhpd nom. Deleting the OPP table left GCC clocks at the
+ * default rate, UFS never enumerated, ramdisk logged
+ * "userdata partition not found".
+ *
+ * Runtime CLK_SCALING stays off (ufs-qcom overlay): periodic devfreq
+ * down_write vs exception_event QUERY_ATTR is the hung_task panic.
+ */
+&ufs_mem_hc {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	status = "okay";
+};
+&ufs_mem_phy { status = "okay"; };
+&pcie0 { status = "okay"; };
+&pcie0_phy { status = "okay"; };
+&pcie1 { status = "disabled"; };
+&pcie2 { status = "disabled"; };
+
+&pcieport0 {
+	wifi@0 {
+		/* board.bin = dump bd_l81a.elf; do not use board-2.bin */
+		/delete-property/ qcom,calibration-variant;
+		/* Station MAC: dts/local-addresses.dtsi (gitignored, from persist). */
+	};
+};
+
+&adsp {
+	firmware-name = "qcom/sm8250/xiaomi/dagu/adsp.mbn";
+	status = "okay";
+};
+
+/*
+ * Keep qcom,protection-domain so APR waits for avs/audio. Kernel
+ * CONFIG_QCOM_PD_MAPPER + CONFIG_QRTR_SMD (IPCRTR) serve SERVREG / TMS
+ * so audio_pd can come up. Deleting protection-domain registers AFE too
+ * early and every AFE opcode times out.
+ */
+
+/* CAF cci0/1_active: 4 mA pull-up on gpio101-108. */
+&cci0_i2c0_default { drive-strength = <4>; };
+&cci0_i2c1_default { drive-strength = <4>; };
+&cci1_i2c0_default { drive-strength = <4>; };
+&cci1_i2c1_default { drive-strength = <4>; };
+
+&q6asmdai {
+	dai@0 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
+	};
+
+	dai@1 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
+	};
+};
+
+/*
+ * CAF qcom,msm-dai-tdm-tert-rx: short sync, internal, invert-sync,
+ * 1-BCLK data delay (DSP_A), MSB align. Slot/BCLK 由 machine 配成
+ * 8 slot × 32 bit × 48 k = 12.288 MHz（DT 里 0x177000 只是 mixer 覆盖前的默认值）。
+ */
+&q6afedai {
+	dai@56 {
+		reg = <TERTIARY_TDM_RX_0>;
+		qcom,tdm-sync-mode = <0>;
+		qcom,tdm-sync-src = <1>;
+		qcom,tdm-data-out = <0>;
+		qcom,tdm-invert-sync = <1>;
+		qcom,tdm-data-delay = <1>;
+		qcom,tdm-data-align = <0>;
+	};
+
+	dai@110 {
+		reg = <VA_CODEC_DMA_TX_0>;
+	};
+
+	dai@120 {
+		reg = <TX_CODEC_DMA_TX_3>;
+	};
+};
+
+&cdsp { status = "disabled"; };
+
+&slpi {
+	firmware-name = "qcom/sm8250/xiaomi/dagu/slpi.mbn";
+	status = "disabled";
+};
+
+&venus {
+	status = "okay";
+	firmware-name = "qcom/sm8250/xiaomi/dagu/venus.mdt";
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+};
+
+&camcc { status = "okay"; };
+
+&cci0 {
+	status = "okay";
+};
+
+&cci0_i2c0 {
+	clock-frequency = <400000>;
+};
+
+&cci0_i2c1 {
+	clock-frequency = <400000>;
+};
+
+&cci1 {
+	status = "okay";
+};
+
+&cci1_i2c0 {
+	clock-frequency = <400000>;
+};
+
+&cci1_i2c1 {
+	clock-frequency = <400000>;
+};
+
+/*
+ * CAF: back_main s5kjn1 csiphy1 / CCI0 I2C0 @0x10, reset GPIO93, MCLK GPIO94.
+ * Stock Android clock-rates = 19.2 MHz (not 24). Preview 4080x3060 GBRG 10-bit
+ * D-PHY 4-lane (live CSIPHY 0x0800=0x02 / 0x0814=0xD5, 0x0114=0x0300).
+ * VIO ldoc1 (L1C 1.8 V), AVDD GPIO31 2.8 V, VDIG ldoc3 (L3C 1.104 V).
+ * Power: VIO → VANA → VDIG (CAF). VDIG before AVDD pins the array at OB.
+ */
+&cci0_i2c0 {
+	s5kjn1: camera@10 {
+		compatible = "samsung,s5kjn1";
+		reg = <0x10>;
+		clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		clock-names = "mclk";
+		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		/* Stock Android DT clock-rates = 0x0124f800 = 19.2 MHz. */
+		assigned-clock-rates = <19200000>;
+		reset-gpios = <&tlmm 93 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mclk0_default &cam_wide_reset_default>;
+		vdda-supply = <&camera_wide_vana>;
+		vddio-supply = <&vreg_l1c_1p8>;
+		vddd-supply = <&vreg_l3c_1p1>;
+		/*
+		 * CAF qcom,cam-sensor@0: roll=90 yaw=180 (back).
+		 * 180° is sensor HV-flip at 0x0101, pinned in the driver so
+		 * libcamera cannot clear it and software-Rot180 a 12MP RAW.
+		 */
+		orientation = <1>; /* V4L2_CAMERA_ORIENTATION_BACK */
+		rotation = <180>;
+
+		port {
+			s5kjn1_ep: endpoint {
+				/*
+				 * Live Android preview MMIO is CAF 1.2.1 2PH
+				 * D-PHY 4-lane (csiphy 0x0800=0x02, 0x0814=0xD5).
+				 * CamX 0x0114=0x0301 C-PHY blacks CSID/VFE.
+				 */
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <700000000>;
+				remote-endpoint = <&csiphy1_ep>;
+			};
+		};
+	};
+};
+
+/*
+ * CAF dtsi says CCI1 I2C1 @0x1a; this silicon ACKs chip id 0x0596 at 0x10.
+ */
+&cci1_i2c1 {
+	imx596: camera@10 {
+		compatible = "sony,imx596";
+		reg = <0x10>;
+		clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		clock-names = "mclk";
+		assigned-clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		assigned-clock-rates = <19200000>;
+		reset-gpios = <&tlmm 109 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mclk3_default &cam_front_reset_default>;
+		vdda-supply = <&camera_front_vana>;
+		vddio-supply = <&vreg_l1c_1p8>;
+		vddd-supply = <&vreg_l2c_1p15>;
+		/*
+		 * CAF qcom,cam-sensor@2: roll=270 yaw=0 (front).
+		 * GNOME Snapshot preview is inverted at rotation=0; 180
+		 * matches the rear HV-flip mount in the landscape widget.
+		 */
+		orientation = <0>; /* V4L2_CAMERA_ORIENTATION_FRONT */
+		rotation = <180>;
+
+		port {
+			imx596_ep: endpoint {
+				data-lanes = <1 2 3 4>;
+				/* CamX OP PLL: 19.2 MHz / 3 * 0xD4 = 1.3568 Gbps; D-PHY DDR clock. */
+				link-frequencies = /bits/ 64 <678400000>;
+				remote-endpoint = <&csiphy4_ep>;
+			};
+		};
+	};
+};
+
+&camss {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/* Same rails as UFS PHY / elish; without these CAMSS uses dummy vdda. */
+	vdda-phy-supply = <&vreg_l5a_0p88>;
+	vdda-pll-supply = <&vreg_l9a_1p2>;
+	status = "okay";
+
+	ports {
+		port@1 {
+			reg = <1>;
+			csiphy1_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&s5kjn1_ep>;
+			};
+		};
+
+		port@4 {
+			reg = <4>;
+			csiphy4_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&imx596_ep>;
+			};
+		};
+	};
+};
+
+&rxmacro { status = "okay"; };
+&txmacro { status = "okay"; };
+
+/*
+ * CAF dagu wires three DMIC pairs on LPASS TLMM: dmic01 gpio6/7,
+ * dmic23 gpio8/9, dmic45 gpio12/13 (qcom,cdc-dmic{01,23,45}-gpios).
+ * Only dmic01_active exists in sm8250.dtsi, so add the other two.
+ */
+&lpass_tlmm {
+	dmic23_active: dmic23-active-state {
+		clk-pins {
+			pins = "gpio8";
+			function = "dmic2_clk";
+			drive-strength = <8>;
+			output-high;
+		};
+
+		data-pins {
+			pins = "gpio9";
+			function = "dmic2_data";
+			drive-strength = <8>;
+		};
+	};
+
+	dmic45_active: dmic45-active-state {
+		clk-pins {
+			pins = "gpio12";
+			function = "dmic3_clk";
+			drive-strength = <8>;
+			output-high;
+		};
+
+		data-pins {
+			pins = "gpio13";
+			function = "dmic3_data";
+			drive-strength = <8>;
+		};
+	};
+};
+
+/*
+ * Without dmic-sample-rate the driver falls back to CLK_DIV_2 and the
+ * DMICs stay silent. 9.6 MHz / 600 kHz = div 16, matching both CAF
+ * (qcom,va-dmic-sample-rate) and qrb5165-rb5.
+ */
+&vamacro {
+	pinctrl-names = "default";
+	pinctrl-0 = <&dmic01_active>, <&dmic23_active>, <&dmic45_active>;
+	vdd-micb-supply = <&vreg_s4a_1p8>;
+	qcom,dmic-sample-rate = <600000>;
+	status = "okay";
+};
+
+&swr1 {
+	status = "okay";
+
+	wcd_rx: wcd9385-rx@0,4 {
+		compatible = "sdw20217010d00";
+		reg = <0 4>;
+		qcom,rx-port-mapping = <1 2 3 4 5>;
+	};
+};
+
+&swr2 {
+	status = "okay";
+
+	wcd_tx: wcd9385-tx@0,3 {
+		compatible = "sdw20217010d00";
+		reg = <0 3>;
+		qcom,tx-port-mapping = <2 3 4 5>;
+	};
+};
+
+/*
+ * CAF kona-asoc-snd: tert TDM to four CS35L41, WCD938x analog mics,
+ * wsa-max-devs = 0. Routing from dagu-audio-overlay.dtsi / sm8250-mtp.dts.
+ */
+&sound {
+	compatible = "qcom,sm8250-sndcard";
+	model = "Xiaomi-dagu-CS35L41-WCD9385";
+	pinctrl-names = "default";
+	pinctrl-0 = <&tert_mi2s_dagu>;
+	/*
+	 * CS35L41 AMP Playback stays Off unless a card-level SPK sink
+	 * completes the DAPM path. Keep Headphone/Mic Jack names for
+	 * qcom_snd_wcd_jack_setup.
+	 */
+	widgets =
+		"Speaker", "TL Speaker",
+		"Speaker", "TR Speaker",
+		"Speaker", "BL Speaker",
+		"Speaker", "BR Speaker",
+		"Headphone", "Headphone Jack",
+		"Microphone", "Mic Jack";
+	audio-routing =
+		"TL Speaker", "TL SPK",
+		"TR Speaker", "TR SPK",
+		"BL Speaker", "BL SPK",
+		"BR Speaker", "BR SPK",
+		"AMIC1", "MIC BIAS1",
+		"AMIC2", "MIC BIAS2",
+		"AMIC3", "MIC BIAS4",
+		"AMIC4", "MIC BIAS4",
+		"AMIC5", "MIC BIAS3",
+		"TX SWR_ADC0", "ADC1_OUTPUT",
+		"TX SWR_ADC1", "ADC2_OUTPUT",
+		"TX SWR_ADC2", "ADC3_OUTPUT",
+		"TX SWR_ADC3", "ADC4_OUTPUT",
+		/*
+		 * dagu's built-in mics are the six VA DMICs, not the AMICs
+		 * (those serve the headset). Bias them off vdd-micb as
+		 * qrb5165-rb5 does: routing them to the wcd938x "VA MIC
+		 * BIAS*" widgets instead (as CAF does) hangs userspace
+		 * during boot.
+		 */
+		"VA DMIC0", "vdd-micb",
+		"VA DMIC1", "vdd-micb",
+		"VA DMIC2", "vdd-micb",
+		"VA DMIC3", "vdd-micb",
+		"VA DMIC4", "vdd-micb",
+		"VA DMIC5", "vdd-micb";
+	status = "okay";
+
+	mm1-dai-link {
+		link-name = "MultiMedia1";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+		};
+	};
+
+	mm2-dai-link {
+		link-name = "MultiMedia2";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
+		};
+	};
+
+	tert-tdm-dai-link {
+		link-name = "Tertiary TDM Playback";
+		cpu {
+			sound-dai = <&q6afedai TERTIARY_TDM_RX_0>;
+		};
+		codec {
+			sound-dai = <&cs35l41_tl 0>, <&cs35l41_tr 0>,
+				    <&cs35l41_bl 0>, <&cs35l41_br 0>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+	};
+
+	wcd-capture-dai-link {
+		link-name = "WCD Capture";
+		cpu {
+			sound-dai = <&q6afedai TX_CODEC_DMA_TX_3>;
+		};
+		codec {
+			sound-dai = <&wcd938x 1>, <&swr2 0>, <&txmacro 0>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+	};
+
+	va-dai-link {
+		link-name = "VA Capture";
+		cpu {
+			sound-dai = <&q6afedai VA_CODEC_DMA_TX_0>;
+		};
+		codec {
+			sound-dai = <&vamacro 0>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+	};
+};
+
+/*
+ * Dump gpio_keys: hall_key GPIO110, hall_key1 GPIO121 (keyboard cover /
+ * folio). Volume Up stays on pm8150 gpio6 from elish-common.
+ */
+&gpio_keys {
+	pinctrl-names = "default";
+	pinctrl-0 = <&vol_up_n>, <&hall_pins>;
+	status = "okay";
+
+	hall-lid {
+		label = "hall_key";
+		gpios = <&tlmm 110 GPIO_ACTIVE_LOW>;
+		linux,input-type = <EV_SW>;
+		linux,code = <SW_LID>;
+		wakeup-source;
+		debounce-interval = <15>;
+	};
+
+	hall-tablet {
+		/* Folio magnet pulls the line low. Unconnected/high = slate. */
+		label = "hall_key1";
+		gpios = <&tlmm 121 GPIO_ACTIVE_HIGH>;
+		linux,input-type = <EV_SW>;
+		linux,code = <SW_TABLET_MODE>;
+		wakeup-source;
+		debounce-interval = <15>;
+	};
+};
+
+&battery_l {
+	charge-full-design-microamp-hours = <5000000>;
+	energy-full-design-microwatt-hours = <19350000>;
+	voltage-min-design-microvolt = <3400000>;
+	voltage-max-design-microvolt = <4450000>;
+};
+
+&battery_r {
+	charge-full-design-microamp-hours = <5000000>;
+	energy-full-design-microwatt-hours = <19350000>;
+	voltage-min-design-microvolt = <3400000>;
+	voltage-max-design-microvolt = <4450000>;
+};
+
+/* Dump qcom,qpnp-flash-led-v2 @d300: flash_0 / torch_0 (channel 0). */
+&pm8150l_flash {
+	status = "okay";
+
+	led-0 {
+		function = LED_FUNCTION_FLASH;
+		color = <LED_COLOR_ID_WHITE>;
+		led-sources = <1>;
+		led-max-microamp = <500000>;
+		flash-max-microamp = <1500000>;
+		flash-max-timeout-us = <1280000>;
+	};
+};
+
+/*
+ * Dump qcom,haptics@c000 on PM8150B SID 3 (LRA, vmax 3600 mV).
+ * Mainline pmi632-vib talks the same 0x46 enable / 0x40 drive regs.
+ */
+&{/soc@0/spmi@c440000/pmic@3} {
+	haptics@c000 {
+		compatible = "qcom,pmi632-vib";
+		reg = <0xc000>;
+	};
+};
+
+&uart6 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/*
+	 * Stock qupfw_a.img. Loader reads this SE node, never &qupv3_id_0.
+	 * qcom,skip-wrapper-fw-init avoids QUPV3_COMMON_CFG writes that hang QHEE.
+	 */
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
+	status = "okay";
+	bluetooth {
+		/*
+		 * Binding: qcom,qca6390-bt.yaml. Elish already has compatible
+		 * + PMU LDOs; restated here so the board file is the source.
+		 * Power enable is qca6390-pmu bt-enable-gpios (GPIO21) via
+		 * pwrseq, not enable-gpios on this node (that would double-drive).
+		 * max-speed matches hci_qca proto oper_speed (3 Mbps). Do not
+		 * set firmware-name: driver loads qca/htbtfw20.tlv + htnv20.bin.
+		 */
+		compatible = "qcom,qca6390-bt";
+		max-speed = <3000000>;
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
+		vddaon-supply = <&vreg_pmu_aon_0p59>;
+		vddbtcmx-supply = <&vreg_pmu_btcmx_0p85>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
+		vddrfa1p7-supply = <&vreg_pmu_rfa_1p7>;
+		/* BD address: dts/local-addresses.dtsi (gitignored, from persist).
+		 * local-bd-address is little-endian. Without a non-zero address
+		 * the controller stays 00:00:00:00:00:00 until btmgmt public-addr.
+		 */
+	};
+};
+
+&i2c0 { status = "disabled"; };
+&i2c11 { status = "disabled"; };
+&i2c13 { status = "disabled"; };
+&gpi_dma1 { status = "disabled"; };
+&gpi_dma2 { status = "disabled"; };
+&qupv3_id_1 { status = "disabled"; };
+&qupv3_id_2 { status = "disabled"; };
+
+/*
+ * GENI QUP0 SE4 stays off: geni_load_se_fw / geni_se_init hang this QHEE.
+ * Himax is on the spi-gpio node in / { himax_spi }.
+ * Wrapper is on for uart6 (QCA6390 BT, SE6). QUPFW loads from uart6's
+ * firmware-name into SE6 only; wrapper CSRs are not written.
+ */
+&gpi_dma0 { status = "disabled"; };
+&qupv3_id_0 { status = "okay"; };
+&spi4 { status = "disabled"; };
+
+&{/qca6390-pmu} {
+	status = "okay";
+};
+
+/*
+ * Must be last: elish-common ends with &usb_1_dwc3_hs_out → pm8150b_hs_in.
+ * Type-C is okay for charging, but keep the USB graph cut so DWC3 does
+ * not wait on TCPM for a UDC (P0 hang). HS gadget stays peripheral.
+ */
+&usb_1_dwc3_hs_out {
+	/delete-property/ remote-endpoint;
+};
+
+&usb_1_dwc3_ss_out {
+	/delete-property/ remote-endpoint;
+};
+
+&pm8150b_hs_in {
+	/delete-property/ remote-endpoint;
+};
+
+&usb_1_qmpphy_usb_ss_in {
+	/delete-property/ remote-endpoint;
+};
+
+#include "local-addresses.dtsi"

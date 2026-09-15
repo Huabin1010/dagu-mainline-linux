@@ -1,0 +1,37 @@
+From: dagu
+Subject: [PATCH] dagu: dri_flush must not block the compositor on throttle_fence
+
+Against Mesa 26.0.8 (Ubuntu libgallium-26.0.8-1ubuntu0.3).
+
+dri_flush() waits OS_TIMEOUT_INFINITE on drawable->throttle_fence
+(previous swap). On dagu that fence is often implicit-synced to the
+scanout BO. gnome-shell main sits in fence_finish / dri_flush for
+65-80 ms inside clutter_frame_clock_dispatch, so the default-context
+page-flip closure (notify_view / maybe_post) cannot run. Flip is on
+time; the next kickoff waits for swap to return.
+
+Zero timeout still entered a userspace wait loop on dagu. NOP the
+fence_finish call; still drop the old fence via fence_reference.
+GPU completion stays on the Cogl sync_fd / KMS path.
+
+Live ELF (objdump-checked, r-xp 0x7ee8ea0000):
+  0x1cf740  mov x3,#-1  ->  mov x3,#0
+  0x1cf74c  blr x4      ->  nop
+
+---
+ src/gallium/frontends/dri/dri_drawable.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/gallium/frontends/dri/dri_drawable.c b/src/gallium/frontends/dri/dri_drawable.c
+index 0000000..1111111 100644
+--- a/src/gallium/frontends/dri/dri_drawable.c
++++ b/src/gallium/frontends/dri/dri_drawable.c
+@@ -532,7 +532,7 @@ dri_flush(struct dri_context *ctx,
+ 
+       /* throttle on the previous fence */
+       if (drawable->throttle_fence) {
+-         screen->fence_finish(screen, NULL, drawable->throttle_fence, OS_TIMEOUT_INFINITE);
++         screen->fence_finish(screen, NULL, drawable->throttle_fence, 0);
+          screen->fence_reference(screen, &drawable->throttle_fence, NULL);
+       }
+       drawable->throttle_fence = new_fence;

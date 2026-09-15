@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dagu mineradio probe</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #05060a; color: #eef6f8;
+    font-family: "Noto Sans CJK SC", "Noto Sans", "DejaVu Sans", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #gl {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    display: block; z-index: 0;
+  }
+  .dpr {
+    position: fixed; z-index: 5; top: 10px; left: 16px;
+    background: #0af; color: #000;
+    font: 700 26px/1.2 monospace; padding: 8px 12px;
+  }
+  .bands {
+    position: fixed; z-index: 2; top: 62px; left: 16px; right: 16px;
+    height: 56px; display: flex; gap: 0;
+  }
+  .bands span { flex: 1; display: grid; place-items: center; font: 700 18px/1 sans-serif; }
+  .r { background: #e02020; color: #fff; }
+  .g { background: #20c050; color: #000; }
+  .b { background: #2040e0; color: #fff; }
+  .y { background: #f0d020; color: #000; }
+  .glass, .solid {
+    position: fixed; z-index: 4;
+    border-radius: 22px;
+    display: flex; align-items: center; padding: 0 22px;
+    font-size: 18px; font-weight: 700;
+  }
+  .glass {
+    top: 132px; left: 50%; transform: translateX(-50%);
+    width: min(720px, calc(100vw - 48px)); height: 56px;
+    background: rgba(8, 10, 14, .42);
+    border: 1px solid rgba(255,255,255,.14);
+    color: #fff;
+    backdrop-filter: blur(28px) saturate(1.28);
+    -webkit-backdrop-filter: blur(28px) saturate(1.28);
+  }
+  .solid {
+    top: 200px; left: 50%; transform: translateX(-50%);
+    width: min(720px, calc(100vw - 48px)); height: 56px;
+    background: #1a2230; border: 2px solid #7ee0d0; color: #fff;
+  }
+  .lyrics {
+    position: fixed; z-index: 4; left: 50%; bottom: 120px;
+    transform: translateX(-50%);
+    width: min(880px, calc(100vw - 40px));
+    padding: 18px 24px; border-radius: 24px; text-align: center;
+    background: #12161c; border: 2px solid #f0d020;
+  }
+  .lyrics .now { font-weight: 800; font-size: 36px; }
+  .lyrics .next { margin-top: 8px; font-size: 16px; color: #c8d0d4; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div class="dpr" id="dpr">DPR=?</div>
+<div class="bands">
+  <span class="r">RED</span><span class="g">GREEN</span>
+  <span class="b">BLUE</span><span class="y">YELLOW</span>
+</div>
+<div class="glass">玻璃 BLOOM 搜索 小米平板 ABCxyz 0123456789</div>
+<div class="solid">实色对照 小米平板 ABCxyz 0123456789</div>
+<div class="lyrics">
+  <div class="now">小米平板 字体测试 你好世界</div>
+  <div class="next">The quick brown fox · 歌词舞台 · 0123456789</div>
+</div>
+<script>
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl", {
+  alpha: false,
+  antialias: false,
+  premultipliedAlpha: true,
+  preserveDrawingBuffer: false,
+  powerPreference: "high-performance"
+});
+const vs = `
+attribute vec2 aPos;
+attribute float aSeed;
+uniform float uTime, uAspect;
+void main() {
+  float t = uTime * (0.08 + fract(aSeed * 13.7) * 0.2);
+  vec2 p = aPos;
+  p.x += sin(t + aSeed * 6.28) * 0.04;
+  p.y += cos(t * 0.7 + aSeed * 4.1) * 0.03;
+  gl_Position = vec4(p.x, p.y, 0.0, 1.0);
+  gl_PointSize = 7.0 + fract(aSeed * 9.1) * 6.0;
+}`;
+const fs = `
+precision mediump float;
+void main() {
+  vec2 c = gl_PointCoord - 0.5;
+  float d = dot(c, c);
+  if (d > 0.22) discard;
+  gl_FragColor = vec4(0.15, 0.92, 0.82, 1.0);
+}`;
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+const N = 80;
+const pos = new Float32Array(N * 2);
+const seed = new Float32Array(N);
+for (let i = 0; i < N; i++) {
+  pos[i * 2] = (Math.random() * 1.6) - 0.8;
+  pos[i * 2 + 1] = (Math.random() * 0.7) - 0.55;
+  seed[i] = Math.random();
+}
+function buf(data, loc, n) {
+  const b = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, b);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, n, gl.FLOAT, false, 0, 0);
+}
+buf(pos, gl.getAttribLocation(prog, "aPos"), 2);
+buf(seed, gl.getAttribLocation(prog, "aSeed"), 1);
+const uTime = gl.getUniformLocation(prog, "uTime");
+function paintDpr() {
+  const dpr = window.devicePixelRatio || 1;
+  document.getElementById("dpr").textContent =
+    "DPR=" + dpr.toFixed(3) +
+    " inner=" + window.innerWidth + "x" + window.innerHeight +
+    " webgl=" + (gl ? "ok" : "fail") +
+    " sysmem=" + (document.body.dataset.sys || "?");
+}
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.max(1, Math.floor(innerWidth * dpr));
+  canvas.height = Math.max(1, Math.floor(innerHeight * dpr));
+  if (gl) gl.viewport(0, 0, canvas.width, canvas.height);
+  paintDpr();
+}
+window.addEventListener("resize", resize);
+resize();
+const t0 = performance.now();
+function frame(now) {
+  if (!gl) return;
+  gl.clearColor(0.02, 0.03, 0.05, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.uniform1f(uTime, (now - t0) / 1000);
+  gl.drawArrays(gl.POINTS, 0, N);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

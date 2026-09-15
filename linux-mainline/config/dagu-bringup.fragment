@@ -1,0 +1,50 @@
+# Diagnostic overlay on dagu.fragment. Drivers that can hang before PID1.
+# Keep GCC + RPMH + WDT + pstore. Restore by building without DAGU_MINIMAL=1.
+
+# DRM_MSM is off here, so dagu.fragment's fbdev console never appears and
+# console=tty0 goes nowhere. Draw into the splash buffer ABL is still
+# scanning out (chosen/framebuffer@9c000000) — the panel is the only log
+# channel on this board (no UART pads, no UDC yet).
+CONFIG_FB_SIMPLE=y
+# 8x16 on a 1600x2560 panel is 160 unreadable rows; Terminus 16x32 halves it.
+CONFIG_FONTS=y
+CONFIG_FONT_TER16x32=y
+
+# Overrides dagu.fragment: with a screen log, a hang is worth more readable
+# on the panel than bounced to fastboot. Kernel pings the ABL-armed KPSS WDT
+# until PID1 opens /dev/watchdog, and a panic stays up instead of rebooting.
+CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED=y
+CONFIG_PANIC_TIMEOUT=0
+
+# CONFIG_ARM_SMMU is not set
+# CONFIG_DRM_MSM is not set
+# CONFIG_DRM is not set
+# CONFIG_USB_DWC3 is not set
+# CONFIG_USB_DWC3_QCOM is not set
+# CONFIG_TYPEC is not set
+# CONFIG_TYPEC_QCOM_PMIC is not set
+# CONFIG_PCIE_QCOM is not set
+# CONFIG_SCSI_UFS_QCOM is not set
+# CONFIG_I2C_QCOM_GENI is not set
+# CONFIG_SPI_QCOM_GENI is not set
+# CONFIG_SERIAL_QCOM_GENI is not set
+# CONFIG_SERIAL_QCOM_GENI_CONSOLE is not set
+# CONFIG_ARM_QCOM_CPUFREQ_HW is not set
+# CONFIG_QCOM_TSENS is not set
+# CONFIG_PINCTRL_SM8250 is not set
+# CONFIG_INTERCONNECT_QCOM_SM8250 is not set
+# CONFIG_QCOM_LLCC is not set
+# CONFIG_VIDEO_QCOM_CAMSS is not set
+# CONFIG_VIDEO_QCOM_VENUS is not set
+# CONFIG_SND is not set
+# CONFIG_ATH11K is not set
+# CONFIG_ATH11K_PCI is not set
+# CONFIG_REMOTEPROC is not set
+# CONFIG_QCOM_Q6V5_PAS is not set
+# CONFIG_SOUNDWIRE is not set
+# CONFIG_SM_DISPCC_8250 is not set
+# CONFIG_SM_GPUCC_8250 is not set
+# CONFIG_SM_CAMCC_8250 is not set
+# CONFIG_SM_VIDEOCC_8250 is not set
+# CONFIG_QCOM_APR is not set
+# CONFIG_QCOM_MDT_LOADER is not set

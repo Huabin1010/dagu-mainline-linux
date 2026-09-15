@@ -1,0 +1,70 @@
+artifacts/
+artifacts/*.stamp
+backups/golden/*
+!backups/golden/README.md
+logs/
+dumps/
+tools/downloads/
+tools/mi-unlock-cn/
+tools/platform-tools/
+
+# Upstream clones — bootstrap via git, not tracked in project repo
+edk2-msm/
+vendor/
+
+# Mainline Linux clone + build (see linux-mainline/README.md)
+linux-mainline/linux/
+linux-mainline/out/
+linux-mainline/firmware/dagu/qca6390/
+linux-mainline/firmware/dagu/bt_firmware/
+linux-mainline/firmware/dagu/persist/
+linux-mainline/firmware/dagu/vendor/
+
+# magiskboot unpack leftovers next to scripts (kernel Image, ramdisk, header)
+linux-mainline/kernel
+linux-mainline/kernel_dtb
+linux-mainline/header
+linux-mainline/ramdisk.cpio
+linux-mainline/*.cpio
+linux-mainline/*.cpio.gz
+/header
+/kernel
+/ramdisk.cpio
+
+# Large binaries in artifacts only
+*.img
+/boot-dagu-latest.img
+boot-dagu-latest.img
+
+# Local scratch: screenshots, photos, debug captures (not versioned)
+tmp/
+
+# OS / editor / agent workspace (not part of the public tree)
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+.cursor/
+.vscode/
+.cursorignore
+dagu.code-workspace
+
+# Secrets — unit identity, credentials, keys. Never commit.
+linux-mainline/dts/local-addresses.dtsi
+linux-mainline/out/root-password
+linux-mainline/out/id_dagu
+linux-mainline/out/id_dagu.pub
+**/.env
+**/.env.*
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+id_dagu
+*root-password*
+root-password.md

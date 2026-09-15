@@ -1,0 +1,28 @@
+/linux/
+/out/
+
+# magiskboot unpack leftovers (not source)
+/kernel
+/kernel_dtb
+/header
+/ramdisk.cpio
+/*.cpio
+/*.cpio.gz
+
+/firmware/dagu/qca6390/
+/firmware/dagu/bt_firmware/
+/firmware/dagu/persist/
+/firmware/dagu/vendor/
+/firmware/dagu/.extract/
+/firmware/dagu/lib/
+/firmware/dagu/wlan_mac.bin
+
+# Unit persist MAC / BD address (copy from local-addresses.dtsi.example)
+/dts/local-addresses.dtsi
+
+# Host-built preload objects; sources are dagu-*.c next to them
+/scripts/libdagu-*.so
+/camera-loopback/target/
+/camera-loopback/*.o
+/camera-loopback/*.a
+/camera-loopback/dagu-camera-loopback

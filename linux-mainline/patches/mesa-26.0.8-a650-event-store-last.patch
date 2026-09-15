@@ -1,0 +1,25 @@
+说明：a650 GMEM event-store 对拍官方 blob（dagu-event-store-heist）。
+
+活补丁在 /tmp/mesa-26.0.8（不在 git 树）：
+  src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc
+  src/freedreno/common/freedreno_devices.py
+
+抓包原文：
+  linux-mainline/tools/dagu-vulkan-truth/out/captures/pass3-heist/event-store-ib-16dw.txt
+  linux-mainline/docs/dagu-vulkan-truth.md 第 9 节
+
+blob 16 dword @ 0x500464060（IB1 先写 OPERATION=0x2f1）：
+  4888d785 00001800 00063000 00000005 00000040 00010000
+  4088d502 00000000 00000000
+  4088d001 00000000
+  4888d102 00000000 03ff03ff
+  70460001 0000001e
+
+复刻到 Mesa：
+  - 颜色 store：BLIT_EVENT_STORE_AND_CLEAR | CLEAR_MASK=0xf | LAST=2
+  - store/load IB 写 RB_RESOLVE_CNTL_0=0
+  - emit_blit 补 RB_RESOLVE_GMEM_BUFFER_INFO
+  - a6xx_gen3 concurrent_resolve=True（RB_CCU_CNTL.CONCURRENT_RESOLVE）
+
+禁止在 destile 底稿 9.4 五条绿之前改
+  linux-mainline/scripts/dagu-chrome.sh 把 DAGU_LINEAR_SYSMEM 关掉。

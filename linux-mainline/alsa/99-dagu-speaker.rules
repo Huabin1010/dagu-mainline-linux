@@ -1,0 +1,2 @@
+# Re-apply TERT_TDM_RX_0 mixer when the sm8250 card appears.
+ACTION=="add", SUBSYSTEM=="sound", KERNEL=="controlC0", RUN+="/usr/local/sbin/dagu-speaker-route.sh"

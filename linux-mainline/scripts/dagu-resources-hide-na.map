@@ -1,0 +1,11 @@
+LIBADWAITA_1_0 {
+	global:
+		adw_action_row_set_subtitle;
+	local:
+		*;
+};
+
+GTK_4.0 {
+	global:
+		gtk_label_set_label;
+};

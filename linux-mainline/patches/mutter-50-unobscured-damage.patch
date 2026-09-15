@@ -1,0 +1,18 @@
+From: dagu
+Subject: [PATCH] dagu: do not drop Wayland damage when unobscured is empty
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2).
+
+Chrome Ozone WaitForSwap sits 80–180 ms when Mutter skips paint:
+no wl_surface.frame, no wp_presentation, no drm-syncobj. The panel
+keeps scanning the last fb (vblank still 120 Hz).
+
+meta_surface_actor_update_area() returned without queue_redraw when
+cull left unobscured_region empty (270°+1.25+scale-monitor-framebuffer,
+and still after identity+fullscreen). apply_state only woke the clock
+on frame_callback / fifo_wait, not on newly_attached.
+
+---
+ src/compositor/meta-surface-actor.c           | 20 +++++++++++++++++---
+ src/wayland/meta-wayland-actor-surface.c      |  5 +++--
+ 2 files changed, 20 insertions(+), 5 deletions(-)

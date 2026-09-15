@@ -1,0 +1,23 @@
+From: dagu adaptation
+Subject: freedreno: LINEAR sysmem including FB fetch
+
+a650 BLIT_EVENT_STORE and A2D write macrotile into TILE6_LINEAR.
+CSS backdrop-filter snapshots / FB-fetches the LINEAR swapchain
+then blurs. Forcing FD_GMEM_FB_READ through GMEM destile failed
+(shadow also forced LINEAR) and fd6_resolve_linear_tile A2D snowed
+probe cards A–H. filter:blur of an element's own layer is fine.
+
+1. LINEAR color RTs always use sysmem, including FB fetch.
+   patch_fb_read_sysmem samples the real LINEAR descriptor.
+   CCU is flushed before the first fb_read draw in a batch.
+2. DAGU_LINEAR_SYSMEM forces 4bpp non-scanout color LINEAR (RGBA/BGRA).
+   R8 glyph atlases stay tiled — forcing those LINEAR deleted all
+   Chrome text. Destile shadows can override via
+   fd_dagu_set_force_tiled() to allocate a real TILE6_3 BO.
+3. A2D is skipped when either end is LINEAR (3D sysmem writes linear).
+4. Small TILE dests of a LINEAR copy are discard-swapped to LINEAR
+   without a nested shadow blit (that asserted in_blit).
+5. Never fall back to fd6_resolve_linear_tile (macrotile / random iova).
+
+Scanout / depth stay tiled. DAGU_LINEAR_SYSMEM=0 disables all of this.
+Do not set the env in gnome-shell.

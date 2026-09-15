@@ -1,0 +1,45 @@
+// No sys_enter_ioctl (CONFIG_FTRACE_SYSCALLS=n). kprobe __arm64_sys_ioctl.
+// DRM_IOCTL_MODE_ATOMIC = DRM_IOWR(0xBC, struct drm_mode_atomic) = 0xC03864BC
+// (0xC038644D is wrong: nr is 0xBC not 0x4D).
+// flags: PAGE_FLIP_EVENT=0x01 NONBLOCK=0x200 TEST_ONLY=0x100
+// bpftrace --unsafe this.bt
+// GS / SECS patched by runner.
+
+#define GS 1236
+#define ATOMIC 0xC03864BC
+
+kprobe:__arm64_sys_ioctl
+/pid == GS/
+{
+	$r = (struct pt_regs *)arg0;
+	$cmd = (uint32)$r->regs[1];
+	if ((($cmd >> 8) & 0xff) == 0x64) {
+		@drm_cmd[$cmd] = count();
+	}
+	if ($cmd == ATOMIC) {
+		$fd = (int32)$r->regs[0];
+		$arg = $r->regs[2];
+		$flags = *(uint32 *)uptr($arg);
+		@atomic_n = count();
+		@atomic_flags[$flags] = count();
+		@atomic_fd[$fd] = count();
+		@atomic_tid[tid] = count();
+		if (($flags & 0x1) == 0) {
+			@atomic_no_event = count();
+			printf("[%llu] ATOMIC tid=%d fd=%d flags=0x%x EVENT=0\n",
+			       nsecs, tid, $fd, $flags);
+		}
+	}
+}
+
+interval:s:12
+{
+	printf("--- atomic maps ---\n");
+	print(@drm_cmd);
+	print(@atomic_n);
+	print(@atomic_flags);
+	print(@atomic_fd);
+	print(@atomic_tid);
+	print(@atomic_no_event);
+	exit();
+}

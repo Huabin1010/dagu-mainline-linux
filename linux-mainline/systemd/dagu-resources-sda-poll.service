@@ -1,0 +1,12 @@
+[Unit]
+Description=dagu: refresh Resources sda/stat
+After=dagu-resources-fix.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-resources-sda-poll.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

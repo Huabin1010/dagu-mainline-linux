@@ -1,0 +1,24 @@
+// /** @file
+// String definitions for BootManagerMenuApp — dagu overlay.
+//
+// Copyright (c) 2004 - 2018, Intel Corporation. All rights reserved.<BR>
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+//
+// **/
+
+/=#
+
+#langdef   en-US "English"
+#langdef   fr-FR "Français"
+
+#string STR_BOOT_POPUP_MENU_TITLE_STRING  #language    en-US    "*** UEFI-ONLY *** Vol-/+  Power=OK"
+                                          #language    fr-FR    "*** UEFI-ONLY *** Vol-/+  Power=OK"
+
+#string STR_BOOT_POPUP_MENU_HELP1_STRING  #language    en-US    "Vol- / Vol+ = move selection"
+                                          #language    fr-FR    "Vol- / Vol+ = move selection"
+
+#string STR_BOOT_POPUP_MENU_HELP2_STRING  #language    en-US    "Power = confirm"
+                                          #language    fr-FR    "Power = confirm"
+
+#string STR_BOOT_POPUP_MENU_HELP3_STRING  #language    en-US    "ESC = exit menu"
+                                          #language    fr-FR    "ESC = exit menu"

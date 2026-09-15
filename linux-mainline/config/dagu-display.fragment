@@ -1,0 +1,206 @@
+# Event tracing for DPU DSC flush (vblank timeout: 400000).
+# FTRACE alone does not select TRACING; SCHED_TRACER pulls GENERIC_TRACER
+# without FUNCTION_TRACER (a nop at every function would perturb 120 Hz).
+CONFIG_FTRACE=y
+CONFIG_SCHED_TRACER=y
+# CONFIG_FUNCTION_TRACER is not set
+
+# Display on top of DAGU_MINIMAL + dagu-usb: hand MDSS to DRM_MSM instead of
+# borrowing ABL's continuous splash.
+#
+# The splash console cannot survive apps_smmu: arm_smmu_device_reset() disables
+# every context bank and rewrites every S2CR, and QHEE hands the display stream
+# over as TRANS rather than BYPASS, so qcom_smmu_cfg_probe() pins nothing
+# ("preserved 0 boot mappings"). MDP's scanout of cont_splash_region dies 26ms
+# after fbcon takes over — black panel, backlight still on from ABL. Neither
+# arm-smmu.disable_bypass=0 nor the Kconfig default helps, because MDP is
+# issuing IOVAs that stop resolving once the boot context banks are gone.
+#
+# MDSS has its own "iommus = <&apps_smmu 0x820 0x402>", so once DRM_MSM drives
+# it the SMMU stops being a conflict and the panel becomes a real console.
+CONFIG_DRM=y
+CONFIG_DRM_KMS_HELPER=y
+CONFIG_DRM_DISPLAY_HELPER=y
+CONFIG_DRM_MSM=y
+CONFIG_DRM_PANEL_XIAOMI_DAGU_L81A=y
+CONFIG_DRM_FBDEV_EMULATION=y
+
+# dispcc owns MDSS_GDSC and the AHB/MDP clocks. tlmm owns panel reset (GPIO 75),
+# TP reset (100) and the LCD bias enables (130/131) — without PINCTRL_SM8250
+# the bl_vddpos/bl_vddneg regulators just defer forever.
+CONFIG_SM_DISPCC_8250=y
+CONFIG_PINCTRL_SM8250=y
+# DSI ctrl lists refgen-supply; defconfig builds this as =m and ramdisk
+# never loads it, so both dsi@ae94000/ae96000 sit in deferred probe forever.
+CONFIG_REGULATOR_QCOM_REFGEN=y
+
+# simplefb and DRM fbdev cannot both own fbcon, and the splash path is dead.
+# Keep TER16x32 from dagu-bringup.fragment: 8x16 is 160 rows on this panel.
+# CONFIG_FB_SIMPLE is not set
+
+# UFS so PID1 can find userdata and switch_root. bringup.fragment turns this
+# off; without it init sits forever in the ramdisk idle loop.
+CONFIG_SCSI=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_SCSI_UFSHCD=y
+CONFIG_SCSI_UFSHCD_PLATFORM=y
+CONFIG_SCSI_UFS_QCOM=y
+CONFIG_PHY_QCOM_QMP_UFS=y
+CONFIG_EXT4_FS=y
+
+# Himax on spi-gpio (CAF gpio8–11). GENI QUP still off — load/se_init hangs QHEE.
+CONFIG_SPI=y
+CONFIG_SPI_MASTER=y
+CONFIG_SPI_BITBANG=y
+CONFIG_SPI_GPIO=y
+CONFIG_TOUCHSCREEN_HIMAX_DAGU=y
+# CONFIG_SPI_QCOM_GENI is not set
+# CONFIG_QCOM_GPI_DMA is not set
+
+# Keep menu/PSCI idle compiled in; runtime off is vendor_boot `cpuidle.off=1`.
+# Compiling CPU_IDLE out made ABL bounce in ~4s on this board.
+CONFIG_CPU_IDLE=y
+CONFIG_ARM_PSCI_CPUIDLE=y
+
+# dagu.fragment turns INTERCONNECT on; this QHEE's BCM voter hangs on
+# rpmh_write_batch(). Unset it here (last fragment before bpf) so desktop
+# builds without DAGU_MINIMAL still boot. Venus uses the ICC stub in core.c.
+# CONFIG_INTERCONNECT_QCOM_SM8250 is not set
+
+# GPU + OSM: without these GNOME is llvmpipe at boot freq and feels 60 Hz.
+CONFIG_SM_GPUCC_8250=y
+CONFIG_ARM_QCOM_CPUFREQ_HW=y
+# bringup.fragment turns TSENS off; bring it back for hotspot / stress-ng.
+CONFIG_QCOM_TSENS=y
+CONFIG_THERMAL=y
+CONFIG_THERMAL_OF=y
+
+# QCA6390 Wi-Fi (pcie0 / ath11k). PHY was =m and ramdisk never loaded it.
+CONFIG_PCI=y
+CONFIG_PCIE_QCOM=y
+CONFIG_PHY_QCOM_QMP=y
+CONFIG_PHY_QCOM_QMP_PCIE=y
+CONFIG_WLAN=y
+CONFIG_CFG80211=y
+CONFIG_MAC80211=y
+CONFIG_ATH11K=y
+CONFIG_ATH11K_PCI=y
+CONFIG_POWER_SEQUENCING=y
+CONFIG_POWER_SEQUENCING_QCOM_WCN=y
+CONFIG_RFKILL=y
+
+# QCA6390 BT on uart6 (QUP0 SE6). SERIAL skips geni_load_se_firmware.
+# BLE HOG mice need kernel LE + /dev/uhid; classic HID uses HIDP.
+CONFIG_BT=y
+CONFIG_BT_BREDR=y
+CONFIG_BT_LE=y
+CONFIG_BT_HIDP=y
+CONFIG_BT_HCIUART=y
+CONFIG_BT_HCIUART_SERDEV=y
+CONFIG_BT_HCIUART_QCA=y
+CONFIG_HIDRAW=y
+CONFIG_UHID=y
+CONFIG_SERIAL_QCOM_GENI=y
+CONFIG_SERIAL_DEV_BUS=y
+CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
+
+# Speakers: CS35L41 on i2c-gpio (SE1 gpio4/5, SE3 gpio119/120). Do not turn
+# on I2C_QCOM_GENI — geni_load_se_firmware / geni_se_init hang this QHEE.
+# Playback/capture go through ADSP Q6 (adsp.mbn from modem_a).
+CONFIG_I2C=y
+CONFIG_I2C_ALGOBIT=y
+CONFIG_I2C_GPIO=y
+# CONFIG_I2C_QCOM_GENI is not set
+CONFIG_SOUND=y
+CONFIG_SND=y
+CONFIG_SND_PROC_FS=y
+CONFIG_SND_PCM=y
+CONFIG_SND_SOC=y
+CONFIG_SND_SOC_CS35L41=y
+CONFIG_SND_SOC_CS35L41_I2C=y
+CONFIG_SND_SOC_QCOM=y
+# CONFIG_SND_SOC_USB is not set
+# CONFIG_SND_SOC_QDSP6_USB is not set
+CONFIG_SND_SOC_SM8250=y
+CONFIG_SND_SOC_QDSP6=y
+CONFIG_QCOM_APR=y
+CONFIG_SOUNDWIRE=y
+CONFIG_SOUNDWIRE_QCOM=y
+CONFIG_SND_SOC_WCD938X_SDW=y
+CONFIG_SND_SOC_LPASS_MACRO_COMMON=y
+CONFIG_SND_SOC_LPASS_RX_MACRO=y
+CONFIG_SND_SOC_LPASS_TX_MACRO=y
+CONFIG_SND_SOC_LPASS_VA_MACRO=y
+CONFIG_PINCTRL_LPASS_LPI=y
+CONFIG_PINCTRL_SM8250_LPASS_LPI=y
+CONFIG_REMOTEPROC=y
+CONFIG_QCOM_Q6V5_PAS=y
+CONFIG_QCOM_MDT_LOADER=y
+CONFIG_QCOM_PIL_INFO=y
+CONFIG_QCOM_PD_MAPPER=y
+CONFIG_RPMSG_QCOM_GLINK_SMEM=y
+# IPCRTR is the ADSP QRTR transport. =m never loads (no /lib/modules), so
+# PDR cannot reach TMS and APR services with protection-domain stay down.
+CONFIG_QRTR=y
+CONFIG_QRTR_SMD=y
+
+# i2cdetect on CCI after a failed sensor probe.
+CONFIG_I2C_CHARDEV=y
+
+# Front IMX596 + rear S5KJN1. CAMSS interconnects deleted in DTS (BCM hang).
+# Venus is a module so a TZ/PAS misfire cannot take down the Image.
+# ICC paths are stubbed in core.c — do NOT enable INTERCONNECT_QCOM_SM8250.
+# VIDEOCC was unset by bringup.fragment; Venus GDSCs/clocks need it back.
+CONFIG_SM_CAMCC_8250=y
+CONFIG_SM_VIDEOCC_8250=y
+CONFIG_I2C_QCOM_CCI=y
+CONFIG_MEDIA_SUPPORT=y
+CONFIG_MEDIA_CAMERA_SUPPORT=y
+CONFIG_MEDIA_CONTROLLER=y
+CONFIG_VIDEO_DEV=y
+CONFIG_VIDEO_V4L2_SUBDEV_API=y
+CONFIG_V4L_PLATFORM_DRIVERS=y
+CONFIG_V4L_MEM2MEM_DRIVERS=y
+CONFIG_QCOM_SMEM=y
+CONFIG_QCOM_SCM=y
+CONFIG_QCOM_MDT_LOADER=y
+CONFIG_VIDEO_QCOM_CAMSS=y
+CONFIG_VIDEO_QCOM_VENUS=m
+# VIDEOBUF2_DMA_CONTIG and V4L2_MEM2MEM_DEV have no Kconfig prompt;
+# Venus=m keeps them =m. Build those .ko next to venus-*.ko.
+CONFIG_VIDEO_S5KJN1=y
+CONFIG_VIDEO_IMX596_DAGU=y
+CONFIG_V4L2_CCI_I2C=y
+CONFIG_UDMABUF=y
+CONFIG_VIDEO_V4L2LOOPBACK_DAGU=m
+
+# Dual BQ27Z561 + BQ25970 / P9418 on i2c-gpio (same QHEE rule as CS35L41).
+# bringup.fragment turns TYPEC off; PMIC TCPM is needed for CC Rd / PD sink.
+CONFIG_POWER_SUPPLY=y
+CONFIG_BATTERY_BQ27XXX=y
+CONFIG_BATTERY_BQ27XXX_I2C=y
+CONFIG_CHARGER_BQ2597X_DAGU=y
+CONFIG_CHARGER_PM8150B_DAGU=y
+CONFIG_CHARGER_P9418_DAGU=y
+CONFIG_BATTERY_XIAOMI_DUAL_FG=y
+CONFIG_TYPEC=y
+CONFIG_TYPEC_TCPM=y
+CONFIG_TYPEC_QCOM_PMIC=y
+CONFIG_USB_ROLE_SWITCH=y
+CONFIG_EXTCON=y
+CONFIG_REGULATOR_QCOM_USB_VBUS=y
+CONFIG_REGULATOR_FIXED_VOLTAGE=y
+CONFIG_REGULATOR_USERSPACE_CONSUMER=y
+
+# Hall (gpio-keys) + PM8150B LRA haptic.
+CONFIG_KEYBOARD_GPIO=y
+CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_FF_MEMLESS=y
+CONFIG_INPUT_PM8XXX_VIBRATOR=y
+
+# Camera flash: dump qpnp-flash-led-v2 on pm8150l @d300.
+CONFIG_NEW_LEDS=y
+CONFIG_LEDS_CLASS=y
+CONFIG_LEDS_CLASS_FLASH=y
+CONFIG_LEDS_QCOM_FLASH=y
+CONFIG_V4L2_FLASH_LED_CLASS=y

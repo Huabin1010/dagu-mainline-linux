@@ -1,0 +1,104 @@
+From: dagu <dagu@localhost>
+Date: Sat, 12 Sep 2026 15:00:00 +0800
+Subject: [PATCH 1/2] freedreno/a6xx: fix event-store into LINEAR on a650
+
+The official a650 blob's color resolve IB is 16 dwords: OPERATION
+with STORE_AND_CLEAR | CLEAR_MASK=0xf | LAST=2, RB_RESOLVE_CNTL_0=0,
+SYSTEM/GMEM buffer words, then CCU_RESOLVE. LAST is documented as
+"last resolve on a650+". Mesa never set it, so GMEM store into a
+LINEAR color RT wrote macrotile.
+
+Match the blob: LAST=2 and CNTL_0 on store and load, GMEM_BUFFER_INFO
+next to BASE, and enable concurrent_resolve on a6xx_gen3.
+
+Captured against vulkan.adreno.so on SM8250 (dagu).
+
+---
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc
+@@ -1501,6 +1501,8 @@
+    crb.add(A6XX_RB_RESOLVE_SYSTEM_BUFFER_PITCH(stride));
+    crb.add(A6XX_RB_RESOLVE_SYSTEM_BUFFER_ARRAY_PITCH(array_stride));
+ 
++   /* Blob a650 store IB writes INFO+BASE as a 2-reg burst. */
++   crb.add(A6XX_RB_RESOLVE_GMEM_BUFFER_INFO(.samples = samples));
+    crb.add(A6XX_RB_RESOLVE_GMEM_BUFFER_BASE(.dword = base));
+ 
+    if (ubwc_enabled) {
+@@ -1525,12 +1527,14 @@
+ {
+    bool stencil = (buffer == FD_BUFFER_STENCIL);
+ 
+-   with_crb (cs, 11) {
++   with_crb (cs, 13) {
+       crb.add(A6XX_RB_RESOLVE_OPERATION(
+          .type = BLIT_EVENT_LOAD,
+          .sample_0 = util_format_is_pure_integer(psurf->format),
+          .depth = (buffer == FD_BUFFER_DEPTH),
++         .last = 2,
+       ));
++      crb.add(A6XX_RB_RESOLVE_CNTL_0());
+ 
+       emit_blit<CHIP>(batch, crb, base, psurf, stencil);
+    }
+@@ -1876,25 +1880,40 @@
+       return;
+    }
+ 
++   /* Official vulkan.adreno.so on a650: color store is
++    * BLIT_EVENT_STORE_AND_CLEAR | CLEAR_MASK=0xf | LAST=2, then a
++    * resolve IB of SYSTEM/GMEM/CNTL_0/full-window + CCU_RESOLVE.
++    * LAST is documented "last resolve on a650+". Mesa never set it.
++    */
++   enum a6xx_blit_event_type type = BLIT_EVENT_STORE;
++   uint32_t clear_mask = 0;
++   bool depth = false;
++
+    switch (buffer) {
+    case FD_BUFFER_COLOR:
+-      info = A6XX_RB_RESOLVE_OPERATION_TYPE(BLIT_EVENT_STORE);
++      type = BLIT_EVENT_STORE_AND_CLEAR;
++      clear_mask = 0xf;
+       break;
+    case FD_BUFFER_STENCIL:
+-      info = A6XX_RB_RESOLVE_OPERATION_TYPE(BLIT_EVENT_STORE_AND_CLEAR);
++      type = BLIT_EVENT_STORE_AND_CLEAR;
+       stencil = true;
+       break;
+    case FD_BUFFER_DEPTH:
+-      info = A6XX_RB_RESOLVE_OPERATION_TYPE(BLIT_EVENT_STORE) | A6XX_RB_RESOLVE_OPERATION_DEPTH;
++      type = BLIT_EVENT_STORE;
++      depth = true;
+       break;
+    }
+ 
+-   if (util_format_is_pure_integer(psurf->format) ||
+-       util_format_is_depth_or_stencil(psurf->format))
+-      info |= A6XX_RB_RESOLVE_OPERATION_SAMPLE_0;
+-
+-   with_crb (cs, 11) {
+-      crb.add(A6XX_RB_RESOLVE_OPERATION(.dword = info));
++   with_crb (cs, 14) {
++      crb.add(A6XX_RB_RESOLVE_OPERATION(
++         .type = type,
++         .sample_0 = util_format_is_pure_integer(psurf->format) ||
++                     util_format_is_depth_or_stencil(psurf->format),
++         .depth = depth,
++         .clear_mask = clear_mask,
++         .last = 2,
++      ));
++      crb.add(A6XX_RB_RESOLVE_CNTL_0());
+       emit_blit<CHIP>(batch, crb, base, psurf, stencil);
+    }
+ 
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -400,6 +400,8 @@
+         prede_nop_quirk = True,
+         has_pred_bit = True,
+         has_pc_dgen_so_cntl = True,
++        # Official a650 blob sets RB_CCU_CNTL.CONCURRENT_RESOLVE on GMEM.
++        concurrent_resolve = True,
+         # HW seem to support this, but prop driver doesn't enable it,
+         # Be safe and don't enable it either.
+         # supports_linear_mipmap_threshold_in_blocks = True,

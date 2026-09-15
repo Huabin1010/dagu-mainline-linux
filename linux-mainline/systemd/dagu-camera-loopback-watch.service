@@ -1,0 +1,14 @@
+[Unit]
+Description=dagu: SoftISP on video20/21 only while a client is open
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-camera-loopback watch
+ExecStopPost=/usr/local/sbin/dagu-camss-graph-reset.sh
+CPUAffinity=0-3
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=dagu: raise GPU/CPU floors while touching, Chrome video, or camera
+After=dagu-resources-fix.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-touch-boost.py
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

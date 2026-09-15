@@ -1,0 +1,7 @@
+{
+  "uuid": "dagu-osk-focus@dagu",
+  "name": "dagu OSK on text focus",
+  "description": "Show GNOME OSK only after tapping a text field; hide otherwise.",
+  "shell-version": ["50"],
+  "session-modes": ["user"]
+}

@@ -1,0 +1,29 @@
+# dagu-gmem-fbread-sync (Mesa 26.0.8 live tree /tmp/mesa-26.0.8)
+#
+# Verdict A from vulkan.adreno.so (pass5-input-att): LINEAR two-subpass
+# input attachment stays in GMEM. TEX_CONST base is 0, TILE6_2, bin pitch.
+# msm gmem_base 0x100000 is the RB aperture; a650 UCHE samples GMEM at
+# the bin offset. Adding gmem_base made PASS3 read empty (00 00 ff).
+#
+# Apply conceptually to:
+#   src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc
+#   src/gallium/drivers/freedreno/a6xx/fd6_emit.cc
+#   src/gallium/drivers/freedreno/freedreno_gmem.c
+#
+# Chrome-only so: /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so
+# Never into gnome-shell.
+
+--- a6xx/fd6_gmem.cc (patch_fb_read_gmem) ---
+   uint64_t base = gmem->cbuf_base[buf];
+   if (sys_tile != TILE6_LINEAR)
+      base += screen->gmem_base;
+   # TILE6_2, pitch = bin_w * cpp, ARRAY_PITCH 0 if one layer
+
+--- a6xx/fd6_emit.cc (fs->fb_read) ---
+   ctx->batch->barrier |= FD6_FLUSH_CCU_COLOR | FD6_INVALIDATE_CACHE |
+                          FD6_WAIT_FOR_IDLE;
+   # no FD6_INVALIDATE_CCU_COLOR (blob does not)
+
+--- freedreno_gmem.c ---
+   # removed LINEAR+FD_GMEM_FB_READ automatic sysmem fallback
+   # DAGU_LINEAR_SYSMEM=1 still forces every LINEAR cbuf to sysmem

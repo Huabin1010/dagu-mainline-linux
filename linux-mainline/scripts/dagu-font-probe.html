@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dagu font probe</title>
+<style>
+  html, body { margin: 0; background: #fff; color: #111; }
+  section { padding: 10px 16px; border-bottom: 2px solid #000; }
+  .mark { background: #ff0; color: #000; padding: 4px 8px; font-size: 22px; font-weight: 700; }
+  .dpr { background: #0af; color: #000; font: 700 42px/1.15 monospace; padding: 10px 12px; }
+  .ascii { font-family: "Noto Sans", "DejaVu Sans", sans-serif; font-weight: 700; }
+  .cjk { font-family: "Noto Sans CJK SC", "Noto Sans CJK", "Source Han Sans SC", sans-serif; font-weight: 700; }
+  .gray { -webkit-font-smoothing: antialiased; }
+  .lcd { -webkit-font-smoothing: subpixel-antialiased; }
+  .none { -webkit-font-smoothing: none; }
+  .mono { font-family: "DejaVu Sans Mono", monospace; }
+  .ladder div { line-height: 1.35; }
+  #cv { border: 2px solid #00f; image-rendering: auto; }
+</style>
+</head>
+<body>
+<section class="dpr" id="dpr">DPR=?</section>
+<section>
+  <div class="mark">LADDER</div>
+  <div class="ascii gray ladder" id="ladder"></div>
+</section>
+<section>
+  <div class="mark">S12</div>
+  <div class="ascii gray" style="font-size:12px">ABCxyz 0123456789 小米平板字体测试</div>
+</section>
+<section>
+  <div class="mark">S14</div>
+  <div class="ascii gray" style="font-size:14px">ABCxyz 0123456789 小米平板字体测试</div>
+</section>
+<section>
+  <div class="mark">S16</div>
+  <div class="ascii gray" style="font-size:16px">ABCxyz 0123456789 小米平板字体测试</div>
+</section>
+<section>
+  <div class="mark">S18</div>
+  <div class="ascii gray" style="font-size:18px">ABCxyz 0123456789 小米平板字体测试</div>
+</section>
+<section>
+  <div class="mark">S24-GRAY</div>
+  <div class="ascii gray" style="font-size:24px">ABCxyz 0123456789</div>
+  <div class="cjk gray" style="font-size:24px">小米平板 字体测试 你好世界</div>
+</section>
+<section>
+  <div class="mark">S24-LCD</div>
+  <div class="ascii lcd" style="font-size:24px">ABCxyz 0123456789</div>
+</section>
+<section>
+  <div class="mark">S24-NONE</div>
+  <div class="ascii none" style="font-size:24px">ABCxyz 0123456789</div>
+</section>
+<section>
+  <div class="mark">PARA</div>
+  <p class="ascii gray" style="font-size:16px;font-weight:400;max-width:40em">
+    The quick brown fox jumps over the lazy dog. 在任意 Mutter 缩放下，
+    这段正文必须保持可识别，不能亚像素彩边，也不能被二次缩放糊成乱码。
+  </p>
+</section>
+<section>
+  <div class="mark">MONO</div>
+  <div class="mono" style="font-size:24px">The quick brown fox 123</div>
+</section>
+<section>
+  <div class="mark">CANVAS</div>
+  <canvas id="cv" width="800" height="80"></canvas>
+</section>
+<script>
+function paint() {
+  const dpr = window.devicePixelRatio || 1;
+  const vv = window.visualViewport;
+  document.getElementById("dpr").textContent =
+    "DPR=" + dpr.toFixed(3) +
+    " inner=" + window.innerWidth + "x" + window.innerHeight +
+    (vv ? " vv=" + vv.scale.toFixed(3) : "");
+  const c = document.getElementById("cv").getContext("2d");
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.fillStyle = "#fff";
+  c.fillRect(0, 0, 800, 80);
+  c.fillStyle = "#111";
+  c.font = "700 28px sans-serif";
+  c.fillText("CANVAS ABCxyz 你好 " + dpr.toFixed(3), 8, 50);
+}
+const ladder = document.getElementById("ladder");
+[10, 11, 12, 13, 14, 15, 16, 17, 18].forEach((px) => {
+  const d = document.createElement("div");
+  d.style.fontSize = px + "px";
+  d.textContent = px + "px ABCxyz 0123456789 小米平板";
+  ladder.appendChild(d);
+});
+paint();
+window.addEventListener("resize", paint);
+if (location.search.indexOf("scroll=1") !== -1) {
+  setTimeout(() => window.scrollTo(0, 220), 8000);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+{
+  "uuid": "dagu-present-pump@local",
+  "name": "dagu present pump",
+  "description": "Keep Mutter frame clock alive: schedule_update on touch, 1×1 only while maximized idle. Do not 1×1 during swipe (that destile is a 100–340 ms kickoff hole).",
+  "shell-version": ["50"],
+  "session-modes": ["user"]
+}

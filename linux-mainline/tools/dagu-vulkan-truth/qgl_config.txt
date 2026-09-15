@@ -1,0 +1,6 @@
+; dagu-vulkan-truth: let the blob speak.
+; 0x0=0x8675309 restores named keys on SDM845+ hash-keyed parsers.
+0x0=0x8675309
+pm4dumpenable=True
+enablebinlog=True
+dumpenvironment=True

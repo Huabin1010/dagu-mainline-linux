@@ -1,0 +1,8 @@
+version: 1
+configuration:
+  software_isp:
+    # DebayerCpu packed-10P skip is the Viewfinder FOV path. GPU EGL ignores it.
+    mode: cpu
+    # DebayerCpu default is already 2 on current libcamera; pin it so a
+    # distro rebuild cannot spawn 8 threads and starve mutter/Himax.
+    threads: 2

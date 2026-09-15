@@ -1,0 +1,23 @@
+/*
+ * Unit-specific persist addresses for this board.
+ *
+ * Copy to local-addresses.dtsi (gitignored) and fill from the device
+ * persist / wlan_mac.bin / BT NVRAM. Do not commit a real unit MAC.
+ *
+ * Placeholders below are locally administered (LAA). Wi-Fi still
+ * enumerates; Bluetooth needs a non-zero BD address or the adapter
+ * stays 00:00:00:00:00:00 until btmgmt public-addr.
+ *
+ * local-bd-address is little-endian (LSB first).
+ */
+&pcieport0 {
+	wifi@0 {
+		local-mac-address = [02 00 00 00 00 01];
+	};
+};
+
+&uart6 {
+	bluetooth {
+		local-bd-address = [02 00 00 00 00 02];
+	};
+};

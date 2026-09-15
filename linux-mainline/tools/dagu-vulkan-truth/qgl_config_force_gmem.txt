@@ -1,0 +1,7 @@
+; Second-pass config: ask the blob to keep GMEM store even if it would punt.
+0x0=0x8675309
+pm4dumpenable=True
+enablebinlog=True
+dumpenvironment=True
+forcegmemstore=True
+forcegmemload=True

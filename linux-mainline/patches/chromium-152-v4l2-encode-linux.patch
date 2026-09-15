@@ -1,0 +1,76 @@
+# Chromium 152: enable V4L2 encode on Linux (not just ChromeOS).
+# Applied by linux-mainline/scripts/dagu-chromium-v4l2-encode-build.sh
+# onto linux-mainline/out/chromium-v4l2-src/official-152 and the Debian tree.
+#
+# 1) media/gpu/v4l2/BUILD.gn — always compile encode .cc when use_v4l2_codec.
+#    jpeg encode stays ChromeOS-only (camera deps).
+# 2) media/gpu/gpu_video_encode_accelerator_factory.cc CreateV4L2VEA()
+#    must construct V4L2VideoEncodeAccelerator on Linux.
+#
+# 3) media/gpu/v4l2/v4l2_utils.cc — map V4L2_PIX_FMT_HEVC (stateful Venus)
+#    to HEVC_PROFILE so chrome://gpu lists Decode/Encode hevc, not just
+#    HEVC_SLICE (stateless). Also prefer /dev/video-dec* when listing
+#    decoder configs (GPU sandbox EPERM /dev/video14).
+# 4) content/common/gpu_pre_sandbox_hook_linux.cc FilePermissionsForGpu
+#    must call AddV4L2GpuPermissions on desktop Linux (not only ChromeOS).
+# 5) media/gpu/v4l2/v4l2_device.cc Linux enumerate /dev/video-dec and
+#    /dev/video-enc (udev), matching the broker prefixes.
+#
+# crbug.com/901264 is the ChromeOS DMA-buf plane offset hack. Venus
+# USERPTR/MMAP (ffmpeg h264_v4l2m2m on /dev/video-enc0) does not need it.
+#
+# 6) media/gpu/v4l2/v4l2_video_encode_accelerator.cc on Linux:
+#    native_input_mode_=false; kGpuMemoryBuffer → V4L2_MEMORY_USERPTR;
+#    ConvertToMemoryMappedFrame() for MSI/GMB canvas; visible_rect size
+#    may match even if coded_size is V4L2-aligned. ChromeOS path unchanged.
+
+--- a/media/gpu/gpu_video_encode_accelerator_factory.cc
++++ b/media/gpu/gpu_video_encode_accelerator_factory.cc
+@@
+ std::unique_ptr<VideoEncodeAccelerator> CreateV4L2VEA() {
+-#if BUILDFLAG(IS_CHROMEOS)
+   return base::WrapUnique<VideoEncodeAccelerator>(
+       new V4L2VideoEncodeAccelerator(base::MakeRefCounted<V4L2Device>()));
+-#else
+-  // TODO(crbug.com/901264): Linux V4L2 VEA needs DMA-buf plane offsets.
+-  return nullptr;
+-#endif
+ }
+
+#
+# 7) media/video/video_encode_accelerator_adapter.cc: Linux keeps kShmem
+#    + CpuMemBuf. ChromeOS still forces kGpuMemoryBuffer. Otherwise
+#    CreateSharedImage(VEA_READ_CAMERA) fails and MediaRecorder uses OpenH264.
+#
+# 8) media/media_options.gni: platform_has_optional_hevc_encode_support
+#    must include is_linux so MediaRecorder.isTypeSupported(hvc1) can
+#    query Venus VEA. Upstream only lists win/apple/android. Without
+#    this, chrome://gpu lists Encode hevc but MediaRecorder MIME is false.
+#
+# 9) media/gpu/v4l2/v4l2_video_encode_accelerator.cc InitControls():
+#    upstream CHECK/NOTREACHED only allow H264 and VP8. Venus HEVC
+#    Initialize then SIGTRAPs the GPU process (exit_code=5) after
+#    MediaRecorder.isTypeSupported(hvc1) is true. Add InitControlsHEVC
+#    (profile/level/header/QP) and keep inject_sps_and_pps_ false.
+#
+# 10) media/gpu/v4l2/v4l2_stateful_video_decoder.cc Decode():
+#     HEVC was NOTIMPLEMENTED → kUnsupportedCodec (201). Venus stateful
+#     accepts whole MP4 access units; enqueue like VP8/VP9.
+#
+# 11) v4l2_stateful_video_decoder.cc GetNumberOfReferenceFrames():
+#     CHECK_LE(..., 18) SIGTRAPs when Venus VP8 asks for 32 CAPTURE
+#     buffers. Cap at VIDEO_MAX_FRAME. Also clamp CAPTURE AllocateBuffers
+#     to VIDEO_MAX_FRAME (32+2=34 was rejected, actual=32).
+# 12) v4l2_stateful_video_decoder.cc EnumeratePixelLayoutCandidates():
+#     drop 8-bit CAPTURE formats (NV12/QC08C) for HEVC Main10 / VP9
+#     profile2/3. Venus enumerates both; PickDecoderOutputFormat then
+#     chooses NV12 and VIDIOC_QBUF fails with EIO. Map UBWC modifier to
+#     QC10C when the stream is 10-bit.
+# 13) v4l2_utils.cc V4L2FormatToVideoFrameLayout(): Venus P010/QC10C
+#     is one V4L2 plane / two color planes. Derive UV like NV12 or
+#     CreateFrame() fails and GPU SIGTRAPs (exit_code=5).
+# 14) media_recorder_handler.cc CanSupportMimeType(): allow HEVC
+#     Main10 (hvc1.2.4) when IsEncoderSupportedVideoType(MAIN10).
+#     Upstream hard-requires HEVCPROFILE_MAIN so chrome://gpu lists
+#     Encode hevc main 10 but MediaRecorder.isTypeSupported is false.
+#     video_track_recorder.cc preferred VEA range MAIN..MAIN10.

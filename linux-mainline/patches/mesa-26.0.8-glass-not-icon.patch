@@ -1,0 +1,19 @@
+说明：用探针页修 Mesa。活树 /tmp/mesa-26.0.8。
+
+像素：孤立 backdrop-filter 层垫到 256²/512²/512x256/2496x416，
+Mesa 打成 TILE6_3，ANGLE LINEAR 采 → 雪花。图标桶 ≤80² 避免 H 圆实心白。
+
+卡顿（板上 A/B，不是猜）：
+  正确霜 + submit 期 discard_linear：gpu_busy avg 13%，Viz 99% CPU
+  备份雪花 so：gpu_busy avg 70%
+根因：discard_linear 换 BO 卡住提交。Adreno 不是算力不够。
+禁止用关 GPU / 软解 / 假霜来「顺」。
+
+改动：
+- 2496x416 玻璃条、256²/512²、512x256：分配时 LINEAR
+- 非方形页瓦只认两边 ≥384（832x576）
+- 去掉 submit 期 discard_linear
+- 玻璃层不强制 GMEM（FB_READ 本来拒绝 bypass）
+- dri_flush 仍等 throttle_fence（去掉 wait 会 00800005 hangcheck）
+
+不要覆盖发行版 libgallium。只装 /usr/local/lib/dagu-mesa/。

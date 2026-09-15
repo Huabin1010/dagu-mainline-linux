@@ -1,0 +1,40 @@
+From: dagu
+Subject: [PATCH] REJECTED dagu: maybe_post without waiting for Cogl sync_fd
+
+Live A/B 2026-09-14: 108.1 Hz, gt50=5, max 225.5, B-kick-atomic-late 185 ms.
+Worse than dri_flush-NOP baseline (109.7 / 5 / 116.6). Restored 0x1c43f4.
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2).
+
+maybe_post_if_gl_finished() returns when the next frame is in the
+render_source hash and sync.revents lacks G_IO_IN. On dagu that
+fence is implicit-synced to the scanout BO, so nview runs on time
+but maybe_post waits ~100 ms (Type B).
+
+Post as soon as the previous frame is presented. GPU completion
+belongs on IN_FENCE / KMS, not the UI thread.
+
+Live ELF (objdump-checked):
+  0x1c43f4  tbnz w0,#0,post  ->  b post
+
+---
+ src/backends/native/meta-onscreen-native.c | 8 +-------
+ 1 file changed, 1 insertion(+), 7 deletions(-)
+
+diff --git a/src/backends/native/meta-onscreen-native.c b/src/backends/native/meta-onscreen-native.c
+index 0000000..1111111 100644
+--- a/src/backends/native/meta-onscreen-native.c
++++ b/src/backends/native/meta-onscreen-native.c
+@@ -250,13 +250,7 @@ maybe_post_next_frame_if_gl_finished (CoglOnscreen *onscreen)
+   if (frame == NULL)
+     return;
+ 
+-  if (render_source &&
+-      g_hash_table_contains (render_source->frames, frame) &&
+-      !meta_frame_native_is_ready (meta_frame_native_from_frame (frame)))
+-    {
+-      return;
+-    }
+-
+   maybe_post_next_frame (onscreen);
+ }

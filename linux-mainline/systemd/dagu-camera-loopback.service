@@ -1,0 +1,11 @@
+[Unit]
+Description=dagu v4l2loopback NV12 both-nodes (not Spectra ISP)
+After=systemd-modules-load.service
+Documentation=file:///usr/local/sbin/dagu-camera-loopback.sh
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-camera-loopback.sh all
+CPUAffinity=0-3
+Restart=on-failure
+RestartSec=5

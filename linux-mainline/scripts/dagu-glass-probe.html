@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dagu glass probe</title>
+<style>
+  html, body {
+    margin: 0; min-height: 100%;
+    color: #f4f7fb;
+    font-family: "Noto Sans CJK SC", "Noto Sans", "DejaVu Sans", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #gl {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    display: block; z-index: 0;
+  }
+  .wallpaper {
+    position: fixed; inset: 0; z-index: 1; pointer-events: none;
+    background:
+      repeating-linear-gradient(118deg,
+        #ff2d55 0 28px, #ffcc00 28px 56px, #34c759 56px 84px,
+        #0a84ff 84px 112px, #bf5af2 112px 140px, #ff9f0a 140px 168px),
+      repeating-linear-gradient(28deg,
+        transparent 0 18px, rgba(0,0,0,.22) 18px 36px);
+    background-size: auto, auto;
+  }
+  .wallpaper .type {
+    position: absolute; inset: 8vh 4vw;
+    font: 800 92px/1.05 "Noto Sans CJK SC", sans-serif;
+    letter-spacing: .04em;
+    color: rgba(255,255,255,.55);
+    text-shadow: 0 2px 0 rgba(0,0,0,.25);
+    word-break: break-all;
+  }
+  .wallpaper .checks {
+    position: absolute; right: 4vw; bottom: 8vh; width: 42vw; height: 28vh;
+    background:
+      repeating-conic-gradient(#111 0% 25%, #f2f2f2 0% 50%)
+      0 0 / 36px 36px;
+    outline: 6px solid #fff;
+  }
+  .hud {
+    position: fixed; z-index: 8; top: 10px; left: 12px; right: 12px;
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+  }
+  .hud b {
+    background: #111; color: #7ee0d0;
+    font: 700 20px/1.25 monospace;
+    padding: 8px 12px; border-radius: 10px;
+  }
+  .stage {
+    position: relative; z-index: 4;
+    padding: 88px 20px 40px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 18px;
+    max-width: 1680px;
+    margin: 0 auto;
+  }
+  .card {
+    min-height: 118px;
+    border-radius: 26px;
+    padding: 16px 20px;
+    display: flex; flex-direction: column; justify-content: center;
+    font-weight: 800;
+  }
+  .card small {
+    display: block; font: 700 13px/1.2 monospace; opacity: .8; margin-bottom: 6px;
+  }
+  .card strong { font-size: 26px; letter-spacing: .02em; }
+  .g-light {
+    color: #111;
+    background: rgba(255,255,255,.28);
+    border: 1px solid rgba(255,255,255,.55);
+    box-shadow: 0 10px 28px rgba(0,0,0,.18);
+    backdrop-filter: blur(18px) saturate(1.55);
+    -webkit-backdrop-filter: blur(18px) saturate(1.55);
+  }
+  .g-mid {
+    color: #111;
+    background: rgba(255,255,255,.2);
+    border: 1px solid rgba(255,255,255,.4);
+    backdrop-filter: blur(28px) saturate(1.7);
+    -webkit-backdrop-filter: blur(28px) saturate(1.7);
+  }
+  .g-heavy {
+    color: #102018;
+    background: rgba(240,248,255,.16);
+    border: 1px solid rgba(255,255,255,.35);
+    backdrop-filter: blur(48px) saturate(1.9);
+    -webkit-backdrop-filter: blur(48px) saturate(1.9);
+  }
+  .g-dark {
+    color: #fff;
+    background: rgba(8,10,16,.42);
+    border: 1px solid rgba(255,255,255,.16);
+    backdrop-filter: blur(24px) saturate(1.35);
+    -webkit-backdrop-filter: blur(24px) saturate(1.35);
+  }
+  .g-radio {
+    color: #fff;
+    background: rgba(12,16,22,.38);
+    border: 1px solid rgba(126,224,208,.35);
+    backdrop-filter: blur(22px) saturate(1.45) brightness(1.08);
+    -webkit-backdrop-filter: blur(22px) saturate(1.45) brightness(1.08);
+  }
+  .g-bright {
+    color: #111;
+    background: rgba(255,255,255,.18);
+    border: 1px solid rgba(255,255,255,.5);
+    backdrop-filter: blur(16px) brightness(1.25) contrast(1.15);
+    -webkit-backdrop-filter: blur(16px) brightness(1.25) contrast(1.15);
+  }
+  .g-tiny {
+    width: 92px; height: 92px; min-height: 92px;
+    border-radius: 50%;
+    align-items: center; text-align: center;
+    color: #111;
+    background: rgba(255,255,255,.3);
+    backdrop-filter: blur(20px) saturate(1.6);
+    -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  }
+  .g-bar {
+    grid-column: 1 / -1;
+    min-height: 64px;
+    flex-direction: row; align-items: center; gap: 18px;
+    color: #111;
+    background: rgba(255,255,255,.26);
+    border: 1px solid rgba(255,255,255,.5);
+    backdrop-filter: blur(26px) saturate(1.5);
+    -webkit-backdrop-filter: blur(26px) saturate(1.5);
+  }
+  .solid {
+    color: #fff;
+    background: #1a2230;
+    border: 2px solid #7ee0d0;
+  }
+  .noblur {
+    color: #111;
+    background: rgba(255,255,255,.28);
+    border: 1px dashed #111;
+  }
+  .k-wrap {
+    position: relative; overflow: hidden; color: #111;
+    border: 1px solid rgba(0,0,0,.25);
+  }
+  .k-bg {
+    position: absolute; inset: -24px;
+    background: repeating-linear-gradient(118deg,
+      #ff2d55 0 28px, #ffcc00 28px 56px, #34c759 56px 84px,
+      #0a84ff 84px 112px, #bf5af2 112px 140px, #ff9f0a 140px 168px);
+    filter: blur(20px);
+  }
+  .k-wrap small, .k-wrap strong { position: relative; z-index: 1; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div class="wallpaper">
+  <div class="type">小米平板 玻璃测试 DAGU GLASS 彩虹条 棋盘 你好世界 ABCXYZ 0123456789 搜索 BLOOM 歌词舞台</div>
+  <div class="checks"></div>
+</div>
+<div class="hud">
+  <b id="dpr">DPR=?</b>
+  <b>GPU backdrop-filter · 禁止软件渲染</b>
+</div>
+<main class="stage">
+  <div class="card g-bar">
+    <small>A 全宽搜索条 blur(26) saturate · Mineradio 搜索</small>
+    <strong>玻璃 BLOOM 搜索 小米平板 ABCxyz 0123456789</strong>
+  </div>
+  <div class="card g-light">
+    <small>B 浅色霜 blur(18)</small>
+    <strong>浅色玻璃 应透出彩虹条</strong>
+  </div>
+  <div class="card g-mid">
+    <small>C 中霜 blur(28)</small>
+    <strong>中等毛玻璃 字清晰底模糊</strong>
+  </div>
+  <div class="card g-heavy">
+    <small>D 重霜 blur(48)</small>
+    <strong>重模糊 仍是 GPU 玻璃</strong>
+  </div>
+  <div class="card g-dark">
+    <small>E 深色霜 blur(24) · Mineradio 底栏</small>
+    <strong>深色玻璃 你好世界 0123</strong>
+  </div>
+  <div class="card g-radio">
+    <small>F 歌词卡 blur+brightness</small>
+    <strong>小米平板 字体测试 歌词</strong>
+  </div>
+  <div class="card g-bright">
+    <small>G 提亮对比 blur(16)</small>
+    <strong>提亮玻璃 棋盘应糊</strong>
+  </div>
+  <div class="card g-tiny">
+    <small>H</small>
+    <strong>圆</strong>
+  </div>
+  <div class="card solid">
+    <small>I 实色对照 无 backdrop</small>
+    <strong>实色对照 小米平板 ABCxyz</strong>
+  </div>
+  <div class="card noblur">
+    <small>J 半透明无 blur 对照</small>
+    <strong>无模糊 应能看清底纹</strong>
+  </div>
+  <div class="card k-wrap">
+    <div class="k-bg"></div>
+    <small>K CSS filter:blur 自己的彩虹 · 不是 backdrop</small>
+    <strong>这条应是真毛玻璃 对比 A–H</strong>
+  </div>
+</main>
+<script>
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl", {
+  alpha: false,
+  antialias: false,
+  premultipliedAlpha: true,
+  preserveDrawingBuffer: false,
+  powerPreference: "high-performance"
+});
+const vs = `
+attribute vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+const fs = `
+precision mediump float;
+uniform float uTime;
+uniform vec2 uRes;
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  float t = uTime * 0.15;
+  vec3 a = vec3(0.95, 0.18, 0.38);
+  vec3 b = vec3(0.12, 0.55, 0.98);
+  vec3 c = vec3(0.18, 0.86, 0.42);
+  float w = 0.5 + 0.5 * sin(uv.x * 18.0 + t * 4.0) * cos(uv.y * 11.0 - t * 3.0);
+  vec3 col = mix(a, b, uv.x);
+  col = mix(col, c, w * uv.y);
+  gl_FragColor = vec4(col, 1.0);
+}`;
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
+let prog = null;
+if (gl) {
+  prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1, 1,-1, -1,1, 1,1
+  ]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, "aPos");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+}
+function paintHud() {
+  const dpr = window.devicePixelRatio || 1;
+  const r = gl ? gl.getParameter(gl.RENDERER) : "no-webgl";
+  document.getElementById("dpr").textContent =
+    "DPR=" + dpr.toFixed(3) +
+    " css=" + innerWidth + "x" + innerHeight +
+    " buf=" + canvas.width + "x" + canvas.height +
+    " webgl=" + (gl ? "ok" : "fail") +
+    " " + String(r).slice(0, 28);
+}
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.floor(innerWidth * dpr));
+  canvas.height = Math.max(1, Math.floor(innerHeight * dpr));
+  if (gl) gl.viewport(0, 0, canvas.width, canvas.height);
+  paintHud();
+}
+window.addEventListener("resize", resize);
+resize();
+const t0 = performance.now();
+const uTime = gl ? gl.getUniformLocation(prog, "uTime") : null;
+const uRes = gl ? gl.getUniformLocation(prog, "uRes") : null;
+function frame(now) {
+  if (gl) {
+    gl.uniform1f(uTime, (now - t0) / 1000);
+    gl.uniform2f(uRes, canvas.width, canvas.height);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

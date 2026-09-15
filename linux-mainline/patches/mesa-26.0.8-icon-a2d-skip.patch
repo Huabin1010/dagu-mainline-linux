@@ -1,0 +1,13 @@
+说明：a650 A2D 会把 icon 尺寸的 TILE 拷贝和 mipmap 降采样写成花砖。
+活树 /tmp/mesa-26.0.8 src/gallium/drivers/freedreno/a6xx/fd6_blitter.cc
+
+handle_rgba_blit：dest 任一边 ≤512（含 3840×360 / 2560×240 图集条、
+24×24 icon 及 mip）、缩放、或非 NEAREST 时 return false，走 u_blitter。
+大图（两边都 >512，如 976×549 封面）仍可 A2D。
+
+实机 /tmp/dagu-blit.log：
+  a2d 76x44->76x44 stile=3 dtile=3 filter=1 38x22 / 19x11 / …
+Chrome 工具栏、网页 tab、页内 icon 共用这条 mip 链。
+R8 字形上传本来就因 staging LINEAR 跳过 A2D，所以字不花、icon 花。
+
+不要用「≤1024 一律 UBWC」——832×576 网页 tile 会变绿。

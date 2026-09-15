@@ -1,0 +1,211 @@
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 4a0b9f5..cccbfb1 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -1487,7 +1487,18 @@ SimplePipelineHandler::generateConfiguration(Camera *camera, Span<const StreamRo
+ 		const auto &formats = (role == StreamRole::Raw ? rawFormats : processedFormats);
+ 		StreamConfiguration cfg{ StreamFormats{ formats } };
+ 		cfg.pixelFormat = formats.begin()->first;
+-		cfg.size = formats.begin()->second[0].max;
++		{
++			Size max = formats.begin()->second[0].max;
++			/* dagu: Viewfinder must not default to 12MP SoftISP. */
++			if (role == StreamRole::Viewfinder ||
++			    role == StreamRole::VideoRecording) {
++				unsigned int div = max.width >= 3000 ? 4
++						 : max.width >= 2000 ? 2 : 1;
++				cfg.size = Size((max.width / div) & ~1U,
++						(max.height / div) & ~1U);
++			} else {
++				cfg.size = max;
++			}
++		}
+ 
+ 		config->addConfiguration(cfg);
+ 	}
+diff --git a/src/libcamera/software_isp/debayer_cpu.cpp b/src/libcamera/software_isp/debayer_cpu.cpp
+index af7af0a..57bf483 100644
+--- a/src/libcamera/software_isp/debayer_cpu.cpp
++++ b/src/libcamera/software_isp/debayer_cpu.cpp
+@@ -222,6 +222,12 @@ void DebayerCpu::debayer10P_BGBG_BGR888(uint8_t *dst, const uint8_t *src[])
+ 		GBRG_BGR888(1, 2, 1)
+ 		/* Skip 5th src byte with 4 x 2 least-significant-bits */
+ 		x++;
++		if (xSkip_ > 1) {
++			int adv = 5 * static_cast<int>(xSkip_ - 1);
++			prev += adv;
++			curr += adv;
++			next += adv;
++		}
+ 	}
+ }
+ 
+@@ -243,6 +249,12 @@ void DebayerCpu::debayer10P_GRGR_BGR888(uint8_t *dst, const uint8_t *src[])
+ 		RGGB_BGR888(1, 2, 1)
+ 		/* Skip 5th src byte with 4 x 2 least-significant-bits */
+ 		x++;
++		if (xSkip_ > 1) {
++			int adv = 5 * static_cast<int>(xSkip_ - 1);
++			prev += adv;
++			curr += adv;
++			next += adv;
++		}
+ 	}
+ }
+ 
+@@ -264,6 +276,12 @@ void DebayerCpu::debayer10P_GBGB_BGR888(uint8_t *dst, const uint8_t *src[])
+ 		BGGR_BGR888(1, 2, 1)
+ 		/* Skip 5th src byte with 4 x 2 least-significant-bits */
+ 		x++;
++		if (xSkip_ > 1) {
++			int adv = 5 * static_cast<int>(xSkip_ - 1);
++			prev += adv;
++			curr += adv;
++			next += adv;
++		}
+ 	}
+ }
+ 
+@@ -285,6 +303,12 @@ void DebayerCpu::debayer10P_RGRG_BGR888(uint8_t *dst, const uint8_t *src[])
+ 		GRBG_BGR888(1, 2, 1)
+ 		/* Skip 5th src byte with 4 x 2 least-significant-bits */
+ 		x++;
++		if (xSkip_ > 1) {
++			int adv = 5 * static_cast<int>(xSkip_ - 1);
++			prev += adv;
++			curr += adv;
++			next += adv;
++		}
+ 	}
+ }
+ 
+@@ -541,6 +565,22 @@ int DebayerCpu::configure(const StreamConfiguration &inputCfg,
+ 		    ~(inputConfig_.patternSize.height - 1);
+	window_.width = outputCfg.size.width;
+	window_.height = outputCfg.size.height;
++	/* dagu: skip Bayer (keep phase) so a 1020×765 Viewfinder is full FOV,
++	 * not a center crop of 4080×3060. Preview max is also capped in
++	 * DebayerCpu::sizes() so PipeWire 1920×1080 cannot skip-1 the front. */
++	xSkip_ = 1;
++	ySkip_ = 1;
++	if (outputCfg.size.width > 0 && outputCfg.size.height > 0 &&
++	    inputCfg.size.width >= outputCfg.size.width * 2 &&
++	    inputCfg.size.height >= outputCfg.size.height * 2) {
++		unsigned int xs = (inputCfg.size.width / outputCfg.size.width) & ~1U;
++		unsigned int ys = (inputCfg.size.height / outputCfg.size.height) & ~1U;
++		if (xs >= 2 && ys >= 2) {
++			xSkip_ = xs;
++			ySkip_ = ys;
++			window_.x = 0;
++			window_.y = 0;
++		}
++	}
+ 
+ 	/*
+ 	 * Set the stats window to the whole processed window. Its coordinates are
+@@ -553,6 +593,20 @@ int DebayerCpu::configure(const StreamConfiguration &inputCfg,
+ 	lineBufferPadding_ = inputConfig_.patternSize.width * inputConfig_.bpp / 8;
+ 	lineBufferLength_ = window_.width * inputConfig_.bpp / 8 +
+			    2 * lineBufferPadding_;
++	{
++		unsigned int packed =
++			(inputCfg.size.width * inputConfig_.bpp + 7) / 8;
++		if (inputConfig_.stride < packed)
++			inputConfig_.stride = packed;
++	}
++	if (xSkip_ > 1)
++		lineBufferLength_ = inputConfig_.stride + 2 * lineBufferPadding_;
++	LOG(Debayer, Info) << "dagu skip " << xSkip_ << "x" << ySkip_
++			   << " in " << inputCfg.size
++			   << " stride " << inputCfg.stride
++			   << " out " << outputCfg.size
++			   << " lineBuf " << lineBufferLength_;
+ 
+	if (enableInputMemcpy_) {
+		for (unsigned int i = 0; i <= inputConfig_.patternSize.height; i++)
+@@ -650,10 +704,16 @@ void DebayerCpu::setupInputMemcpy(const uint8_t *linePointers[])
+ 		return;
+ 
+ 	for (unsigned int i = 0; i < patternHeight; i++) {
+-		memcpy(lineBuffers_[i].data(),
+-		       linePointers[i + 1] - lineBufferPadding_,
+-		       lineBufferLength_);
+-		linePointers[i + 1] = lineBuffers_[i].data() + lineBufferPadding_;
++		uint8_t *dst = lineBuffers_[i].data();
++		if (window_.x == 0) {
++			memcpy(dst + lineBufferPadding_, linePointers[i + 1],
++			       lineBufferLength_ - 2 * lineBufferPadding_);
++		} else {
++			memcpy(dst, linePointers[i + 1] - lineBufferPadding_,
++			       lineBufferLength_);
++		}
++		linePointers[i + 1] = dst + lineBufferPadding_;
+ 	}
+ 
+ 	/* Point lineBufferIndex_ to first unused lineBuffer */
+@@ -679,10 +739,18 @@ void DebayerCpu::memcpyNextLine(const uint8_t *linePointers[])
+ 	if (!enableInputMemcpy_)
+ 		return;
+ 
+-	memcpy(lineBuffers_[lineBufferIndex_].data(),
+-	       linePointers[patternHeight] - lineBufferPadding_,
+-	       lineBufferLength_);
+-	linePointers[patternHeight] = lineBuffers_[lineBufferIndex_].data() + lineBufferPadding_;
++	{
++		uint8_t *dst = lineBuffers_[lineBufferIndex_].data();
++		if (window_.x == 0) {
++			memcpy(dst + lineBufferPadding_, linePointers[patternHeight],
++			       lineBufferLength_ - 2 * lineBufferPadding_);
++		} else {
++			memcpy(dst, linePointers[patternHeight] - lineBufferPadding_,
++			       lineBufferLength_);
++		}
++		linePointers[patternHeight] = dst + lineBufferPadding_;
++	}
+ 
+ 	lineBufferIndex_ = (lineBufferIndex_ + 1) % (patternHeight + 1);
+@@ -683,6 +751,8 @@ void DebayerCpu::process2(uint32_t frame, const uint8_t *src, uint8_t *dst)
+ 		(this->*debayer1_)(dst, linePointers);
+ 		src += inputConfig_.stride;
+ 		dst += outputConfig_.stride;
++		if (ySkip_ > 1)
++			src += inputConfig_.stride * 2 * (ySkip_ - 1);
+ 	}
+ 
+ 	if (window_.y == 0) {
+@@ -997,8 +1067,26 @@ SizeRange DebayerCpu::sizes(PixelFormat inputFormat, const Size &inputSize)
+ 		return {};
+ 
+-	return SizeRange(Size(patternSize.width, patternSize.height),
+-			 Size((inputSize.width - 2 * patternSize.width) & ~(patternSize.width - 1),
+-			      (inputSize.height - 2 * borderHeight) & ~(patternSize.height - 1)),
++	Size max((inputSize.width - 2 * patternSize.width) & ~(patternSize.width - 1),
++		 (inputSize.height - 2 * borderHeight) & ~(patternSize.height - 1));
++	/* dagu: Android imx596 preview is IFE 1440x1080 full FOV @ 30fps.
++	 * PipeWire 1920x1080 is skip 1x1; integer Bayer skip matches CamX FOV. */
++	unsigned int div = inputSize.width >= 3000 ? 4u
++			 : inputSize.width >= 2000 ? 2u : 1u;
++	if (div > 1) {
++		Size cap((inputSize.width / div) & ~(patternSize.width - 1),
++			 (inputSize.height / div) & ~(patternSize.height - 1));
++		if (max.width > cap.width)
++			max = cap;
++	}
++	return SizeRange(Size(patternSize.width, patternSize.height),
++			 max,
+ 			 patternSize.width, patternSize.height);
+ }
+ 
+diff --git a/src/libcamera/software_isp/debayer_cpu.h b/src/libcamera/software_isp/debayer_cpu.h
+index b5cbb5b..156b079 100644
+--- a/src/libcamera/software_isp/debayer_cpu.h
++++ b/src/libcamera/software_isp/debayer_cpu.h
+@@ -147,6 +147,8 @@ private:
+ 	unsigned int lineBufferPadding_;
+ 	unsigned int lineBufferIndex_;
+ 	unsigned int xShift_; /* Offset of 0/1 applied to window_.x */
++	unsigned int xSkip_ = 1;
++	unsigned int ySkip_ = 1;
+ 	bool enableInputMemcpy_;
+ };
+ 

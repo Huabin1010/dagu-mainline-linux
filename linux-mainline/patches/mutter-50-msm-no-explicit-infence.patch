@@ -1,0 +1,49 @@
+From: dagu
+Subject: [PATCH] dagu: do not stall KMS on the Cogl sync_fd; keep DISABLE_IMPLICIT_SYNC
+
+Against mutter 50.1 (Ubuntu libmutter-18 50.1-0ubuntu2.2).
+
+do_handle_update() on sync_fd>=0:
+
+  1. sets META_KMS_ASSIGN_PLANE_FLAG_DISABLE_IMPLICIT_SYNC
+  2. if the fd is not readable, register_fd() and sleep
+
+On SM8250 the Cogl "latest" sync_file often stays unread 70-250 ms
+while gpu_busy is already 0. Sleeping there delays drmHandleEvent.
+
+The first live knife jumped straight to update_ready and skipped (1).
+Atomic then has no IN_FENCE_FD (the property is only added when
+DISABLE_IMPLICIT_SYNC is set, and the fd used is a signaled dummy,
+never the Cogl fd). The kernel falls back to implicit GEM wait on
+the GBM BO — same stale reservation, now as B-kick: maybe_post on
+time, dpu_enc_kickoff +100-250 ms.
+
+Keep (1), drop (2). Always update_ready once DISABLE is set.
+
+Live ELF:
+  0x1bd9ac  keep tbnz w20,#31,update_ready
+  0x1bd9d8  g_poll setup  ->  b update_ready
+
+---
+ src/backends/native/meta-kms-impl-device.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/backends/native/meta-kms-impl-device.c b/src/backends/native/meta-kms-impl-device.c
+index 0000000..dagu0002 100644
+--- a/src/backends/native/meta-kms-impl-device.c
++++ b/src/backends/native/meta-kms-impl-device.c
+@@ -2103,6 +2103,14 @@ do_handle_update (MetaKmsImplDevice *impl_device,
+         }
+     }
+ 
++  /*
++   * msm / Adreno: never poll/register the Cogl sync_fd. The atomic
++   * path only ever attaches a signaled dummy IN_FENCE when DISABLE
++   * is set; waiting here only stalls drmHandleEvent.
++   */
++  meta_kms_impl_device_update_ready (thread_impl, crtc_frame, NULL);
++  return;
++
+   if (sync_fd < 0 ||
+       is_fd_readable (sync_fd))
+     {

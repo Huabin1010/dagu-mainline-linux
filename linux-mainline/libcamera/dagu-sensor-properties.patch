@@ -1,0 +1,15 @@
+--- a/src/libcamera/camera_sensor_properties.cpp
++++ b/src/libcamera/camera_sensor_properties.cpp
+@@
+ 	{ "imx219", {
+ 		.unitCellSize = { 1120, 1120 },
++	} },
++	{ "s5kjn1", {
++		.unitCellSize = { 640, 640 },
++	} },
++	{ "imx596", {
++		.unitCellSize = { 800, 800 },
++	} },
++	{ "imx596-dagu", {
++		.unitCellSize = { 800, 800 },
+ 	} },

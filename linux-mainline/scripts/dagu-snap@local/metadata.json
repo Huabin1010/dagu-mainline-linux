@@ -1,0 +1,6 @@
+{
+  "uuid": "dagu-snap@local",
+  "name": "dagu screenshot helper",
+  "description": "Write /tmp/dagu-snap.png when /tmp/dagu-snap.want appears. Does not open the OSK.",
+  "shell-version": ["50"]
+}

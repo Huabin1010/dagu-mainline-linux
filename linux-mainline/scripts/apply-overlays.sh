@@ -1016,17 +1016,8 @@ if marker not in text:
     changed = True
     print(f"patched {path}: {marker}")
 
-marker = "dagu: keep POWER_SAVE in sniff"
-if marker not in text:
-    old = """		if (!test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND,
-					&conn->flags)) {
-			if (conn->mode == HCI_CM_ACTIVE)
-				set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
-			else
-				clear_bit(HCI_CONN_POWER_SAVE, &conn->flags);
-		}
-"""
-    new = """		test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND, &conn->flags);
+marker = "dagu: HID sniff TX stays in-window"
+old_force_exit = """		test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND, &conn->flags);
 		/* dagu: keep POWER_SAVE in sniff so host TX (LED / output
 		 * report) can Exit Sniff. Remote-initiated sniff used to
 		 * clear this bit, leaving the first host packet stuck
@@ -1038,11 +1029,39 @@ if marker not in text:
 		else if (conn->mode == HCI_CM_ACTIVE)
 			set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
 """
-    if old not in text:
+old_upstream = """		if (!test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND,
+					&conn->flags)) {
+			if (conn->mode == HCI_CM_ACTIVE)
+				set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+			else
+				clear_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+		}
+"""
+new_in_window = """		if (!test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND,
+					&conn->flags)) {
+			/* dagu: HID sniff TX stays in-window. K380 sniff is
+			 * 20 slots (12.5 ms). Exit Sniff for LED/output is
+			 * ~200 ms on QCA6390, so Ctrl+T / the next key wait
+			 * and Linux autorepeats the first key. Do not set
+			 * POWER_SAVE in sniff. Sniff itself stays enabled.
+			 */
+			if (conn->mode == HCI_CM_ACTIVE)
+				set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+			else
+				clear_bit(HCI_CONN_POWER_SAVE, &conn->flags);
+		}
+"""
+if marker not in text:
+    if old_force_exit in text:
+        text = text.replace(old_force_exit, new_in_window, 1)
+        changed = True
+        print(f"patched {path}: {marker} (from force-exit)")
+    elif old_upstream in text:
+        text = text.replace(old_upstream, new_in_window, 1)
+        changed = True
+        print(f"patched {path}: {marker}")
+    else:
         raise SystemExit(f"{path}: mode-change POWER_SAVE block not found")
-    text = text.replace(old, new, 1)
-    changed = True
-    print(f"patched {path}: {marker}")
 
 marker = "dagu: create inquiry cache from Read Clock Offset"
 if marker not in text:
@@ -1087,6 +1106,139 @@ if marker not in text:
 
 if changed:
     path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+changed = False
+
+marker = "dagu: Create Connection Cancel must not wait"
+if marker not in text:
+    old = """	if (reason != HCI_ERROR_REMOTE_POWER_OFF)
+		return __hci_cmd_sync_status_sk(hdev, HCI_OP_CREATE_CONN_CANCEL,
+						6, &conn->dst,
+						HCI_EV_CONN_COMPLETE,
+						HCI_CMD_TIMEOUT, NULL);
+
+	return __hci_cmd_sync_status(hdev, HCI_OP_CREATE_CONN_CANCEL,
+				     6, &conn->dst, HCI_CMD_TIMEOUT);
+"""
+    new = """	/* dagu: Create Connection Cancel must not wait for
+	 * HCI_EV_CONN_COMPLETE when the handle is still unset.
+	 * QCA6390 returns Unknown Connection Identifier (0x02) while
+	 * the radio is still paging; waiting the event leaves
+	 * handle 3840 in BT_CONNECT and Inquiry sees Busy. 0x02 maps
+	 * to -ENOTCONN — that is a successful host-side cancel.
+	 */
+	if (HCI_CONN_HANDLE_UNSET(conn->handle) ||
+	    reason == HCI_ERROR_REMOTE_POWER_OFF) {
+		int err;
+
+		err = __hci_cmd_sync_status(hdev, HCI_OP_CREATE_CONN_CANCEL,
+					    6, &conn->dst, HCI_CMD_TIMEOUT);
+		if (err == -ENOTCONN)
+			return 0;
+		return err;
+	}
+
+	return __hci_cmd_sync_status_sk(hdev, HCI_OP_CREATE_CONN_CANCEL,
+					6, &conn->dst,
+					HCI_EV_CONN_COMPLETE,
+					HCI_CMD_TIMEOUT, NULL);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: Create Connection Cancel wait block not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+marker = "dagu: ACL Create Connection needs a complete callback"
+if marker not in text:
+    old = """int hci_connect_acl_sync(struct hci_dev *hdev, struct hci_conn *conn)
+{
+	int err;
+
+	err = hci_cmd_sync_queue_once(hdev, hci_acl_create_conn_sync, conn,
+				      NULL);
+	return (err == -EEXIST) ? 0 : err;
+}
+"""
+    new = """static void create_acl_conn_complete(struct hci_dev *hdev, void *data, int err)
+{
+	struct hci_conn *conn = data;
+
+	/* dagu: ACL Create Connection needs a complete callback.
+	 * Upstream queues it with NULL complete, so a Page Timeout
+	 * without HCI_EV_CONN_COMPLETE leaves BT_CONNECT + unset
+	 * handle (3840) occupying the QCA radio.
+	 */
+	if (err == -ECANCELED)
+		return;
+
+	hci_dev_lock(hdev);
+
+	if (!hci_conn_valid(hdev, conn))
+		goto done;
+
+	if (!err || conn->state != BT_CONNECT)
+		goto done;
+
+	hci_conn_failed(conn, bt_status(err));
+
+done:
+	hci_dev_unlock(hdev);
+}
+
+int hci_connect_acl_sync(struct hci_dev *hdev, struct hci_conn *conn)
+{
+	int err;
+
+	err = hci_cmd_sync_queue_once(hdev, hci_acl_create_conn_sync, conn,
+				      create_acl_conn_complete);
+	return (err == -EEXIST) ? 0 : err;
+}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hci_connect_acl_sync not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+if changed:
+    path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/drivers/bluetooth/hci_qca.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: GNOME Settings dual-mode StartDiscovery"
+if marker not in text:
+    old = """	/* Enable controller to do both LE scan and BR/EDR inquiry
+	 * simultaneously.
+	 */
+	hci_set_quirk(hdev, HCI_QUIRK_SIMULTANEOUS_DISCOVERY);
+"""
+    new = """	/* dagu: GNOME Settings dual-mode StartDiscovery. QCA6390/ROME is
+	 * TDD and shares the radio with LE HID; HCI_QUIRK_SIMULTANEOUS_DISCOVERY
+	 * runs LE scan + Inquiry at once and starves BR FHS, so K380 appears
+	 * then vanishes from the panel. Leave the quirk unset so the host
+	 * time-slices LE scan then Inquiry (Android does this). Do not kill
+	 * gnome-control-center; do not set ControllerMode=bredr.
+	 */
+	if (soc_type != QCA_ROME && soc_type != QCA_QCA6390)
+		hci_set_quirk(hdev, HCI_QUIRK_SIMULTANEOUS_DISCOVERY);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: SIMULTANEOUS_DISCOVERY block not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
 PY
 
 python3 - "$KERNEL_SRC/drivers/soc/qcom/qcom-geni-se.c" <<'PY'
@@ -1577,6 +1729,574 @@ if marker not in text:
 """
     if old not in text:
         raise SystemExit(f"{path}: runtime_resume needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Xiaomi Fast Use Case: mixer_paths leaves Fast Use Case Switch On and
+# loads per-amp *-music.txt into Halo CSPL_UPDATE_PARAMS_CONFIG.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: CS35L41 Fast Use Case music.txt"
+if marker not in text:
+    old = """#include "cs35l41.h"
+"""
+    new = """#include "cs35l41.h"
+#include <asm/byteorder.h>
+#include <linux/slab.h>
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: cs35l41.h include needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """static int cs35l41_dsp_audio_ev(struct snd_soc_dapm_widget *w,
+				struct snd_kcontrol *kcontrol, int event)
+{
+"""
+    new = """#define CS35L41_CSPL_ALG		0xcd
+#define CS35L41_CSPL_CMD_UPDATE_PARAM	8
+#define CS35L41_CSPL_ST_RUNNING		0
+#define CS35L41_FAST_SWITCH_BUF		64
+
+static int cs35l41_csp_write(struct wm_adsp *dsp, const char *name,
+			     void *buf, size_t len)
+{
+	static const int types[] = {
+		WMFW_ADSP2_YM, WMFW_ADSP2_XM,
+		WMFW_HALO_YM_PACKED, WMFW_HALO_XM_PACKED,
+	};
+	int i, ret = -ENOENT;
+
+	for (i = 0; i < ARRAY_SIZE(types); i++) {
+		ret = wm_adsp_write_ctl(dsp, name, types[i], CS35L41_CSPL_ALG,
+					buf, len);
+		if (!ret)
+			return 0;
+	}
+	return ret;
+}
+
+static int cs35l41_csp_read(struct wm_adsp *dsp, const char *name,
+			    void *buf, size_t len)
+{
+	static const int types[] = {
+		WMFW_ADSP2_YM, WMFW_ADSP2_XM,
+		WMFW_HALO_YM_PACKED, WMFW_HALO_XM_PACKED,
+	};
+	int i, ret = -ENOENT;
+
+	for (i = 0; i < ARRAY_SIZE(types); i++) {
+		ret = wm_adsp_read_ctl(dsp, name, types[i], CS35L41_CSPL_ALG,
+				       buf, len);
+		if (ret >= 0)
+			return 0;
+	}
+	return ret;
+}
+
+/* CAF cs35l41_do_fast_switch: comma-separated s32 -> Halo UPDATE_PARAM. */
+static int cs35l41_do_fast_switch(struct cs35l41_private *cs35l41)
+{
+	char val_str[CS35L41_FAST_SWITCH_BUF];
+	const struct firmware *fw;
+	const char *fw_name = cs35l41->fast_switch_name;
+	__be32 *data_ctl_buf = NULL, cmd_ctl, st_ctl;
+	s32 data_ctl_len, val;
+	unsigned int i, j, k;
+	int ret;
+	bool fw_running = false;
+
+	/* dagu: CS35L41 Fast Use Case music.txt */
+	if (!fw_name)
+		return 0;
+
+	ret = request_firmware(&fw, fw_name, cs35l41->dev);
+	if (ret) {
+		dev_err(cs35l41->dev, "dagu: fast-switch firmware %s: %d\\n",
+			fw_name, ret);
+		return ret;
+	}
+
+	for (i = 0, j = 0; i < fw->size && (char)fw->data[i] != ','; i++) {
+		if ((char)fw->data[i] == ' ' || (char)fw->data[i] == '\\n' ||
+		    (char)fw->data[i] == '\\r' || (char)fw->data[i] == '\\t')
+			continue;
+		if (j >= CS35L41_FAST_SWITCH_BUF - 1) {
+			ret = -EINVAL;
+			goto exit;
+		}
+		val_str[j++] = fw->data[i];
+	}
+	if (i >= fw->size) {
+		ret = -EINVAL;
+		goto exit;
+	}
+	i++;
+	val_str[j] = '\\0';
+	ret = kstrtos32(val_str, 10, &data_ctl_len);
+	if (ret || data_ctl_len < 1) {
+		dev_err(cs35l41->dev, "dagu: fast-switch len %s: %d\\n",
+			val_str, ret);
+		ret = ret ? ret : -EINVAL;
+		goto exit;
+	}
+
+	data_ctl_buf = kcalloc(data_ctl_len, sizeof(*data_ctl_buf), GFP_KERNEL);
+	if (!data_ctl_buf) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+	data_ctl_buf[0] = cpu_to_be32(data_ctl_len);
+
+	for (j = 0, k = 1; i <= fw->size && k < (unsigned int)data_ctl_len; i++) {
+		char c = (i == fw->size) ? ',' : (char)fw->data[i];
+
+		if (c == ',' || i == fw->size) {
+			if (!j)
+				continue;
+			val_str[j] = '\\0';
+			ret = kstrtos32(val_str, 10, &val);
+			if (ret) {
+				dev_err(cs35l41->dev,
+					"dagu: fast-switch parse %s: %d\\n",
+					val_str, ret);
+				goto exit;
+			}
+			data_ctl_buf[k++] = cpu_to_be32(val);
+			j = 0;
+		} else if (c == ' ' || c == '\\n' || c == '\\r' || c == '\\t') {
+			continue;
+		} else {
+			if (j >= CS35L41_FAST_SWITCH_BUF - 1) {
+				ret = -EINVAL;
+				goto exit;
+			}
+			val_str[j++] = c;
+		}
+	}
+
+	ret = cs35l41_csp_write(&cs35l41->dsp, "CSPL_UPDATE_PARAMS_CONFIG",
+				data_ctl_buf, data_ctl_len * sizeof(__be32));
+	if (ret) {
+		dev_err(cs35l41->dev, "dagu: CSPL_UPDATE_PARAMS_CONFIG: %d\\n",
+			ret);
+		goto exit;
+	}
+
+	cmd_ctl = cpu_to_be32(CS35L41_CSPL_CMD_UPDATE_PARAM);
+	ret = cs35l41_csp_write(&cs35l41->dsp, "CSPL_COMMAND", &cmd_ctl,
+				sizeof(cmd_ctl));
+	if (ret) {
+		dev_err(cs35l41->dev, "dagu: CSPL_COMMAND UPDATE_PARAM: %d\\n",
+			ret);
+		goto exit;
+	}
+
+	for (i = 0; i < 5; i++) {
+		ret = cs35l41_csp_read(&cs35l41->dsp, "CSPL_STATE", &st_ctl,
+				       sizeof(st_ctl));
+		if (!ret && be32_to_cpu(st_ctl) == CS35L41_CSPL_ST_RUNNING) {
+			fw_running = true;
+			break;
+		}
+		usleep_range(100, 110);
+	}
+	if (!fw_running) {
+		dev_err(cs35l41->dev, "dagu: CSPL_STATE not RUNNING after fast-switch\\n");
+		ret = -EIO;
+		goto exit;
+	}
+	dev_info(cs35l41->dev, "dagu: fast-switch %s (%d words)\\n",
+		 fw_name, data_ctl_len);
+	ret = 0;
+exit:
+	kfree(data_ctl_buf);
+	release_firmware(fw);
+	return ret;
+}
+
+static int cs35l41_fast_switch_en_get(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component =
+		snd_kcontrol_chip(kcontrol);
+	struct cs35l41_private *cs35l41 =
+		snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.integer.value[0] = cs35l41->fast_switch_en;
+	return 0;
+}
+
+static int cs35l41_fast_switch_en_put(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component =
+		snd_kcontrol_chip(kcontrol);
+	struct cs35l41_private *cs35l41 =
+		snd_soc_component_get_drvdata(component);
+	int enable = !!ucontrol->value.integer.value[0];
+	int ret = 0;
+
+	if (enable && !cs35l41->fast_switch_en && cs35l41->dsp.cs_dsp.running)
+		ret = cs35l41_do_fast_switch(cs35l41);
+	cs35l41->fast_switch_en = enable;
+	return ret;
+}
+
+static int cs35l41_dsp_audio_ev(struct snd_soc_dapm_widget *w,
+				struct snd_kcontrol *kcontrol, int event)
+{
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: dsp_audio_ev needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """		return cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						 CSPL_MBOX_CMD_RESUME);
+	case SND_SOC_DAPM_PRE_PMD:
+"""
+    new = """		ret = cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						CSPL_MBOX_CMD_RESUME);
+		if (ret)
+			return ret;
+		if (cs35l41->fast_switch_en) {
+			ret = cs35l41_do_fast_switch(cs35l41);
+			if (ret)
+				dev_err(cs35l41->dev,
+					"dagu: fast-switch after RESUME: %d\\n",
+					ret);
+		}
+		return 0;
+	case SND_SOC_DAPM_PRE_PMD:
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: RESUME needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	WM_ADSP2_PRELOAD_SWITCH("DSP1", 1),
+	WM_ADSP_FW_CONTROL("DSP1", 0),
+};
+"""
+    new = """	WM_ADSP2_PRELOAD_SWITCH("DSP1", 1),
+	WM_ADSP_FW_CONTROL("DSP1", 0),
+	SOC_SINGLE_EXT("Fast Use Case Switch Enable", SND_SOC_NOPM, 0, 1, 0,
+		       cs35l41_fast_switch_en_get, cs35l41_fast_switch_en_put),
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: aud_controls needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	if (hw_cfg) {
+		cs35l41->hw_cfg = *hw_cfg;
+	} else {
+		ret = cs35l41_handle_pdata(cs35l41->dev, &cs35l41->hw_cfg);
+		if (ret != 0)
+			return ret;
+	}
+"""
+    new = """	if (hw_cfg) {
+		cs35l41->hw_cfg = *hw_cfg;
+	} else {
+		ret = cs35l41_handle_pdata(cs35l41->dev, &cs35l41->hw_cfg);
+		if (ret != 0)
+			return ret;
+	}
+
+	if (!device_property_read_string(cs35l41->dev, "cirrus,fast-switch",
+					 &cs35l41->fast_switch_name))
+		cs35l41->fast_switch_en = true;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: probe pdata needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.h"
+text = path.read_text()
+marker = "dagu: CS35L41 fast-switch fields"
+if marker not in text:
+    old = """	struct gpio_desc *reset_gpio;
+};
+"""
+    new = """	struct gpio_desc *reset_gpio;
+	/* dagu: CS35L41 fast-switch fields */
+	const char *fast_switch_name;
+	bool fast_switch_en;
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: cs35l41_private needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: fast-switch after first DSP start"
+if marker not in text and "mod_delayed_work(system_wq, &cs35l41->fast_switch_work" not in text:
+    old = """		if (!cs35l41->dsp.cs_dsp.running)
+			return wm_adsp_event(w, kcontrol, event);
+"""
+    new = """		if (!cs35l41->dsp.cs_dsp.running) {
+			/* dagu: fast-switch after first DSP start */
+			ret = wm_adsp_event(w, kcontrol, event);
+			if (ret)
+				return ret;
+			if (cs35l41->fast_switch_en) {
+				ret = cs35l41_do_fast_switch(cs35l41);
+				if (ret)
+					dev_err(cs35l41->dev,
+						"dagu: fast-switch after DSP start: %d\\n",
+						ret);
+			}
+			return 0;
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: first DSP start needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: fast-switch uses snd_kcontrol_chip"
+if marker not in text and "snd_soc_kcontrol_component" in text:
+    text = text.replace("snd_soc_kcontrol_component", "snd_kcontrol_chip")
+    text = text.replace(
+        "static int cs35l41_fast_switch_en_get(struct snd_kcontrol *kcontrol,",
+        "/* dagu: fast-switch uses snd_kcontrol_chip */\nstatic int cs35l41_fast_switch_en_get(struct snd_kcontrol *kcontrol,",
+        1,
+    )
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.h"
+text = path.read_text()
+marker = "dagu: fast-switch delayed_work"
+if marker not in text:
+    old = """	const char *fast_switch_name;
+	bool fast_switch_en;
+};
+"""
+    new = """	const char *fast_switch_name;
+	bool fast_switch_en;
+	/* dagu: fast-switch delayed_work */
+	struct delayed_work fast_switch_work;
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: fast_switch_en field needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: fast-switch off DAPM"
+if marker not in text:
+    old = """	cs35l41->fast_switch_en = enable;
+	return ret;
+}
+
+static int cs35l41_dsp_audio_ev(struct snd_soc_dapm_widget *w,
+"""
+    new = """	cs35l41->fast_switch_en = enable;
+	return ret;
+}
+
+static void cs35l41_fast_switch_work(struct work_struct *work)
+{
+	struct cs35l41_private *cs35l41 =
+		container_of(work, struct cs35l41_private, fast_switch_work.work);
+
+	/* dagu: fast-switch off DAPM */
+	if (!cs35l41->fast_switch_en || !cs35l41->dsp.cs_dsp.running)
+		return;
+	cs35l41_do_fast_switch(cs35l41);
+}
+
+static int cs35l41_dsp_audio_ev(struct snd_soc_dapm_widget *w,
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: fast_switch workfn needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """		if (!cs35l41->dsp.cs_dsp.running) {
+			/* dagu: fast-switch after first DSP start */
+			ret = wm_adsp_event(w, kcontrol, event);
+			if (ret)
+				return ret;
+			if (cs35l41->fast_switch_en) {
+				ret = cs35l41_do_fast_switch(cs35l41);
+				if (ret)
+					dev_err(cs35l41->dev,
+						"dagu: fast-switch after DSP start: %d\\n",
+						ret);
+			}
+			return 0;
+		}
+"""
+    new = """		if (!cs35l41->dsp.cs_dsp.running) {
+			ret = wm_adsp_event(w, kcontrol, event);
+			if (ret)
+				return ret;
+			if (cs35l41->fast_switch_en)
+				mod_delayed_work(system_wq, &cs35l41->fast_switch_work,
+						 msecs_to_jiffies(80));
+			return 0;
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: first-start defer needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """		ret = cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						CSPL_MBOX_CMD_RESUME);
+		if (ret)
+			return ret;
+		if (cs35l41->fast_switch_en) {
+			ret = cs35l41_do_fast_switch(cs35l41);
+			if (ret)
+				dev_err(cs35l41->dev,
+					"dagu: fast-switch after RESUME: %d\\n",
+					ret);
+		}
+		return 0;
+	case SND_SOC_DAPM_PRE_PMD:
+		return cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						 CSPL_MBOX_CMD_PAUSE);
+"""
+    new = """		ret = cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						CSPL_MBOX_CMD_RESUME);
+		if (ret)
+			return ret;
+		if (cs35l41->fast_switch_en)
+			mod_delayed_work(system_wq, &cs35l41->fast_switch_work,
+					 msecs_to_jiffies(80));
+		return 0;
+	case SND_SOC_DAPM_PRE_PMD:
+		cancel_delayed_work_sync(&cs35l41->fast_switch_work);
+		return cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
+						 CSPL_MBOX_CMD_PAUSE);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: RESUME defer needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	if (!device_property_read_string(cs35l41->dev, "cirrus,fast-switch",
+					 &cs35l41->fast_switch_name))
+		cs35l41->fast_switch_en = true;
+"""
+    new = """	if (!device_property_read_string(cs35l41->dev, "cirrus,fast-switch",
+					 &cs35l41->fast_switch_name))
+		cs35l41->fast_switch_en = true;
+	INIT_DELAYED_WORK(&cs35l41->fast_switch_work, cs35l41_fast_switch_work);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: INIT_DELAYED_WORK needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """void cs35l41_remove(struct cs35l41_private *cs35l41)
+{
+	pm_runtime_get_sync(cs35l41->dev);
+"""
+    new = """void cs35l41_remove(struct cs35l41_private *cs35l41)
+{
+	cancel_delayed_work_sync(&cs35l41->fast_switch_work);
+	pm_runtime_get_sync(cs35l41->dev);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: remove cancel needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Xiaomi DAGU CAF cs35l41_pcm_hw_params: S24_LE is 24-bit samples in 32-bit
+# TDM slots (Q6 slot_width=32, 4 slots, 6.144 MHz). Mainline wrote
+# params_width (24) into ASP_WIDTH_RX, so the chip framed 24-bit slots
+# against 32-bit Q6 slots — 8 MSB zeros ≈ -48 dB at "full" volume.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: ASP_WIDTH is physical slot, RX_WL is sample"
+if marker not in text:
+    old = """	unsigned int rate = params_rate(params);
+	u8 asp_wl;
+	int i;
+"""
+    new = """	unsigned int rate = params_rate(params);
+	u8 asp_wl, asp_width;
+	int i;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: asp_wl decl needle missing")
+    text = text.replace(old, new, 1)
+
+    old = """	asp_wl = params_width(params);
+
+	regmap_update_bits(cs35l41->regmap, CS35L41_GLOBAL_CLK_CTRL,
+			   CS35L41_GLOBAL_FS_MASK,
+			   cs35l41_fs_rates[i].fs_cfg << CS35L41_GLOBAL_FS_SHIFT);
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
+				   CS35L41_ASP_WIDTH_RX_MASK,
+				   asp_wl << CS35L41_ASP_WIDTH_RX_SHIFT);
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_RX_WL,
+				   CS35L41_ASP_RX_WL_MASK,
+				   asp_wl << CS35L41_ASP_RX_WL_SHIFT);
+	} else {
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
+				   CS35L41_ASP_WIDTH_TX_MASK,
+				   asp_wl << CS35L41_ASP_WIDTH_TX_SHIFT);
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_TX_WL,
+				   CS35L41_ASP_TX_WL_MASK,
+				   asp_wl << CS35L41_ASP_TX_WL_SHIFT);
+	}
+"""
+    new = """	asp_wl = params_width(params);
+	/* dagu: ASP_WIDTH is physical slot, RX_WL is sample */
+	asp_width = params_physical_width(params);
+
+	regmap_update_bits(cs35l41->regmap, CS35L41_GLOBAL_CLK_CTRL,
+			   CS35L41_GLOBAL_FS_MASK,
+			   cs35l41_fs_rates[i].fs_cfg << CS35L41_GLOBAL_FS_SHIFT);
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
+				   CS35L41_ASP_WIDTH_RX_MASK,
+				   asp_width << CS35L41_ASP_WIDTH_RX_SHIFT);
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_RX_WL,
+				   CS35L41_ASP_RX_WL_MASK,
+				   asp_wl << CS35L41_ASP_RX_WL_SHIFT);
+	} else {
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
+				   CS35L41_ASP_WIDTH_TX_MASK,
+				   asp_width << CS35L41_ASP_WIDTH_TX_SHIFT);
+		regmap_update_bits(cs35l41->regmap, CS35L41_SP_TX_WL,
+				   CS35L41_ASP_TX_WL_MASK,
+				   asp_wl << CS35L41_ASP_TX_WL_SHIFT);
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hw_params ASP_WIDTH needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
+# Android mixer_paths: Boost Class-H Tracking Enable=1, Boost Target Voltage=0.
+# BST_CTL_SEL bit0=Class-H; target 0 is ignored while tracking.
+path = root / "sound/soc/codecs/cs35l41.c"
+text = path.read_text()
+marker = "dagu: Boost Class-H Tracking mixers"
+if marker not in text:
+    old = """	SOC_SINGLE_TLV("Analog PCM Volume", CS35L41_AMP_GAIN_CTRL, 5, 0x14, 0,
+		       amp_gain_tlv),
+"""
+    new = """	SOC_SINGLE_TLV("Analog PCM Volume", CS35L41_AMP_GAIN_CTRL, 5, 0x14, 0,
+		       amp_gain_tlv),
+	/* dagu: Boost Class-H Tracking mixers */
+	SOC_SINGLE("Boost Class-H Tracking Enable",
+		   CS35L41_BSTCVRT_VCTRL2, 0, 1, 0),
+	SOC_SINGLE("Boost Target Voltage", CS35L41_BSTCVRT_VCTRL1, 0, 0xAA, 0),
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: Analog PCM Volume needle missing")
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: {marker}")
 

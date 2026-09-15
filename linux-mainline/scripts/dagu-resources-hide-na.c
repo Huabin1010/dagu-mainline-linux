@@ -3,8 +3,13 @@
 #include <string.h>
 
 /*
- * Hide Resources rows/graphs whose subtitle is N/A.
+ * Hide Resources rows/graphs whose *value* is N/A.
  * Only intercepts libadwaita / GTK setters — not sysfs. Values stay truthful.
+ *
+ * ResGraphBox title_label uses CSS class "subtitle". Logical CPU tiles set
+ * that title to "N/A" until the first frequency sample. Hiding the whole
+ * box made "Show usages of logical CPUs" a blank page. Visibility follows
+ * the value label (info_label) only, and is restored when the value is real.
  */
 
 struct gtype_instance {
@@ -51,6 +56,15 @@ static void *widget_parent(void *widget)
 	return fn ? fn(widget) : NULL;
 }
 
+static int has_css_class(void *widget, const char *cls)
+{
+	static int (*fn)(void *, const char *);
+
+	if (!fn)
+		fn = dlsym(RTLD_DEFAULT, "gtk_widget_has_css_class");
+	return (fn && widget && cls) ? fn(widget, cls) : 0;
+}
+
 static const char *type_name(void *obj)
 {
 	static const char *(*fn)(unsigned long);
@@ -74,16 +88,19 @@ static void hide_graph_if_na(void *label, const char *text)
 {
 	void *w;
 	int i;
+	int vis;
 
-	if (!is_na(text))
+	if (has_css_class(label, "subtitle"))
 		return;
+
+	vis = !is_na(text);
 	w = label;
 	for (i = 0; i < 8 && w; i++) {
 		const char *n = type_name(w);
 
 		if (strcmp(n, "ResGraphBox") == 0 ||
 		    strcmp(n, "ResDoubleGraphBox") == 0) {
-			set_visible(w, 0);
+			set_visible(w, vis);
 			return;
 		}
 		w = widget_parent(w);

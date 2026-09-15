@@ -76,7 +76,8 @@ if [[ "$WIFI_STAGED" -eq 0 ]]; then
 	fi
 
 	find "$EXTRACT" -type f \( -name '*cs35l41*' -o -name 'TL-cs35l41*' -o -name 'TR-cs35l41*' \
-		-o -name 'BL-cs35l41*' -o -name 'BR-cs35l41*' \) -exec cp -f {} "$LIB/cirrus/" \; 2>/dev/null || true
+		-o -name 'BL-cs35l41*' -o -name 'BR-cs35l41*' -o -name '*-music.txt' \
+		-o -name '*-voice.txt' \) -exec cp -f {} "$LIB/cirrus/" \; 2>/dev/null || true
 	# Mainline wm_adsp with cirrus,subsystem-id = "dagu":
 	#   cs35l41-dsp1-spk-prot-dagu.wmfw + cs35l41-dsp1-spk-prot-dagu-{tl,tr,bl,br}.bin
 	if [[ -f "$LIB/cirrus/cs35l41-dsp1-spk-prot.wmfw" ]]; then

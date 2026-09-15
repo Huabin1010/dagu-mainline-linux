@@ -60,7 +60,7 @@
 | 后摄 s5kjn1 | **部分** | probe + C-PHY 寄存器对，STREAMON CCI NACK，0 帧 |
 | 前摄 imx596 | **部分** | chip id 读到，开流，0 帧 |
 | CAMSS VFE/SMMU | **已通** | CSID TPG 出过完整 1 帧（约 15.6 MB） |
-| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6；`hci0` `F0:6C:5D:71:3A:2A` Powered: yes。BLE 鼠标走 HOG，需要 `CONFIG_UHID` + `CONFIG_BT_LE`。经典 HID 键盘（K380）：`ClassicBondedOnly=false` + `UserspaceHID=persist`。寻呼带 clock offset（不是 R2+0），HID 主机 Central + FastConnectable 交错 page scan，sniff 6–18 slot。保留 sniff / UART RPM / IBS / WakeAllowed，不关睡眠 |
+| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6；`hci0` `F0:6C:5D:71:3A:2A` Powered: yes。DT 对照 elish/`qcom,qca6390-bt`：`max-speed` 3 Mbps + PMU LDO，BT_EN 走 pmu pwrseq。BLE 鼠标走 HOG（`CONFIG_UHID` + `CONFIG_BT_LE`）。经典 HID：`ClassicBondedOnly=false` + `UserspaceHID=persist`。寻呼带 clock offset，HID 主机 Central + FastConnectable，sniff 6–18。Page Timeout 拆 unset-handle ACL。GNOME Settings 是配对 UI：6390 去掉 `HCI_QUIRK_SIMULTANEOUS_DISCOVERY`，type 7 由内核分时 LE/Inquiry；`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。`TemporaryTimeout=180`。保留 sniff / UART RPM / IBS / WakeAllowed |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
 | 双电芯电量 | **DT 已写** | 双 BQ27Z561 + `xiaomi-dual-fg`，脚本可查 `power_supply` |
 | 充电（SMB5） | **DT+驱动已写** | PM8150B `@1000` overlay；GPIO74 拉低放行 VBUS。未刷核验收 |
@@ -185,6 +185,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
   - `linux-mainline/alsa/50-dagu-alsa-sink.conf`（装到 `/etc/pipewire/pipewire.conf.d/`）
 - **听感（对齐安卓，2026-09-12）**：安卓 `mixer_paths_overlay_static.xml` 走 CS35L41 **DSP Protection**（`PCM Source=DSP`、`AMP PCM Gain=18`、`Digital=0 dB`、`DRE=on`、`TL/TR/BL/BR-cs35l41-dsp1-spk-prot.bin`）。Linux 之前切成 ASP 直通，没有 Xiaomi 调音/DRC，所以再加大数字增益也和安卓差一截。`linux-mainline/scripts/dagu-speaker-route.sh` 现按安卓路径 preload 每颗功放的 prot.bin。
 - **拉满仍然很小声（2026-09-12）**：不是 GNOME 滑条，也不是再加数字增益。四颗 CS35L41 **在通路里**（DSP 已载 L81A Music prot.bin，`Analog PCM=18` `Digital PCM=0 dB`）。`-110` 是 PMD 关断超时，不是没上电。安卓 tinymix 里 Halo `CAL_SET_STATUS=2`；现网内核只写到 `CAL_STATUS=1`。主线没有 Fast Use Case mixer，`*-music.txt` 还没灌。控件名已对齐主线（`Analog PCM` 不是 `Analog PCM Volume`）。底稿 `linux-mainline/docs/dagu-deep-hardware-reclamation.md`。禁止 softvol。
+- **拉满仍然很小声（2026-09-15）**：通路、sink、Analog 18 / Digital 817、Fast Use Case music.txt 都在。主线 `cs35l41_pcm_hw_params` 把 `params_width`（S24_LE=24）写进 `ASP_WIDTH_RX`，而 Q6 TDM 是 **32-bit slot × 4**。安卓 CAF DAGU 是 `ASP_WIDTH=params_physical_width`（32）+ `RX_WL=24`。槽宽差 8 bit → MSB 空约 **-48 dB**。overlay 已按 CAF 拆开 slot/sample；Class-H tracking mixer 对齐安卓 `Enable=1` / `Target=0`。禁止 Digital PCM / softvol 补响。
 
 `&adsp` okay，固件 `qcom/sm8250/xiaomi/dagu/adsp.mbn`。需要 `CONFIG_QRTR_SMD=y`（不要 =m），否则 PDR/APR 起不来。
 

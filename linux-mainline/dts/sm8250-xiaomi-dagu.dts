@@ -142,6 +142,7 @@
 			cirrus,gpio2-src-select = <4>;
 			cirrus,gpio2-output-enable;
 			cirrus,subsystem-id = "dagu";
+			cirrus,fast-switch = "cirrus/BR-music.txt";
 			/* persist cs35l41_cal_spk3: 6.93 ohm */
 			cirrus,cal-r = <9696>;
 			cirrus,cal-ambient = <23>;
@@ -166,6 +167,7 @@
 			cirrus,gpio2-output-enable;
 			cirrus,right-channel-amp;
 			cirrus,subsystem-id = "dagu";
+			cirrus,fast-switch = "cirrus/BL-music.txt";
 			/* persist cs35l41_cal_spk4: 6.79 ohm */
 			cirrus,cal-r = <9497>;
 			cirrus,cal-ambient = <23>;
@@ -201,6 +203,7 @@
 			cirrus,gpio2-src-select = <4>;
 			cirrus,gpio2-output-enable;
 			cirrus,subsystem-id = "dagu";
+			cirrus,fast-switch = "cirrus/TL-music.txt";
 			/* persist cs35l41_cal_spk1: 6.81 ohm */
 			cirrus,cal-r = <9524>;
 			cirrus,cal-ambient = <23>;
@@ -224,6 +227,7 @@
 			cirrus,gpio2-src-select = <4>;
 			cirrus,gpio2-output-enable;
 			cirrus,subsystem-id = "dagu";
+			cirrus,fast-switch = "cirrus/TR-music.txt";
 			/* persist cs35l41_cal_spk2: 6.89 ohm */
 			cirrus,cal-r = <9632>;
 			cirrus,cal-ambient = <23>;
@@ -1468,6 +1472,22 @@
 	qcom,skip-wrapper-fw-init;
 	status = "okay";
 	bluetooth {
+		/*
+		 * Binding: qcom,qca6390-bt.yaml. Elish already has compatible
+		 * + PMU LDOs; restated here so the board file is the source.
+		 * Power enable is qca6390-pmu bt-enable-gpios (GPIO21) via
+		 * pwrseq, not enable-gpios on this node (that would double-drive).
+		 * max-speed matches hci_qca proto oper_speed (3 Mbps). Do not
+		 * set firmware-name: driver loads qca/htbtfw20.tlv + htnv20.bin.
+		 */
+		compatible = "qcom,qca6390-bt";
+		max-speed = <3000000>;
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
+		vddaon-supply = <&vreg_pmu_aon_0p59>;
+		vddbtcmx-supply = <&vreg_pmu_btcmx_0p85>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
+		vddrfa1p7-supply = <&vreg_pmu_rfa_1p7>;
 		/* Wi-Fi is f0:6c:5d:71:3a:2b; BT uses the adjacent address.
 		 * local-bd-address is little-endian (LSB first). Without this the
 		 * controller stays unconfigured (00:00:00:00:00:00) and GNOME /

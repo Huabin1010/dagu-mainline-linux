@@ -88,6 +88,45 @@ bt_main_set FastConnectable true
 bt_main_set PageScanInterval 0x0100
 bt_main_set PageScanWindow 0x0012
 bt_main_set ReconnectUUIDs '00001112-0000-1000-8000-00805f9b34fb,0000111f-0000-1000-8000-00805f9b34fb,0000110a-0000-1000-8000-00805f9b34fb,0000110b-0000-1000-8000-00805f9b34fb'
+# Computer/Tablet CoD so classic HID inquiry sees a tablet, not 0x000000.
+# TemporaryTimeout 180s: unpaired Inquiry results stay in BlueZ (Android
+# pairing UI keeps them; default 30s is why bluetoothctl "Device not available").
+# JustWorksRepairing: K380 channel re-pair after the keyboard was bonded to
+# Android. Privacy=off: classic PIN HID. LE interval 24–40 (30–50 ms) is the
+# HID+BR coexistence floor so Inquiry can hear FHS while the mouse is up.
+# Do not set ControllerMode=bredr (that kills HOG). Do not add HID ReconnectUUIDs.
+bt_main_set Class 0x00011c
+bt_main_set TemporaryTimeout 180
+bt_main_set JustWorksRepairing always
+bt_main_set Privacy off
+bt_main_set PairableTimeout 0
+bt_main_set MinConnectionInterval 24
+bt_main_set MaxConnectionInterval 40
+# Keep HCI_CONNECTABLE / bondable after GNOME closes the bluetooth panel.
+# Forget of the last classic HID device otherwise drops SCAN_PAGE and the
+# next K380 pair attempt is Create Connection with Pairable=no → device gone.
+cat >/usr/local/sbin/dagu-bt-hid-host.sh <<'EOF'
+#!/bin/sh
+set -eu
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	btmgmt info >/dev/null 2>&1 && break
+	sleep 0.3
+done
+btmgmt --index 0 connectable on >/dev/null 2>&1 || true
+btmgmt --index 0 bondable on >/dev/null 2>&1 || true
+btmgmt --index 0 fast-conn on >/dev/null 2>&1 || true
+command -v bluetoothctl >/dev/null 2>&1 && bluetoothctl pairable on >/dev/null 2>&1 || true
+EOF
+chmod 755 /usr/local/sbin/dagu-bt-hid-host.sh
+mkdir -p /etc/systemd/system/bluetooth.service.d
+cat >/etc/systemd/system/bluetooth.service.d/dagu-hid-host.conf <<'EOF'
+[Service]
+ExecStartPost=/usr/local/sbin/dagu-bt-hid-host.sh
+EOF
+cat >/etc/udev/rules.d/90-dagu-bt-hid-host.rules <<'EOF'
+ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci0", RUN+="/usr/local/sbin/dagu-bt-hid-host.sh"
+EOF
+
 
 mkdir -p /etc/gdm3
 cat >/etc/gdm3/custom.conf <<'EOF'
@@ -1674,18 +1713,18 @@ SectionVerb {
 		cset "name='TR PCM Source' DSP"
 		cset "name='BL PCM Source' DSP"
 		cset "name='BR PCM Source' DSP"
-		cset "name='TL DRE' on"
-		cset "name='TR DRE' on"
-		cset "name='BL DRE' on"
-		cset "name='BR DRE' on"
-		cset "name='TL Analog PCM' 18"
-		cset "name='TR Analog PCM' 18"
-		cset "name='BL Analog PCM' 18"
-		cset "name='BR Analog PCM' 18"
-		cset "name='TL Digital PCM' 817"
-		cset "name='TR Digital PCM' 817"
-		cset "name='BL Digital PCM' 817"
-		cset "name='BR Digital PCM' 817"
+		cset "name='TL DRE Switch' on"
+		cset "name='TR DRE Switch' on"
+		cset "name='BL DRE Switch' on"
+		cset "name='BR DRE Switch' on"
+		cset "name='TL Analog PCM Volume' 18"
+		cset "name='TR Analog PCM Volume' 18"
+		cset "name='BL Analog PCM Volume' 18"
+		cset "name='BR Analog PCM Volume' 18"
+		cset "name='TL Digital PCM Volume' 817"
+		cset "name='TR Digital PCM Volume' 817"
+		cset "name='BL Digital PCM Volume' 817"
+		cset "name='BR Digital PCM Volume' 817"
 		cset "name='TL ASP TX1 Source' VMON"
 		cset "name='TR ASP TX1 Source' VMON"
 		cset "name='BL ASP TX1 Source' VMON"
@@ -1756,8 +1795,19 @@ for p in TL TR BL BR; do
 	cset "$p DRE" on || cset "$p DRE Switch" on || true
 	cset "$p Analog PCM" 18 || cset "$p Analog PCM Volume" 18 || true
 	cset "$p Digital PCM" 817 || cset "$p Digital PCM Volume" 817 || true
+	cset "$p Boost Class-H Tracking Enable" 1
+	cset "$p Boost Target Voltage" 0
 	cset "$p PCM Source" DSP
 done
+WP_STAMP=/run/dagu/wireplumber-kicked
+if [ ! -f "$WP_STAMP" ]; then
+	uid="$(id -u dagu 2>/dev/null || true)"
+	if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
+		sudo -u dagu XDG_RUNTIME_DIR="/run/user/$uid" \
+			systemctl --user try-restart wireplumber >/dev/null 2>&1 || true
+	fi
+	date -u +%s >"$WP_STAMP"
+fi
 exit 0
 EOF
 chmod 755 /usr/local/sbin/dagu-speaker-route.sh
@@ -1792,6 +1842,7 @@ monitor.alsa.rules = [
         api.acp.auto-profile = true
         api.acp.auto-port = true
         api.alsa.disable-pro-audio = true
+        api.alsa.split-enable = false
         device.profile = "HiFi"
         device.nick = "Speakers"
       }

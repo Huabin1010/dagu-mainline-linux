@@ -1,8 +1,9 @@
 #!/bin/sh
 # Undo the earlier HID "low latency" shortcut: put sniff and UART runtime PM
 # back. HID host policy lives in BlueZ (FastConnectable, sniff 6–18,
-# UserspaceHID=persist) and the kernel overlay (clock offset, Central,
-# interlaced page scan). This script must not disable sniff or pin UART.
+# UserspaceHID=persist, BR-only find) and the kernel overlay (clock offset,
+# Central, interlaced page scan, ACL page-timeout cleanup). This script must
+# not disable sniff or pin UART.
 set -eu
 
 uart_roots='

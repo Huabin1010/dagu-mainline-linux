@@ -67,6 +67,23 @@ for p in TL TR BL BR; do
 	cset_any on "$p DRE" "$p DRE Switch" || true
 	cset_any 18 "$p Analog PCM" "$p Analog PCM Volume" || true
 	cset_any 817 "$p Digital PCM" "$p Digital PCM Volume" || true
+	# Android: Class-H tracking, target 0 (follow audio, not a fixed boost).
+	cset "$p Boost Class-H Tracking Enable" 1 || true
+	cset "$p Boost Target Voltage" 0 || true
 	cset "$p PCM Source" DSP || true
 done
+# Halo Fast Use Case: kernel applies music.txt after PCM is up (delayed
+# work). Do not write BYTE mixers here — PCM is idle at udev.
+#
+# WirePlumber often binds Dummy Output while Preload (i2c-gpio) is still
+# loading. Kick it once after the mixer is programmed.
+WP_STAMP=/run/dagu/wireplumber-kicked
+if [ ! -f "$WP_STAMP" ]; then
+	uid="$(id -u dagu 2>/dev/null || true)"
+	if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
+		sudo -u dagu XDG_RUNTIME_DIR="/run/user/$uid" \
+			systemctl --user try-restart wireplumber >/dev/null 2>&1 || true
+	fi
+	date -u +%s >"$WP_STAMP"
+fi
 exit 0

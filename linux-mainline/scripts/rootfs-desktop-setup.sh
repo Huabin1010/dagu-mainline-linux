@@ -1870,13 +1870,15 @@ monitor.alsa.rules = [
   }
 ]
 EOF
-# Snapshot lists PipeWire Video/Source with a non-empty EnumFormat.
-# CONFIG_UDMABUF=y turns on libcamera Software ISP (NV12). Do not keep the
-# Python RAW demosaic source as the default path.
-# spa-v4l2 cannot open CAMSS MPLANE RDI; hide those nodes. Venus is
-# /dev/video14/15. Loopback is /dev/video20/21 (WeChat opens them directly;
-# PipeWire should not double-list them).
+# Chrome getUserMedia must not see spa-libcamera (12MP CPU demosaic starves
+# mutter). SoftISP stays in dagu-camera-loopback-watch → video20/21.
+# spa-v4l2 cannot open CAMSS MPLANE RDI; hide those nodes. Venus is 14/15.
 cat >/etc/wireplumber/wireplumber.conf.d/60-dagu-camera.conf <<'EOF'
+wireplumber.profiles = {
+  main = {
+    monitor.libcamera = disabled
+  }
+}
 monitor.v4l2.rules = [
   {
     matches = [
@@ -1896,12 +1898,34 @@ monitor.v4l2.rules = [
       { api.v4l2.path = "/dev/video13" }
       { api.v4l2.path = "/dev/video14" }
       { api.v4l2.path = "/dev/video15" }
-      { api.v4l2.path = "/dev/video20" }
-      { api.v4l2.path = "/dev/video21" }
     ]
     actions = {
       update-props = {
         node.disabled = true
+      }
+    }
+  }
+  {
+    matches = [
+      { api.v4l2.path = "/dev/video20" }
+    ]
+    actions = {
+      update-props = {
+        node.description = "dagu Front Camera"
+        media.role = "Camera"
+        priority.session = 810
+      }
+    }
+  }
+  {
+    matches = [
+      { api.v4l2.path = "/dev/video21" }
+    ]
+    actions = {
+      update-props = {
+        node.description = "dagu Rear Camera"
+        media.role = "Camera"
+        priority.session = 800
       }
     }
   }
@@ -1935,9 +1959,14 @@ mkdir -p /etc/udev/rules.d /etc/modprobe.d /etc/modules-load.d
 cat >/etc/udev/rules.d/90-dagu-udmabuf.rules <<'EOF'
 KERNEL=="udmabuf", GROUP="video", MODE="0660"
 EOF
+cat >/etc/udev/rules.d/90-dagu-v4l2loopback.rules <<'EOF'
+SUBSYSTEM=="video4linux", ATTR{name}=="dagu-front", GROUP="video", MODE="0660"
+SUBSYSTEM=="video4linux", ATTR{name}=="dagu-rear", GROUP="video", MODE="0660"
+SUBSYSTEM=="video4linux", ATTR{name}=="msm_vfe*", GROUP="root", MODE="0600", TAG-="uaccess"
+EOF
 cat >/etc/modprobe.d/v4l2loopback.conf <<'EOF'
 # exclusive_caps=0: on-demand producer starts after the V4L2 client opens.
-# PipeWire already disables video20/21. Snapshot does not use these nodes.
+# PipeWire lists video20/21. spa-libcamera is disabled.
 options v4l2loopback devices=2 video_nr=20,21 exclusive_caps=0 card_label=dagu-front,dagu-rear
 EOF
 echo v4l2loopback >/etc/modules-load.d/dagu-v4l2loopback.conf
@@ -1946,7 +1975,7 @@ echo v4l2loopback >/etc/modules-load.d/dagu-v4l2loopback.conf
 cat >/usr/local/sbin/dagu-camera-loopback.sh <<'LOOPEOF'
 #!/bin/sh
 # Push libcamera SoftISP NV12 into v4l2loopback /dev/video20 (front) and
-# /dev/video21 (rear) **on demand**. Snapshot uses pipewire/libcamera.
+# /dev/video21 (rear) **on demand**. PipeWire must not monitor spa-libcamera.
 set -eu
 
 FRONT_DEV="${DAGU_LOOPBACK_FRONT:-/dev/video20}"

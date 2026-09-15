@@ -17,7 +17,7 @@ have_ssh() {
 }
 
 copy_ssh() {
-	"${SSH[@]}" 'mkdir -p /usr/local/sbin /etc/systemd/system /etc/libcamera /usr/local/share/dagu /etc/systemd/user/pipewire.service.d /etc/systemd/user/wireplumber.service.d'
+	"${SSH[@]}" 'mkdir -p /usr/local/sbin /etc/systemd/system /etc/libcamera /usr/local/share/dagu /etc/systemd/user/pipewire.service.d /etc/systemd/user/wireplumber.service.d /etc/wireplumber/wireplumber.conf.d /etc/udev/rules.d /etc/modprobe.d /etc/modules-load.d'
 	"${SCP[@]}" \
 		"$ROOT/scripts/dagu-camera-loopback.sh" \
 		"$ROOT/scripts/dagu-touch-boost.py" \
@@ -34,8 +34,12 @@ copy_ssh() {
 		"root@$HOST:/etc/systemd/user/pipewire.service.d/dagu-camss-reset.conf"
 	"${SCP[@]}" "$ROOT/systemd/dagu-camss-reset.conf" \
 		"root@$HOST:/etc/systemd/user/wireplumber.service.d/dagu-camss-reset.conf"
-	"${SCP[@]}" "$ROOT/libcamera/configuration.yaml" \
-		"root@$HOST:/etc/libcamera/configuration.yaml"
+	"${SCP[@]}" "$ROOT/systemd/60-dagu-camera.conf" \
+		"root@$HOST:/etc/wireplumber/wireplumber.conf.d/60-dagu-camera.conf"
+	"${SCP[@]}" "$ROOT/systemd/90-dagu-v4l2loopback.rules" \
+		"root@$HOST:/etc/udev/rules.d/90-dagu-v4l2loopback.rules"
+	"${SCP[@]}" "$ROOT/systemd/v4l2loopback.conf" \
+		"root@$HOST:/etc/modprobe.d/v4l2loopback.conf"
 	"${SCP[@]}" "$ROOT/libcamera/dagu-viewfinder-bin.patch" \
 		"root@$HOST:/usr/local/share/dagu/dagu-viewfinder-bin.patch" || true
 	"${SSH[@]}" 'set -e
@@ -67,7 +71,10 @@ copy_ssh() {
 				DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \
 				systemctl --user restart pipewire.service || true
 		fi
-		mkdir -p /etc/libcamera /usr/local/share/dagu
+		mkdir -p /etc/libcamera /usr/local/share/dagu /etc/wireplumber/wireplumber.conf.d /etc/modules-load.d
+		echo v4l2loopback >/etc/modules-load.d/dagu-v4l2loopback.conf
+		udevadm control --reload || true
+		udevadm trigger --subsystem-match=video4linux || true
 		systemctl stop dagu-camera-loopback.service 2>/dev/null || true
 		systemctl disable dagu-camera-loopback.service 2>/dev/null || true
 		rm -f /etc/systemd/system/multi-user.target.wants/dagu-camera-loopback.service
@@ -94,7 +101,9 @@ copy_serial() {
 	"${CONSOLE[@]}" put "$ROOT/systemd/dagu-camera-loopback.service" /etc/systemd/system/dagu-camera-loopback.service
 	"${CONSOLE[@]}" put "$ROOT/systemd/dagu-camera-loopback-watch.service" /etc/systemd/system/dagu-camera-loopback-watch.service
 	"${CONSOLE[@]}" put "$ROOT/systemd/dagu-himax-irq-affinity.service" /etc/systemd/system/dagu-himax-irq-affinity.service
-	"${CONSOLE[@]}" put "$ROOT/libcamera/configuration.yaml" /etc/libcamera/configuration.yaml
+	"${CONSOLE[@]}" put "$ROOT/systemd/60-dagu-camera.conf" /etc/wireplumber/wireplumber.conf.d/60-dagu-camera.conf
+	"${CONSOLE[@]}" put "$ROOT/systemd/90-dagu-v4l2loopback.rules" /etc/udev/rules.d/90-dagu-v4l2loopback.rules
+	"${CONSOLE[@]}" put "$ROOT/systemd/v4l2loopback.conf" /etc/modprobe.d/v4l2loopback.conf
 	"${CONSOLE[@]}" run 'chmod 755 /usr/local/sbin/dagu-camera-loopback.sh /usr/local/sbin/dagu-touch-boost.py /usr/local/sbin/dagu-himax-irq-affinity.sh /usr/local/sbin/dagu-camss-graph-reset.sh; mkdir -p /etc/systemd/user/pipewire.service.d /etc/systemd/user/wireplumber.service.d; ln -sfn libcamera.so.0.7.0 /usr/lib/aarch64-linux-gnu/libcamera.so.0.7; ln -sfn libcamera-base.so.0.7.0 /usr/lib/aarch64-linux-gnu/libcamera-base.so.0.7; ldconfig; /usr/local/sbin/dagu-camss-graph-reset.sh; systemctl stop dagu-camera-loopback.service; systemctl disable dagu-camera-loopback.service; rm -f /etc/systemd/system/multi-user.target.wants/dagu-camera-loopback.service; systemctl daemon-reload; systemctl enable --now dagu-camera-loopback-watch.service; systemctl enable --now dagu-himax-irq-affinity.service; systemctl restart dagu-touch-boost.service; /usr/local/sbin/dagu-himax-irq-affinity.sh; echo DAGU_TOUCH_DEPLOY_OK'
 }
 

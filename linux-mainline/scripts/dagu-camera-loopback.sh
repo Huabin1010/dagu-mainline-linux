@@ -1,9 +1,8 @@
 #!/bin/sh
 # Push libcamera SoftISP NV12 into v4l2loopback /dev/video20 (front) and
-# /dev/video21 (rear) **on demand**. Apps that only open classic V4L2
-# capture use these nodes. Snapshot uses pipewire/libcamera and must not
-# share a 12MP CPU demosaic with a boot-time second pipeline.
-# This is not Spectra ISP.
+# /dev/video21 (rear) **on demand**. PipeWire must not monitor spa-libcamera:
+# Chrome would CPU-debayer 12MP on the session CPUs and starve mutter.
+# Snapshot/Chromium open these V4L2 nodes. Not Spectra ISP.
 set -eu
 
 FRONT_DEV="${DAGU_LOOPBACK_FRONT:-/dev/video20}"

@@ -1,0 +1,7 @@
+# Desktop cameras: v4l2loopback. Session user is in group video.
+SUBSYSTEM=="video4linux", ATTR{name}=="dagu-front", GROUP="video", MODE="0660"
+SUBSYSTEM=="video4linux", ATTR{name}=="dagu-rear", GROUP="video", MODE="0660"
+# CAMSS RDI is 12MP Bayer. Chrome/spa-libcamera CPU-debayer on session
+# CPUs starves mutter SCHED_DEADLINE. SoftISP stays in
+# dagu-camera-loopback-watch (root, CPU 0-3). Venus is not msm_vfe*.
+SUBSYSTEM=="video4linux", ATTR{name}=="msm_vfe*", GROUP="root", MODE="0600", TAG-="uaccess"

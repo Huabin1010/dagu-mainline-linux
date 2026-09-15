@@ -139,6 +139,7 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	need_y CONFIG_VIDEO_S5KJN1
 	need_y CONFIG_VIDEO_IMX596_DAGU
 	need_y CONFIG_UDMABUF
+	need_m CONFIG_VIDEO_V4L2LOOPBACK_DAGU
 	need_y CONFIG_SM_CAMCC_8250
 	grep -q '^CONFIG_INTERCONNECT_QCOM_SM8250=y' "$cfg" && \
 		die "INTERCONNECT_QCOM_SM8250 still on — BCM vote hangs this QHEE"

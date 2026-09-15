@@ -236,7 +236,7 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 ### App 层（SoftISP / Snapshot / loopback）
 
 - `CONFIG_UDMABUF=y`，`/dev/udmabuf`，udev `90-dagu-udmabuf.rules`
-- libcamera simple + Software ISP 出 NV12；WirePlumber **打开** `monitor.libcamera`。Python `dagu-camera-pw-source.py` 不再作为默认源
+- libcamera simple + Software ISP 出 NV12。WirePlumber **关掉** `monitor.libcamera`（Chrome 走 spa-libcamera 会把 12MP CPU demosaic 打在会话核上，mutter `DL replenish lagged` 卡死）。桌面相机只暴露 `v4l2loopback` `/dev/video20/21`。Python `dagu-camera-pw-source.py` 不再作为默认源
 - Snapshot「No Camera Found」：CAMSS 可变链路 `csiphyN→csid0` 在 `cam`/WP 被杀后仍 ENABLED，内核关 fd 不清。下一轮 `CameraManager` `EBUSY`，PipeWire 无 Video/Source。`dagu-camss-graph-reset.sh` 在 pipewire/wireplumber `ExecStartPre` 做 `media-ctl -r`。扬声器路由只 `try-restart pipewire`（WP `BindsTo`），禁止只重启 WP。soname 必须是 `libcamera-base.so.0.7` → `libcamera-base.so.0.7.0`，不能留 `.dagu` stub
 - Viewfinder 默认不是传感器 max：后置 4080→1020（4× skip）、前置 2592→1296（2× skip），FOV 靠 Bayer skip 不是中心裁切。拍照 StillCapture 仍全幅。`dagu-libcamera-softisp.sh`。`/etc/libcamera/configuration.yaml` `software_isp.threads=2`
 - `v4l2loopback` `/dev/video20` 前、`/dev/video21` 后。`dagu-camera-loopback-watch.service` 只在有人打开节点时 STREAMON。开机 **不要** 双路 SoftISP。不是 Spectra ISP

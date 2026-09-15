@@ -139,6 +139,8 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - Himax HX83121，`spi-gpio`（gpio8–11 + IRQ39）
 - 驱动：`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`
 - `&spi4` / `&gpi_dma0` disabled；`# CONFIG_SPI_QCOM_GENI is not set`
+- IRQ 亲和：`dagu-himax-irq-affinity.service` 把 himax IRQ 持久绑到 CPU4–7（Gold）。不要跟 SoftISP 抢 CPU0。
+- Snapshot 开后置点不了：Himax 仍报点（背光会醒），mutter 被 12MP CPU SoftISP 饿死。默认关掉常驻 `dagu-camera-loopback` 双路 STREAMON；Viewfinder Bayer skip（后置 /4、前置 /2），StillCapture 仍全幅。SoftISP cpuset CPU0–3。板上推送：`linux-mainline/scripts/dagu-snapshot-touch-deploy.sh`。libcamera 源码：`dagu-libcamera-softisp.sh`。验收：预览实时且关窗口跟手。
 - 滑动断触：IRQ 线程里不要 `dev_info`（`ignore_loglevel` 会堵 fbcon/串口）；DT 用 `IRQ_TYPE_LEVEL_LOW`，坏帧（全 0xff）不当抬手
 - OSK 连打字母：LEVEL_LOW + spi-gpio 会在一次按住里读到校验失败 / n=0 毛刺，tracking ID 被拆成多次点击。驱动排空 IRQ、校验和、连续空帧才抬手，80ms 超时兜底（`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`）
 - 滑动微跳帧（2026-09-13）：静置仍抽帧，停抓 SYN。`vblank timeout: 400000` 是 **DSC_IDX=22**（L81A 双 DSC），不是幽灵 `SSPP_CURSOR0`。`MUTTER_DEBUG_DISABLE_HW_CURSORS=1` 早已生效。细账 `linux-mainline/docs/dagu-idle-pipeline.md`。
@@ -199,11 +201,11 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 
 | 项 | 现状 |
 |----|------|
-| 电源 / MCLK / 复位 / CCI | probe 成功，进 media 图。上电顺序 VIO → VDIG → VANA → MCLK → XSHUTDOWN |
+| 电源 / MCLK / 复位 / CCI | probe 成功，进 media 图。上电顺序 VIO → VANA → VDIG → MCLK → XSHUTDOWN |
 | 预览尺寸 | 4080×3060 GBRG 10-bit，fourcc `pGAA`，`/dev/video0` |
-| PHY | 安卓预览 **D-PHY 4-lane**（`0x0114=0x0300`）；不要退回 CamX C-PHY 3-trio |
-| DT | `bus-type = <4>`，`data-lanes = <1 2 3 4>` |
-| CSIPHY | csiphy1 settle `0x13`（安卓 dump） |
+| PHY | 安卓 CamX 4080 预览 **C-PHY 3-trio**（`0x0114=0x0301`）。D-PHY 4-lane 只在 8160×6120 全幅表 |
+| DT | `bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>`（本 7.0 树 = 1），`data-lanes = <1 2 3>`。**禁止写 `<5>`**，5 是 PARALLEL，CAMSS probe `-22`，Snapshot「No Camera Found」 |
+| CSIPHY | csiphy1 C-PHY settle `0x12`（CamX）；不要拿 D-PHY `0x13` 去跑 4080 |
 | STREAMON | 先写 page `0x4000` 传感器/PLL；MCU `0x2400` 按 10/20/50/100 ms 扫描，NACK 不判失败。验收：`/tmp/rear.raw` 约 15.6 MB |
 
 已踩过、不要退回去的坑：
@@ -224,9 +226,10 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 | 地址 | CAF dtsi 写 `@0x1a`；这颗硅在 **0x10** 读到 chip id `0x0596` |
 | 驱动 | `linux-mainline/overlays/linux/drivers/media/i2c/imx596-dagu.c` |
 | 尺寸 | 2592×1952 BGGR 10-bit，fourcc `pBAA`，`/dev/video3` |
-| PHY | **D-PHY** 4-lane（`bus-type = <4>`）。`0x0114=3` 在 group hold 释放后再写一次 |
+| PHY | **D-PHY** 4-lane，`bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>`（本树 = 4）。`0x0114=3` 在 group hold 释放后再写一次 |
 | CSIPHY | csiphy4 用 T_hs 公式（678.4 MHz），**不要**抄后摄 settle `0x13` |
-| 抓帧 | 验收 `/tmp/front.raw` 约 6.3 MB |
+| SoftISP | 安卓预览是 IFE 1440×1080 全 FOV @30fps。Linux Viewfinder skip 2×2 → **1296×976** 全 FOV。`DebayerCpu::sizes()` 必须把 processed max 卡在 skip 尺寸，否则 PipeWire 1920×1080 会 skip 1×1 卡死 Snapshot。CSID SOT/EOT（bits 0–7）保持 mask，禁止 `0xffffffff` |
+| 抓帧 | 验收 `/tmp/front.raw` 约 6.3 MB；预览 `dagu skip 2x2 in 2592x1952 out 1296x976` 且 fps≈30 |
 
 PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 678400000`。
 
@@ -234,7 +237,9 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 
 - `CONFIG_UDMABUF=y`，`/dev/udmabuf`，udev `90-dagu-udmabuf.rules`
 - libcamera simple + Software ISP 出 NV12；WirePlumber **打开** `monitor.libcamera`。Python `dagu-camera-pw-source.py` 不再作为默认源
-- `v4l2loopback` `/dev/video20` 前、`/dev/video21` 后，`exclusive_caps=1`。`dagu-camera-loopback.service` 用 `libcamerasrc` 推 NV12。不是 Spectra ISP
+- Snapshot「No Camera Found」：CAMSS 可变链路 `csiphyN→csid0` 在 `cam`/WP 被杀后仍 ENABLED，内核关 fd 不清。下一轮 `CameraManager` `EBUSY`，PipeWire 无 Video/Source。`dagu-camss-graph-reset.sh` 在 pipewire/wireplumber `ExecStartPre` 做 `media-ctl -r`。扬声器路由只 `try-restart pipewire`（WP `BindsTo`），禁止只重启 WP。soname 必须是 `libcamera-base.so.0.7` → `libcamera-base.so.0.7.0`，不能留 `.dagu` stub
+- Viewfinder 默认不是传感器 max：后置 4080→1020（4× skip）、前置 2592→1296（2× skip），FOV 靠 Bayer skip 不是中心裁切。拍照 StillCapture 仍全幅。`dagu-libcamera-softisp.sh`。`/etc/libcamera/configuration.yaml` `software_isp.threads=2`
+- `v4l2loopback` `/dev/video20` 前、`/dev/video21` 后。`dagu-camera-loopback-watch.service` 只在有人打开节点时 STREAMON。开机 **不要** 双路 SoftISP。不是 Spectra ISP
 
 ### SLPI
 
@@ -258,7 +263,7 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 | 闪光灯 | pm8150l `@d300` | `echo 64 > /sys/class/leds/white:flash/brightness` |
 | USB OTG | `dr_mode=otg`，默认 peripheral | 切 host 会掉 g_serial，只能走 Wi‑Fi SSH；`usb_1_qmpphy` **disabled**。`pm8150b_typec` **okay**（充电 / PD），USB 图仍切断 |
 | USB3 / DP redriver | PS5169 overlay | 活 DT 未挂节点；`i2c17` 仍 disabled |
-| 磁吸键盘 MCU | nanosic overlay | 活 DT 未挂；QUP SE2 I2C 不能开（与 uart2 冲突且 GENI 会挂 QHEE） |
+| 磁吸键盘 MCU | nanosic overlay | 活 DT `i2c-gpio-se2` gpio115/116 @0x4c；IRQ 83 / wakeup 46 / vdd 127 / reset 141 / sleep 155。虚拟 HID 15d9:a3/a2/a1/a4（触控板 2560×1600 来自安卓 dump）。禁止开 GENI `&i2c2` |
 
 ---
 
@@ -284,8 +289,8 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 
 1. **后摄出 ≥1 帧**：`v4l2-ctl` `/tmp/rear.raw` 约 15.6 MB。MCU `0x2400` 扫描已在驱动里；不要退回瞎猜的 C-PHY PLL
 2. **前摄出 ≥1 帧**：`0x0114` 在 group hold 后再写；csiphy4 不抄后摄 settle；`/tmp/front.raw` 约 6.3 MB
-3. **SoftISP / Snapshot**：`/dev/udmabuf` + libcamera NV12。`dagu-libcamera-softisp.sh`。禁止 meson `-Dipmbs`
-4. **v4l2loopback**：`/dev/video20/21`，`dagu-camera-loopback.service`。不是 ISP
+3. **SoftISP / Snapshot**：`/dev/udmabuf` + libcamera NV12。Viewfinder skip/bin，禁止 12MP@30 CPU demosaic 喂预览。`dagu-libcamera-softisp.sh`。禁止 meson `-Dipmbs`
+4. **v4l2loopback**：`/dev/video20/21` 按需，`dagu-camera-loopback-watch.service`。不是 ISP
 5. **扬声器听感**：功放已醒，缺 Halo `CAL_SET_STATUS=2`（下次编核）和 Fast Use Case。见 `linux-mainline/docs/dagu-deep-hardware-reclamation.md`。禁止 softvol。`linux-mainline/scripts/dagu-av-test.sh`
 6. **充电验收**：插 5 V 砖后 `pm8150b-charger` `status=Charging`，`bms` `current_now` 为负（充电）；PD 砖看 TCPM log。67W 泵以后再接
 5. OTG host：Wi‑Fi SSH 下切 role，插 U 盘 / HID
@@ -293,7 +298,7 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 7. 蓝牙音频（A2DP / 耳机）专项听感；控制器本身已通
 8. SLPI：固件签名确认后再开 IMU/ALS
 9. USB3 + DP + PS5169：先保证 HS gadget 不回退
-10. 磁吸键盘：没有安全的 GENI I2C 之前无法走原厂 MCU 总线
+10. 磁吸键盘：活 DT 已挂 i2c-gpio-se2。刷核后查 `Xiaomi Keyboard` / `Xiaomi Touch`，`nanosic-803` irq 上升。不要开 GENI i2c2
 11. **S2Idle**：电源键唤醒已通一轮（65 min）。没有 RTC 时不要再远程 `echo mem`。日常桌面仍 mask systemd sleep（背光 HWEN）。底稿 `linux-mainline/docs/dagu-audio-s2idle.md`
 12. **Venus**：4K60 HEVC dmabuf + Overview 已通（`dagu-venus-4k-ecosystem`）。日常用 `gst-play-1.0 --videosink=waylandsink` / Totem。下一步若要烤电影级高码率 4K 或让 mpv 也零拷贝，再谈 FFmpeg `drm_prime`；不要开 ICC，不要 VA-API，不要 v4l2 request。底稿 `linux-mainline/docs/dagu-venus.md`
 13. Win11 ARM：独立于本表

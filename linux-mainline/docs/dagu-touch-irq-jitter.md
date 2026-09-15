@@ -57,10 +57,10 @@ python3 linux-mainline/scripts/dagu-touch-syn-probe.py --host --wait 20
 2026-09-13 已写入：
 
 ```text
-echo f0 > /proc/irq/193/smp_affinity
+echo f0 > /proc/irq/<himax>/smp_affinity
 ```
 
-绑之后：`smp_affinity=f0`（CPU 4–7），`effective_affinity_list=4`（实际落在 **CPU4** Gold）。重启会丢，不要先写 udev。
+绑之后：`smp_affinity=f0`（CPU 4–7），`effective_affinity_list=4`（实际落在 **CPU4** Gold）。重启由 `dagu-himax-irq-affinity.service` 写回，不要靠手敲。
 
 验收（滑的时候看，只有 CPU4 列涨）：
 

@@ -1,0 +1,30 @@
+---
+description: 前置 imx596 已流畅：禁止改回 skip 1×1、解开 CSID SOT、写错 bus-type
+alwaysApply: true
+---
+
+# dagu：前置摄像头（飞行合格路径）
+
+imx596 预览已按安卓 IFE 对齐：D-PHY 4-lane 出 RAW，SoftISP skip 2×2 全 FOV，Snapshot 约 30fps。再改相机时必须保住这条路径。后置改 C-PHY / 寄存器不得捎带改前置 DT、skip、CSID mask。
+
+## 正路（缺一项即失败）
+
+- 传感器：CCI1@0x10，csiphy4，2592×1952 BGGR packed10 `pBAA`，`0x0114=3`（group hold 后再写）
+- DT：`csiphy4_ep` `bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>`（本 7.0 树 = 4），`data-lanes = <0 1 2 3>`，`clock-lanes = <7>`
+- Viewfinder：`DebayerCpu::sizes()` 把 processed max 卡在 **1296×976**（2592/2）。skip 2×2 全 FOV，不是 1920×1080 中心裁切
+- 遥测：`dagu skip 2x2 in 2592x1952 out 1296x976` 且 fps≈30。PipeWire 要 1920 必须被 validate 压到 1296
+
+## 禁止（已毁过机 / 已卡死过 Snapshot）
+
+- 写 `bus-type = <5>`：本树 5 = PARALLEL，CAMSS probe -22 → No Camera Found。C-PHY 用宏 `MEDIA_BUS_TYPE_CSI2_CPHY`（=1），不要手写魔数
+- CSID `CSI2_RX_IRQ_MASK = 0xffffffff`：SOT/EOT 约 60k IRQ/s，Snapshot 黑屏「无法连接」。FIFO bit17 `0x20000` 同样禁止解 mask
+- 拿掉 `DebayerCpu::sizes()` 的 /2 上限，或让 generateConfiguration 对已经 /2 的 max 再 /2（会变成 648×488）
+- packed RAW10 skip 用 `x += 5*(xSkip-1)`：右半黑。必须 `prev/curr/next += adv`
+- 开机常驻双路 `dagu-camera-loopback` STREAMON；只重启 wireplumber（EBUSY / 空 Video Sources）
+- 把 Himax `reset-gpios` 绑 GPIO100；改 `vreg_l3a_0p9` 到 1.104V
+
+```text
+# ❌ PipeWire 1920×1080 → skip 1×1 → 前置卡顿
+# ❌ bus-type=<5> → PARALLEL → 找不到相机
+# ✅ skip 2×2 1296×976 + SOT 保持 mask + DPHY 宏
+```

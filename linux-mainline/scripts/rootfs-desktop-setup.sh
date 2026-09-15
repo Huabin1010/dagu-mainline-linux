@@ -1807,7 +1807,7 @@ if [ ! -f "$WP_STAMP" ]; then
 	uid="$(id -u dagu 2>/dev/null || true)"
 	if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
 		sudo -u dagu XDG_RUNTIME_DIR="/run/user/$uid" \
-			systemctl --user try-restart wireplumber >/dev/null 2>&1 || true
+			systemctl --user try-restart pipewire.service >/dev/null 2>&1 || true
 	fi
 	date -u +%s >"$WP_STAMP"
 fi
@@ -1907,6 +1907,28 @@ monitor.v4l2.rules = [
   }
 ]
 EOF
+# SIGKILL/WP-only restart leaves CSIPHY→CSID enabled; next match is EBUSY
+# and Snapshot shows No Camera Found. Reset mutable links before PW/WP.
+cat >/usr/local/sbin/dagu-camss-graph-reset.sh <<'EOF'
+#!/bin/sh
+set -eu
+MC="${DAGU_CAMSS_MEDIA:-/dev/media0}"
+[ -e "$MC" ] || exit 0
+command -v media-ctl >/dev/null || exit 0
+media-ctl -d "$MC" -r >/dev/null 2>&1 || true
+exit 0
+EOF
+chmod 755 /usr/local/sbin/dagu-camss-graph-reset.sh
+mkdir -p /etc/systemd/user/pipewire.service.d \
+	/etc/systemd/user/wireplumber.service.d
+cat >/etc/systemd/user/pipewire.service.d/dagu-camss-reset.conf <<'EOF'
+[Service]
+ExecStartPre=/usr/local/sbin/dagu-camss-graph-reset.sh
+EOF
+cat >/etc/systemd/user/wireplumber.service.d/dagu-camss-reset.conf <<'EOF'
+[Service]
+ExecStartPre=/usr/local/sbin/dagu-camss-graph-reset.sh
+EOF
 rm -f /etc/systemd/user/dagu-camera-pw-source.service \
 	/etc/systemd/user/default.target.wants/dagu-camera-pw-source.service
 mkdir -p /etc/udev/rules.d /etc/modprobe.d /etc/modules-load.d
@@ -1914,64 +1936,217 @@ cat >/etc/udev/rules.d/90-dagu-udmabuf.rules <<'EOF'
 KERNEL=="udmabuf", GROUP="video", MODE="0660"
 EOF
 cat >/etc/modprobe.d/v4l2loopback.conf <<'EOF'
-options v4l2loopback devices=2 video_nr=20,21 exclusive_caps=1 card_label=dagu-front,dagu-rear
+# exclusive_caps=0: on-demand producer starts after the V4L2 client opens.
+# PipeWire already disables video20/21. Snapshot does not use these nodes.
+options v4l2loopback devices=2 video_nr=20,21 exclusive_caps=0 card_label=dagu-front,dagu-rear
 EOF
 echo v4l2loopback >/etc/modules-load.d/dagu-v4l2loopback.conf
+# Keep in sync with linux-mainline/scripts/dagu-camera-loopback.sh
+# The live copy is the canonical script; embed it below.
 cat >/usr/local/sbin/dagu-camera-loopback.sh <<'LOOPEOF'
 #!/bin/sh
+# Push libcamera SoftISP NV12 into v4l2loopback /dev/video20 (front) and
+# /dev/video21 (rear) **on demand**. Snapshot uses pipewire/libcamera.
 set -eu
+
 FRONT_DEV="${DAGU_LOOPBACK_FRONT:-/dev/video20}"
 REAR_DEV="${DAGU_LOOPBACK_REAR:-/dev/video21}"
 WIDTH="${DAGU_LOOPBACK_WIDTH:-1280}"
 HEIGHT="${DAGU_LOOPBACK_HEIGHT:-720}"
+POLL_S="${DAGU_LOOPBACK_POLL_S:-0.5}"
+
 log() { printf 'dagu-camera-loopback: %s\n' "$*"; }
-i=0
-while [ ! -e "$FRONT_DEV" ] || [ ! -e "$REAR_DEV" ]; do
-	i=$((i + 1))
-	[ "$i" -gt 60 ] && { log "no $FRONT_DEV / $REAR_DEV"; exit 1; }
-	sleep 0.5
-done
-front_name="${DAGU_LIBCAMERA_FRONT:-}"
-rear_name="${DAGU_LIBCAMERA_REAR:-}"
-if [ -z "$front_name" ] || [ -z "$rear_name" ]; then
-	list=$(cam --list-cameras 2>/dev/null || true)
-	[ -z "$front_name" ] && front_name=$(printf '%s\n' "$list" | sed -n "s/.*'\\(imx596[^']*\\)'.*/\\1/p" | head -1)
-	[ -z "$rear_name" ] && rear_name=$(printf '%s\n' "$list" | sed -n "s/.*'\\(s5kjn1[^']*\\)'.*/\\1/p" | head -1)
-fi
-log "front=$front_name -> $FRONT_DEV rear=$rear_name -> $REAR_DEV"
+
+cmd=${1:-watch}
+
+resolve_names() {
+	front_name="${DAGU_LIBCAMERA_FRONT:-}"
+	rear_name="${DAGU_LIBCAMERA_REAR:-}"
+	if [ -z "$front_name" ] || [ -z "$rear_name" ]; then
+		list=$(cam --list-cameras 2>/dev/null || true)
+		if [ -z "$front_name" ]; then
+			front_name=$(printf '%s\n' "$list" | sed -n "s/.*'\\(imx596[^']*\\)'.*/\\1/p" | head -1)
+		fi
+		if [ -z "$rear_name" ]; then
+			rear_name=$(printf '%s\n' "$list" | sed -n "s/.*'\\(s5kjn1[^']*\\)'.*/\\1/p" | head -1)
+		fi
+	fi
+}
+
 pipe() {
 	src_name=$1
 	sink=$2
-	[ -n "$src_name" ] || return 0
-	exec gst-launch-1.0 -q libcamerasrc camera-name="$src_name" \
+	if [ -z "$src_name" ]; then
+		log "skip $sink (no camera name)"
+		return 0
+	fi
+	command -v gst-launch-1.0 >/dev/null || { log "gst-launch-1.0 missing"; exit 1; }
+	exec gst-launch-1.0 -q \
+		libcamerasrc camera-name="$src_name" \
 		! video/x-raw,format=NV12,width="$WIDTH",height="$HEIGHT" \
-		! videoconvert ! v4l2sink device="$sink" sync=false
+		! videoconvert \
+		! v4l2sink device="$sink" sync=false
 }
-pipe "$front_name" "$FRONT_DEV" &
-p1=$!
-pipe "$rear_name" "$REAR_DEV" &
-p2=$!
-trap 'kill $p1 $p2 2>/dev/null || true' INT TERM
-wait $p1 $p2
+
+run_one() {
+	which=$1
+	i=0
+	dev=$FRONT_DEV
+	[ "$which" = rear ] && dev=$REAR_DEV
+	while [ ! -e "$dev" ]; do
+		i=$((i + 1))
+		[ "$i" -gt 60 ] && { log "no $dev"; exit 1; }
+		sleep 0.5
+	done
+	resolve_names
+	case "$which" in
+	front) pipe "$front_name" "$FRONT_DEV" ;;
+	rear) pipe "$rear_name" "$REAR_DEV" ;;
+	*) log "bad camera $which"; exit 2 ;;
+	esac
+}
+
+run_all() {
+	resolve_names
+	log "front=$front_name -> $FRONT_DEV rear=$rear_name -> $REAR_DEV ${WIDTH}x${HEIGHT}"
+	pipe "$front_name" "$FRONT_DEV" &
+	p1=$!
+	pipe "$rear_name" "$REAR_DEV" &
+	p2=$!
+	trap 'kill $p1 $p2 2>/dev/null || true' INT TERM
+	wait $p1 $p2
+}
+
+watch() {
+	log "watch $FRONT_DEV $REAR_DEV (no STREAMON until a V4L2 client opens the node)"
+	exec python3 - "$FRONT_DEV" "$REAR_DEV" "$0" "$POLL_S" <<'PY'
+import os, sys, time, subprocess
+
+front, rear, script, poll_s = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+GST = {"gst-launch-1.0", "gst-laun"}
+
+
+def holders(dev: str) -> set[int]:
+    found: set[int] = set()
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return found
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            comm = open(f"/proc/{pid}/comm", encoding="utf-8", errors="ignore").read().strip()
+        except OSError:
+            continue
+        if comm in GST or comm.startswith("gst-launch"):
+            continue
+        fd_dir = f"/proc/{pid}/fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(f"{fd_dir}/{fd}")
+            except OSError:
+                continue
+            if target == dev:
+                found.add(int(pid))
+                break
+    return found
+
+
+procs: dict[str, subprocess.Popen] = {}
+
+
+def stop(name: str) -> None:
+    p = procs.pop(name, None)
+    if p is None:
+        return
+    p.terminate()
+    try:
+        p.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait(timeout=2)
+
+
+def start(name: str) -> None:
+    if name in procs and procs[name].poll() is None:
+        return
+    print(f"dagu-camera-loopback: start {name}", flush=True)
+    procs[name] = subprocess.Popen([script, name])
+
+
+try:
+    while True:
+        want_front = bool(holders(front))
+        want_rear = bool(holders(rear))
+        if want_front:
+            start("front")
+        else:
+            stop("front")
+        if want_rear:
+            start("rear")
+        else:
+            stop("rear")
+        dead = [n for n, p in procs.items() if p.poll() is not None]
+        for n in dead:
+            procs.pop(n, None)
+        time.sleep(poll_s)
+finally:
+    for n in list(procs):
+        stop(n)
+PY
+}
+
+case "$cmd" in
+watch) watch ;;
+front|rear) run_one "$cmd" ;;
+all) run_all ;;
+*) printf 'usage: %s [watch|front|rear|all]\n' "$0" >&2; exit 2 ;;
+esac
 LOOPEOF
 chmod 755 /usr/local/sbin/dagu-camera-loopback.sh
 cat >/etc/systemd/system/dagu-camera-loopback.service <<'EOF'
 [Unit]
-Description=dagu v4l2loopback NV12 bridge (not Spectra ISP)
+Description=dagu v4l2loopback NV12 both-nodes (not Spectra ISP)
 After=systemd-modules-load.service
-Wants=pipewire.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/dagu-camera-loopback.sh
+ExecStart=/usr/local/sbin/dagu-camera-loopback.sh all
+CPUAffinity=0-3
 Restart=on-failure
 RestartSec=5
+EOF
+rm -f /etc/systemd/system/multi-user.target.wants/dagu-camera-loopback.service
+cat >/etc/systemd/system/dagu-camera-loopback-watch.service <<'EOF'
+[Unit]
+Description=dagu: start v4l2loopback SoftISP only when video20/21 is open
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-camera-loopback.sh watch
+CPUAffinity=0-3
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 EOF
-ln -sf /etc/systemd/system/dagu-camera-loopback.service \
-	/etc/systemd/system/multi-user.target.wants/dagu-camera-loopback.service
+ln -sf /etc/systemd/system/dagu-camera-loopback-watch.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-camera-loopback-watch.service
+mkdir -p /etc/libcamera
+cat >/etc/libcamera/configuration.yaml <<'EOF'
+version: 1
+configuration:
+  software_isp:
+    mode: cpu
+    threads: 2
+EOF
 # Do not put hw:0,0 in pipewire context.objects. Opening the PCM
 # before /proc/asound/cards exists exits PipeWire 234 and systemd
 # start-limits the socket for the whole session.
@@ -2071,16 +2246,19 @@ dconf update 2>/dev/null || true
 # linux-mainline/scripts/dagu-touch-boost.py
 cat >/usr/local/sbin/dagu-touch-boost.py <<'EOF'
 #!/usr/bin/env python3
-"""Raise GPU/CPU floors while touching or while Chrome is playing video.
+"""Raise GPU/CPU floors while touching, Chrome video, or camera SoftISP.
 
 Idle stays on simple_ondemand / schedutil (GPU min 587 MHz). A hold-drag
 or a <video> used to bounce 587↔670 and leave the prime core at 845 MHz,
 which is the felt hitch / dropped frame. This does not change Chrome
 CPU vs GPU raster. Do not set governor=performance.
 
-HTML5 Venus is Chromium (`/usr/lib/chromium/chromium`), not official
-Chrome. Signal is an open `/dev/video14` fd, or VideoFrame / V4L2 /
-FFmpeg threads. Do not pin to the big cluster.
+Himax is spi-gpio bitbang (IRQF_ONESHOT thread). SoftISP on 5MP/12MP RAW
+saturates the cluster and mutter's libinput loop starves — taps still
+wake the backlight via logind, but folders/close-window do not respond.
+Do not pin SoftISP to the big cluster: pin it to silver CPU0-3 and keep
+Himax/mutter on Gold. Signal is any userspace fd on `/dev/video0` or
+`/dev/video3` (plus gst-launch holding the loopback nodes).
 """
 from __future__ import annotations
 
@@ -2106,6 +2284,15 @@ CPU = (
 
 HOLD_TAIL_S = 0.18
 VIDEO_SCAN_S = 0.12
+SOFTISP_CPUS = frozenset({0, 1, 2, 3})
+ALL_CPUS = frozenset(range(os.cpu_count() or 8))
+# comm is TASK_COMM_LEN=16 including NUL → 15 chars.
+SKIP_PIN = {
+    "gnome-shell",
+    "Xwayland",
+    "dagu-touch-boo",
+    "dagu-himax-irq",
+}
 
 
 def write(path: str, value: str) -> None:
@@ -2138,13 +2325,43 @@ BROWSER_MARKERS = (
     b"/usr/lib/chromium/chromium",
     b"/usr/bin/chromium",
 )
+CAM_NODES = ("/dev/video0", "/dev/video3")
+LOOP_NODES = ("/dev/video20", "/dev/video21")
+CAM_COMMS = {
+    "snapshot",
+    "gnome-snapshot",
+    "pipewire",
+    "wireplumber",
+    "cam",
+    "gst-launch-1.0",
+}
+VENUS_NODES = (
+    "/dev/video14",
+    "/dev/video15",
+    "/dev/video-dec0",
+    "/dev/video-enc0",
+)
 
 
 def _is_browser(cmd: bytes) -> bool:
     return any(m in cmd for m in BROWSER_MARKERS)
 
 
-def _has_venus_fd(pid: str) -> bool:
+def _comm(pid: str) -> str:
+    try:
+        with open(f"/proc/{pid}/comm", "r", encoding="utf-8", errors="ignore") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _is_cam_comm(comm: str) -> bool:
+    if comm in CAM_COMMS:
+        return True
+    return comm.startswith("gst-launch") or comm.startswith("gnome-snapsho")
+
+
+def _has_fd(pid: str, nodes: tuple[str, ...]) -> bool:
     try:
         fds = os.listdir(f"/proc/{pid}/fd")
     except OSError:
@@ -2154,9 +2371,13 @@ def _has_venus_fd(pid: str) -> bool:
             target = os.readlink(f"/proc/{pid}/fd/{fd}")
         except OSError:
             continue
-        if target in ("/dev/video14", "/dev/video15", "/dev/video-dec0", "/dev/video-enc0"):
+        if target in nodes:
             return True
     return False
+
+
+def _has_venus_fd(pid: str) -> bool:
+    return _has_fd(pid, VENUS_NODES)
 
 
 def chrome_video_playing() -> bool:
@@ -2195,15 +2416,53 @@ def chrome_video_playing() -> bool:
     return False
 
 
+def _iter_pids():
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return
+    for pid in pids:
+        if pid.isdigit():
+            yield pid
+
+
+def camera_streaming() -> bool:
+    """True while anyone holds a CAMSS RDI node, or gst holds loopback."""
+    for pid in _iter_pids():
+        comm = _comm(pid)
+        if _has_fd(pid, CAM_NODES):
+            return True
+        if _is_cam_comm(comm) and _has_fd(pid, LOOP_NODES):
+            return True
+    return False
+
+
+def pin_softisp(enable: bool) -> None:
+    """Keep DebayerCpu/libcamera off Gold so mutter and Himax still run."""
+    cpus = SOFTISP_CPUS if enable else ALL_CPUS
+    for pid in _iter_pids():
+        comm = _comm(pid)
+        if comm in SKIP_PIN:
+            continue
+        if not (_has_fd(pid, CAM_NODES) or _has_fd(pid, LOOP_NODES)):
+            continue
+        try:
+            os.sched_setaffinity(int(pid), cpus)
+        except (OSError, ValueError, PermissionError):
+            continue
+
+
 def main() -> None:
     dev = find_himax()
     fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
     apply(False)
+    pin_softisp(False)
     contacts = 0
     holding = False
     drop_at = None
     video = False
     last_scan = 0.0
+    pinned = False
     while True:
         now = time.monotonic()
         try:
@@ -2221,7 +2480,13 @@ def main() -> None:
                 elif typ == EV_KEY and code == BTN_TOUCH:
                     contacts = 1 if value else 0
         if now - last_scan >= VIDEO_SCAN_S:
-            video = chrome_video_playing()
+            video = chrome_video_playing() or camera_streaming()
+            if video and not pinned:
+                pin_softisp(True)
+                pinned = True
+            elif not video and pinned:
+                pin_softisp(False)
+                pinned = False
             last_scan = now
         want = contacts > 0 or video
         if want:
@@ -2241,11 +2506,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 EOF
 chmod 755 /usr/local/sbin/dagu-touch-boost.py
 cat >/etc/systemd/system/dagu-touch-boost.service <<'EOF'
 [Unit]
-Description=dagu: raise GPU/CPU floors while touching or Chrome video
+Description=dagu: raise GPU/CPU floors while touching, Chrome video, or camera
 After=dagu-resources-fix.service
 
 [Service]
@@ -2382,6 +2648,59 @@ EOF
 ln -sf /etc/systemd/system/dagu-wq-affinity.service \
 	/etc/systemd/system/multi-user.target.wants/dagu-wq-affinity.service
 systemctl enable --now dagu-wq-affinity.service >/dev/null 2>&1 || true
+
+# Himax IRQ 193 (number can move) must stay on Gold after reboot.
+# Keep in sync with linux-mainline/scripts/dagu-himax-irq-affinity.sh
+cat >/usr/local/sbin/dagu-himax-irq-affinity.sh <<'EOF'
+#!/bin/sh
+set -eu
+AFFINITY="${DAGU_HIMAX_IRQ_AFFINITY:-f0}"
+find_irq() {
+	irq=""
+	while read -r line; do
+		case "$line" in
+		*himax-dagu*|*himax*)
+			irq=${line%%:*}
+			irq=${irq#"${irq%%[![:space:]]*}"}
+			break
+			;;
+		esac
+	done </proc/interrupts
+	[ -n "$irq" ] && [ -d "/proc/irq/$irq" ]
+}
+i=0
+while ! find_irq; do
+	i=$((i + 1))
+	[ "$i" -gt 40 ] && {
+		echo "dagu-himax-irq-affinity: no himax IRQ" >&2
+		exit 1
+	}
+	sleep 0.5
+done
+echo "$AFFINITY" >"/proc/irq/$irq/smp_affinity"
+printf 'dagu-himax-irq-affinity: irq %s smp_affinity=%s list=%s\n' \
+	"$irq" "$(cat "/proc/irq/$irq/smp_affinity")" \
+	"$(cat "/proc/irq/$irq/smp_affinity_list")"
+EOF
+chmod 755 /usr/local/sbin/dagu-himax-irq-affinity.sh
+cat >/etc/systemd/system/dagu-himax-irq-affinity.service <<'EOF'
+[Unit]
+Description=dagu: Himax IRQ affinity CPU4-7 (spi-gpio vs SoftISP)
+DefaultDependencies=no
+After=sysinit.target
+Before=display-manager.service gdm.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-himax-irq-affinity.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/dagu-himax-irq-affinity.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-himax-irq-affinity.service
+systemctl enable --now dagu-himax-irq-affinity.service >/dev/null 2>&1 || true
 
 rm -f /usr/sbin/policy-rc.d
 echo "==> desktop setup done"

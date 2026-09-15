@@ -1,5 +1,5 @@
 [Unit]
-Description=dagu: raise GPU/CPU floors while touching or Chrome video
+Description=dagu: raise GPU/CPU floors while touching, Chrome video, or camera
 After=dagu-resources-fix.service
 
 [Service]

@@ -1,0 +1,13 @@
+[Unit]
+Description=dagu: start v4l2loopback SoftISP only when video20/21 is open
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-camera-loopback.sh watch
+CPUAffinity=0-3
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,135 @@
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 35c29ce..044576d 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -1487,7 +1487,18 @@ SimplePipelineHandler::generateConfiguration(Camera *camera, std::span<const Str
+ 		const auto &formats = (role == StreamRole::Raw ? rawFormats : processedFormats);
+ 		StreamConfiguration cfg{ StreamFormats{ formats } };
+ 		cfg.pixelFormat = formats.begin()->first;
+-		cfg.size = formats.begin()->second[0].max;
++		{
++			Size max = formats.begin()->second[0].max;
++			/* dagu: Viewfinder must not default to 12MP SoftISP. */
++			if (role == StreamRole::Viewfinder ||
++			    role == StreamRole::VideoRecording) {
++				unsigned int div = max.width >= 3000 ? 4
++						 : max.width >= 2000 ? 2 : 1;
++				cfg.size = Size((max.width / div) & ~1U,
++						(max.height / div) & ~1U);
++			} else {
++				cfg.size = max;
++			}
++		}
+ 
+ 		config->addConfiguration(cfg);
+ 	}
+diff --git a/src/libcamera/software_isp/debayer_cpu.cpp b/src/libcamera/software_isp/debayer_cpu.cpp
+index c6d5d1e..57167ca 100644
+--- a/src/libcamera/software_isp/debayer_cpu.cpp
++++ b/src/libcamera/software_isp/debayer_cpu.cpp
+@@ -286,6 +286,12 @@ void DebayerCpu::debayer10P_BGBG_BGR888(uint8_t *dst, const uint8_t *src[])
+ 		GBRG_BGR888(1, 2, 1)
+ 		/* Skip 5th src byte with 4 x 2 least-significant-bits */
+ 		x++;
++		if (xSkip_ > 1) {
++			int adv = 5 * static_cast<int>(xSkip_ - 1);
++			prev += adv;
++			curr += adv;
++			next += adv;
++		}
+ 	}
+ }
+ 
+@@ -307,6 +313,12 @@ void DebayerCpu::debayer10P_GRGR_BGR888(uint8_t *dst, const uint8_t *src[])
+ 		RGGB_BGR888(1, 2, 1)
+ 		/* Skip 5th src byte with 4 x 2 least-significant-bits */
+ 		x++;
++		if (xSkip_ > 1) {
++			int adv = 5 * static_cast<int>(xSkip_ - 1);
++			prev += adv;
++			curr += adv;
++			next += adv;
++		}
+ 	}
+ }
+ 
+@@ -328,6 +340,12 @@ void DebayerCpu::debayer10P_GBGB_BGR888(uint8_t *dst, const uint8_t *src[])
+ 		BGGR_BGR888(1, 2, 1)
+ 		/* Skip 5th src byte with 4 x 2 least-significant-bits */
+ 		x++;
++		if (xSkip_ > 1) {
++			int adv = 5 * static_cast<int>(xSkip_ - 1);
++			prev += adv;
++			curr += adv;
++			next += adv;
++		}
+ 	}
+ }
+ 
+@@ -349,6 +367,12 @@ void DebayerCpu::debayer10P_RGRG_BGR888(uint8_t *dst, const uint8_t *src[])
+ 		GRBG_BGR888(1, 2, 1)
+ 		/* Skip 5th src byte with 4 x 2 least-significant-bits */
+ 		x++;
++		if (xSkip_ > 1) {
++			int adv = 5 * static_cast<int>(xSkip_ - 1);
++			prev += adv;
++			curr += adv;
++			next += adv;
++		}
+ 	}
+ }
+ 
+@@ -685,6 +709,22 @@ int DebayerCpu::configure(const StreamConfiguration &inputCfg,
+ 		    ~(inputConfig_.patternSize.height - 1);
+ 	window_.width = outputCfg.size.width;
+ 	window_.height = outputCfg.size.height;
++	/* dagu: skip Bayer (keep phase) so a 1020×765 Viewfinder is full FOV,
++	 * not a center crop of 4080×3060. StillCapture is ~1:1 (skip=1). */
++	xSkip_ = 1;
++	ySkip_ = 1;
++	if (outputCfg.size.width > 0 && outputCfg.size.height > 0 &&
++	    inputCfg.size.width >= outputCfg.size.width * 2 &&
++	    inputCfg.size.height >= outputCfg.size.height * 2) {
++		unsigned int xs = (inputCfg.size.width / outputCfg.size.width) & ~1U;
++		unsigned int ys = (inputCfg.size.height / outputCfg.size.height) & ~1U;
++		if (xs >= 2 && ys >= 2) {
++			xSkip_ = xs;
++			ySkip_ = ys;
++			window_.x = 0;
++			window_.y = 0;
++		}
++	}
+ 
+ 	/*
+ 	 * Set the stats window to the whole processed window. Its coordinates are
+@@ -725,6 +765,8 @@ void DebayerCpuThread::configure(unsigned int yStart, unsigned int yEnd)
+ 	lineBufferPadding_ = inputConfig.patternSize.width * inputConfig.bpp / 8;
+ 	lineBufferLength_ = debayer_->window_.width * inputConfig.bpp / 8 +
+			    2 * lineBufferPadding_;
++	if (debayer_->xSkip_ > 1)
++		lineBufferLength_ = inputConfig.stride + 2 * lineBufferPadding_;
+ 
+ 	if (enableInputMemcpy_) {
+ 		for (unsigned int i = 0; i <= inputConfig.patternSize.height; i++)
+@@ -882,6 +924,8 @@ void DebayerCpuThread::process2(uint32_t frame, const uint8_t *src, uint8_t *dst
+ 		debayer_->debayer1(dst, linePointers);
+ 		src += inputStride;
+ 		dst += outputStride;
++		if (debayer_->ySkip_ > 1)
++			src += inputStride * 2 * (debayer_->ySkip_ - 1);
+ 	}
+ 
+ 	if (window.y == 0 && yEnd_ == window.height) {
+diff --git a/src/libcamera/software_isp/debayer_cpu.h b/src/libcamera/software_isp/debayer_cpu.h
+index 2c88c9e..0cd5aa4 100644
+--- a/src/libcamera/software_isp/debayer_cpu.h
++++ b/src/libcamera/software_isp/debayer_cpu.h
+@@ -155,6 +155,8 @@ private:
+ 	Rectangle window_;
+ 	std::unique_ptr<SwStatsCpu> stats_;
+ 	unsigned int xShift_; /* Offset of 0/1 applied to window_.x */
++	unsigned int xSkip_ = 1;
++	unsigned int ySkip_ = 1;
+ 
+ 	static constexpr unsigned int kMinThreads = 1;
+ 	static constexpr unsigned int kMaxThreads = 8;

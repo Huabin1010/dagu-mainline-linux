@@ -391,6 +391,39 @@
 	};
 
 	/*
+	 * Nanosic 803 keyboard MCU. CAF qupv3_se2_i2c @ 0x988000 / 0x4c,
+	 * pins gpio115/116 function qup2. GENI i2c2 is the same SE as uart2
+	 * and geni_se_init hangs this QHEE — bit-bang the dump pads.
+	 * IRQ GPIO83 falling, wakeup GPIO46 rising, vdd 127, reset 141,
+	 * sleep 155. Hall GPIO110/121 stay on gpio_keys.
+	 */
+	kb_i2c_se2: i2c-gpio-se2 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&kb_i2c_se2_default>;
+		sda-gpios = <&tlmm 115 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 116 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+		clock-frequency = <400000>;
+
+		keyboard@4c {
+			compatible = "nanosic,803";
+			reg = <0x4c>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&nanosic_gpio_default>;
+			interrupt-parent = <&tlmm>;
+			interrupts = <83 IRQ_TYPE_EDGE_FALLING>;
+			reset-gpios = <&tlmm 141 GPIO_ACTIVE_HIGH>;
+			status-gpios = <&tlmm 46 GPIO_ACTIVE_HIGH>;
+			vdd-gpios = <&tlmm 127 GPIO_ACTIVE_HIGH>;
+			sleep-gpios = <&tlmm 155 GPIO_ACTIVE_HIGH>;
+			wakeup-source;
+		};
+	};
+
+	/*
 	 * CAF dual-FuelGauge: weighted SoC, max(V), sum(I/charge).
 	 * Do not request fg-master-disable-gpio (117) / fg-slave-disable-gpio
 	 * (91) — CAF uses them to isolate a cell; hogging would drop a pack.
@@ -599,6 +632,35 @@
 		function = "gpio";
 		drive-strength = <2>;
 		bias-disable;
+	};
+
+	/* Dump qupv3_se2_i2c: gpio115/116 function qup2. Bit-bang as GPIO. */
+	kb_i2c_se2_default: kb-i2c-se2-default-state {
+		pins = "gpio115", "gpio116";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/*
+	 * CAF nanosic_keyboard_mcu: gpio46/141/127 default, gpio155 sleep,
+	 * irq GPIO83. Keep the MCU awake (sleep driven high in the driver).
+	 */
+	nanosic_gpio_default: nanosic-gpio-default-state {
+		ctrl-pins {
+			pins = "gpio127", "gpio141", "gpio155";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		irq-pins {
+			pins = "gpio46", "gpio83";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+			input-enable;
+		};
 	};
 
 	bq2597x_master_int_default: bq2597x-master-int-default-state {
@@ -1121,8 +1183,9 @@
 /*
  * CAF: back_main s5kjn1 csiphy1 / CCI0 I2C0 @0x10, reset GPIO93, MCLK GPIO94.
  * Stock Android clock-rates = 19.2 MHz (not 24). Preview 4080x3060 GBRG 10-bit
- * D-PHY 4-lane (Android CSIPHY dump 0x0800=0x02 / 0x0814=0xD5).
+ * C-PHY 3-trio (CamX 0x0114=0x0301). The D-PHY table is 8160x6120 only.
  * VIO ldoc1 (L1C 1.8 V), AVDD GPIO31 2.8 V, VDIG ldoc3 (L3C 1.104 V).
+ * Power: VIO → VANA → VDIG (CAF). VDIG before AVDD pins the array at OB.
  */
 &cci0_i2c0 {
 	s5kjn1: camera@10 {
@@ -1139,15 +1202,23 @@
 		vdda-supply = <&camera_wide_vana>;
 		vddio-supply = <&vreg_l1c_1p8>;
 		vddd-supply = <&vreg_l3c_1p1>;
+		/*
+		 * CAF qcom,cam-sensor@0: roll=90 yaw=180 (back).
+		 * 180° is sensor HV-flip at 0x0101, pinned in the driver so
+		 * libcamera cannot clear it and software-Rot180 a 12MP RAW.
+		 */
+		orientation = <1>; /* V4L2_CAMERA_ORIENTATION_BACK */
+		rotation = <180>;
 
 		port {
 			s5kjn1_ep: endpoint {
 				/*
-				 * Android preview MMIO is CAF 1.2.1 2PH D-PHY
-				 * 4-lane (csiphy 0x0800=0x02, 0x0814=0xD5), not
-				 * CamX C-PHY 3-trio. Match working imx596.
+				 * CamX 4080x3060 preview is C-PHY 3-trio
+				 * (0x0114=0x0301). D-PHY 4-lane is the 8160
+				 * full-res table only — mixing it with 2x2
+				 * MCU leaves the packer on pedestal noise.
 				 */
-				data-lanes = <1 2 3 4>;
+				data-lanes = <1 2 3>;
 				link-frequencies = /bits/ 64 <700000000>;
 				remote-endpoint = <&csiphy1_ep>;
 			};
@@ -1172,8 +1243,13 @@
 		vdda-supply = <&camera_front_vana>;
 		vddio-supply = <&vreg_l1c_1p8>;
 		vddd-supply = <&vreg_l2c_1p15>;
+		/*
+		 * CAF qcom,cam-sensor@2: roll=270 yaw=0 (front).
+		 * GNOME Snapshot preview is inverted at rotation=0; 180
+		 * matches the rear HV-flip mount in the landscape widget.
+		 */
 		orientation = <0>; /* V4L2_CAMERA_ORIENTATION_FRONT */
-		rotation = <0>;
+		rotation = <180>;
 
 		port {
 			imx596_ep: endpoint {
@@ -1198,9 +1274,8 @@
 		port@1 {
 			reg = <1>;
 			csiphy1_ep: endpoint {
-				clock-lanes = <7>;
-				data-lanes = <0 1 2 3>;
-				bus-type = <4>;
+				data-lanes = <0 1 2>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
 				remote-endpoint = <&s5kjn1_ep>;
 			};
 		};
@@ -1210,7 +1285,7 @@
 			csiphy4_ep: endpoint {
 				clock-lanes = <7>;
 				data-lanes = <0 1 2 3>;
-				bus-type = <4>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
 				remote-endpoint = <&imx596_ep>;
 			};
 		};

@@ -91,9 +91,9 @@ done
 echo ===rear-stream===
 # msm_vfe0_video0 = /dev/video0. 10-bit GBRG packed fourcc is pGAA.
 rear=/dev/video0
-echo using $rear pGAA 4080x3060
+echo using $rear pgAA 4080x3060
 rm -f /tmp/rear.raw
-timeout 20 v4l2-ctl -d "$rear" --set-fmt-video=width=4080,height=3060,pixelformat=pGAA \
+timeout 20 v4l2-ctl -d "$rear" --set-fmt-video=width=4080,height=3060,pixelformat=pgAA \
   --stream-mmap --stream-count=1 --stream-to=/tmp/rear.raw &
 RSP=$!
 sleep 1

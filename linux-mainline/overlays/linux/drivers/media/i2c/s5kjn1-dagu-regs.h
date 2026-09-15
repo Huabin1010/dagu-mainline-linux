@@ -1,10 +1,18 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * CamX 4080x3060 crop/PLL for dagu Qtech s5kjn1, Android preview D-PHY.
- * PHY is 4-lane D-PHY (0x0114=0x0300); CamX bin 0x0115=1 was C-PHY still.
+ * CamX 4080x3060 crop/PLL for dagu Qtech s5kjn1 preview.
+ * PHY is C-PHY 3-trio (0x0114=0x0301). The only D-PHY table in
+ * com.qti.sensormodule.dagu_qtech_s5kjn1_wide.bin is 8160x6120
+ * (0x0114=0x0300, 0x0900=0x0111). Do not mix 4080 2x2 MCU with D-PHY.
  *
  * MCU page 0x2400 is optional: Qtech NACKs 0x6028=0x2400 until the MCU
  * wakes. STREAMON writes 0x4000 sensor/PHY/PLL even if MCU is silent.
+ *
+ * CamX module (com.qti.sensormodule.dagu_qtech_s5kjn1_wide.bin) has no
+ * 2040 output: preview is 0x034c=0x0ff0 / 0x034e=0x0bf4 with 0x0900=0x0122
+ * skip-2. Analog half-crop (0x0348=0x0fff) reads back but the Qtech packer
+ * still emits ~4080, so CSID 2040 overflows (rx irq=0xff). Preview is the
+ * CamX 4080x3060 table + MCU. Do not write 0x0144. Do not enum 8160.
  */
 #ifndef _S5KJN1_DAGU_REGS_H_
 #define _S5KJN1_DAGU_REGS_H_
@@ -266,7 +274,54 @@ static const struct cci_reg_sequence s5kjn1_dagu_4080x3060_mode[] = {
 	{ CCI_REG16(0x0384), 0x0002 },
 	{ CCI_REG16(0x0386), 0x0002 },
 	{ CCI_REG16(0x0110), 0x1002 },
-	{ CCI_REG16(0x0114), 0x0300 }, /* dagu: Android preview 4-lane D-PHY 0x0115=0 */
+	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */
+	{ CCI_REG16(0x0116), 0x3000 },
+	{ CCI_REG16(0x0136), 0x1300 },
+	{ CCI_REG16(0x013e), 0x00c8 },
+	{ CCI_REG16(0x0300), 0x0006 },
+	{ CCI_REG16(0x0302), 0x0001 },
+	{ CCI_REG16(0x0304), 0x0003 },
+	{ CCI_REG16(0x0306), 0x0083 }, /* dagu: s5kjn1 CamX PLL */
+	{ CCI_REG16(0x0308), 0x0008 },
+	{ CCI_REG16(0x030a), 0x0001 },
+	{ CCI_REG16(0x030c), 0x0000 },
+	{ CCI_REG16(0x030e), 0x0003 },
+	{ CCI_REG16(0x0310), 0x0086 },
+	{ CCI_REG16(0x0312), 0x0000 },
+	{ CCI_REG16(0x080e), 0x0000 },
+	{ CCI_REG16(0x0340), 0x0c5c },
+	{ CCI_REG16(0x0342), 0x1700 },
+	{ CCI_REG16(0x0702), 0x0000 },
+	{ CCI_REG16(0x0202), 0x0100 },
+	{ CCI_REG16(0x0200), 0x0100 },
+	{ CCI_REG16(0x0d00), 0x0101 },
+	{ CCI_REG16(0x0d02), 0x0101 },
+	{ CCI_REG16(0x0d04), 0x0102 },
+	{ CCI_REG16(0x6226), 0x0000 },
+};
+
+/*
+ * Unused: analog half-crop does not change Qtech MIPI line length.
+ * Kept so we never re-guess 4x4 (0x0144) for a 2040 preview.
+ */
+static const struct cci_reg_sequence s5kjn1_dagu_2040x1530_mode[] __maybe_unused = {
+	{ CCI_REG16(0x6028), 0x4000 },
+	{ CCI_REG16(0xf46a), 0xae80 },
+	{ CCI_REG16(0x0344), 0x0000 },
+	{ CCI_REG16(0x0346), 0x000c },
+	{ CCI_REG16(0x0348), 0x0fff },
+	{ CCI_REG16(0x034a), 0x0c0f },
+	{ CCI_REG16(0x034c), 0x07f8 },
+	{ CCI_REG16(0x034e), 0x05fa },
+	{ CCI_REG16(0x0350), 0x0008 },
+	{ CCI_REG16(0x0352), 0x0008 },
+	{ CCI_REG16(0x0900), 0x0122 },
+	{ CCI_REG16(0x0380), 0x0002 },
+	{ CCI_REG16(0x0382), 0x0002 },
+	{ CCI_REG16(0x0384), 0x0002 },
+	{ CCI_REG16(0x0386), 0x0002 },
+	{ CCI_REG16(0x0110), 0x1002 },
+	{ CCI_REG16(0x0114), 0x0301 }, /* dagu: CamX 4080 C-PHY 0x0115=1 */
 	{ CCI_REG16(0x0116), 0x3000 },
 	{ CCI_REG16(0x0136), 0x1300 },
 	{ CCI_REG16(0x013e), 0x00c8 },

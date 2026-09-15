@@ -38,8 +38,24 @@
 
 #define IMX596_MCLK_FREQ		(19200 * HZ_PER_KHZ)
 #define IMX596_LINK_FREQ		(678400000ULL) /* CamX OP PLL DDR clock */
+#define IMX596_DATA_LANES		4
+#define IMX596_BITS_PER_SAMPLE		10
+#define IMX596_PIXEL_RATE		(IMX596_LINK_FREQ * 2 * IMX596_DATA_LANES / \
+					 IMX596_BITS_PER_SAMPLE)
 #define IMX596_WIDTH			2592
 #define IMX596_HEIGHT			1952
+#define IMX596_HTS			0x1224 /* CamX 0x0342/0x0343 */
+#define IMX596_VTS			0x189e /* CamX 0x0340/0x0341 */
+#define IMX596_VTS_MAX			0xffff
+#define IMX596_EXPOSURE_MIN		1
+#define IMX596_EXPOSURE_MARGIN		22
+#define IMX596_EXPOSURE_DEFAULT		0x1886 /* CamX 0x0202/0x0203 */
+#define IMX596_AGAIN_MIN		0
+#define IMX596_AGAIN_MAX		0x0fff
+#define IMX596_AGAIN_DEFAULT		0
+#define IMX596_REG_EXPOSURE		CCI_REG16(0x0202)
+#define IMX596_REG_AGAIN		CCI_REG16(0x0204)
+#define IMX596_REG_VTS			CCI_REG16(0x0340)
 #define IMX596_MBUS_CODE		MEDIA_BUS_FMT_SBGGR10_1X10
 
 #define to_imx596(_sd)			container_of(_sd, struct imx596, sd)
@@ -60,6 +76,7 @@ struct imx596 {
 	struct v4l2_subdev sd;
 	struct media_pad pad;
 	struct v4l2_ctrl_handler ctrl_handler;
+	struct v4l2_ctrl *exposure;
 	struct clk *mclk;
 	struct gpio_desc *reset_gpio;
 	struct regulator_bulk_data supplies[ARRAY_SIZE(imx596_supply_names)];
@@ -199,6 +216,66 @@ static int imx596_enum_frame_size(struct v4l2_subdev *sd,
 	fse->max_height = IMX596_HEIGHT;
 	return 0;
 }
+
+static int imx596_get_selection(struct v4l2_subdev *sd,
+				struct v4l2_subdev_state *sd_state,
+				struct v4l2_subdev_selection *sel)
+{
+	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+	case V4L2_SEL_TGT_NATIVE_SIZE:
+	case V4L2_SEL_TGT_CROP_DEFAULT:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+		sel->r.left = 0;
+		sel->r.top = 0;
+		sel->r.width = IMX596_WIDTH;
+		sel->r.height = IMX596_HEIGHT;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+static int imx596_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct imx596 *priv = container_of(ctrl->handler, struct imx596,
+					    ctrl_handler);
+	s64 exposure_max;
+	int ret = 0;
+
+	if (ctrl->id == V4L2_CID_VBLANK && priv->exposure) {
+		exposure_max = IMX596_HEIGHT + ctrl->val - IMX596_EXPOSURE_MARGIN;
+		__v4l2_ctrl_modify_range(priv->exposure,
+					 priv->exposure->minimum, exposure_max,
+					 priv->exposure->step,
+					 priv->exposure->default_value);
+	}
+
+	if (!pm_runtime_get_if_active(priv->dev))
+		return 0;
+
+	switch (ctrl->id) {
+	case V4L2_CID_ANALOGUE_GAIN:
+		ret = cci_write(priv->regmap, IMX596_REG_AGAIN, ctrl->val, NULL);
+		break;
+	case V4L2_CID_EXPOSURE:
+		ret = cci_write(priv->regmap, IMX596_REG_EXPOSURE, ctrl->val, NULL);
+		break;
+	case V4L2_CID_VBLANK:
+		ret = cci_write(priv->regmap, IMX596_REG_VTS,
+				ctrl->val + IMX596_HEIGHT, NULL);
+		break;
+	default:
+		break;
+	}
+
+	pm_runtime_put(priv->dev);
+	return ret;
+}
+
+static const struct v4l2_ctrl_ops imx596_ctrl_ops = {
+	.s_ctrl = imx596_s_ctrl,
+};
 
 static int imx596_set_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *sd_state,
@@ -687,6 +764,15 @@ static int imx596_enable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		goto rpm_put;
 
+	/* Group hold must be down before CSI_LANE_MODE sticks. */
+	ret = cci_write(priv->regmap, CCI_REG8(0x0114), 0x03, NULL);
+	if (ret)
+		goto rpm_put;
+
+	ret = __v4l2_ctrl_handler_setup(priv->sd.ctrl_handler);
+	if (ret)
+		goto rpm_put;
+
 	usleep_range(10 * USEC_PER_MSEC, 12 * USEC_PER_MSEC);
 	ret = cci_write(priv->regmap, IMX596_REG_MODE_SELECT,
 			IMX596_MODE_STREAMING, NULL);
@@ -696,14 +782,19 @@ static int imx596_enable_streams(struct v4l2_subdev *sd,
 	msleep(80);
 	{
 		u64 fc = 0, mode = 0, lanes = 0, dt = 0;
+		u64 pll_op = 0, prediv = 0, vt_mpy = 0;
 
 		cci_read(priv->regmap, CCI_REG8(0x0005), &fc, NULL);
 		cci_read(priv->regmap, IMX596_REG_MODE_SELECT, &mode, NULL);
 		cci_read(priv->regmap, CCI_REG8(0x0112), &dt, NULL);
 		cci_read(priv->regmap, CCI_REG8(0x0114), &lanes, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x030d), &prediv, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x030f), &pll_op, NULL);
+		cci_read(priv->regmap, CCI_REG8(0x0307), &vt_mpy, NULL);
 		dev_info(priv->dev,
-			 "dagu imx596 streaming %dx%d fc=0x%llx mode=0x%llx dt=0x%llx lanes=0x%llx\n",
-			 IMX596_WIDTH, IMX596_HEIGHT, fc, mode, dt, lanes);
+			 "dagu imx596 streaming %dx%d fc=0x%llx mode=0x%llx dt=0x%llx lanes=0x%llx prediv=0x%llx op=0x%llx vt=0x%llx mclk=%lu\n",
+			 IMX596_WIDTH, IMX596_HEIGHT, fc, mode, dt, lanes,
+			 prediv, pll_op, vt_mpy, clk_get_rate(priv->mclk));
 	}
 	return 0;
 
@@ -733,6 +824,7 @@ static const struct v4l2_subdev_pad_ops imx596_pad_ops = {
 	.enum_frame_size = imx596_enum_frame_size,
 	.get_fmt = v4l2_subdev_get_fmt,
 	.set_fmt = imx596_set_fmt,
+	.get_selection = imx596_get_selection,
 	.enable_streams = imx596_enable_streams,
 	.disable_streams = imx596_disable_streams,
 };
@@ -834,11 +926,38 @@ static int imx596_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 
-	ret = v4l2_ctrl_handler_init(&priv->ctrl_handler, 1);
+	ret = v4l2_ctrl_handler_init(&priv->ctrl_handler, 8);
 	if (ret)
 		goto entity_cleanup;
 	v4l2_ctrl_new_int_menu(&priv->ctrl_handler, NULL, V4L2_CID_LINK_FREQ,
 			       0, 0, imx596_link_freq_menu);
+	v4l2_ctrl_new_std(&priv->ctrl_handler, &imx596_ctrl_ops,
+			  V4L2_CID_PIXEL_RATE, IMX596_PIXEL_RATE,
+			  IMX596_PIXEL_RATE, 1, IMX596_PIXEL_RATE);
+	{
+		struct v4l2_ctrl *hblank;
+		s64 hblank_val = IMX596_HTS - IMX596_WIDTH;
+		s64 vblank_val = IMX596_VTS - IMX596_HEIGHT;
+		s64 exposure_max = IMX596_VTS - IMX596_EXPOSURE_MARGIN;
+
+		hblank = v4l2_ctrl_new_std(&priv->ctrl_handler, &imx596_ctrl_ops,
+					   V4L2_CID_HBLANK, hblank_val,
+					   hblank_val, 1, hblank_val);
+		if (hblank)
+			hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+		v4l2_ctrl_new_std(&priv->ctrl_handler, &imx596_ctrl_ops,
+				  V4L2_CID_VBLANK, vblank_val,
+				  IMX596_VTS_MAX - IMX596_HEIGHT, 1, vblank_val);
+		v4l2_ctrl_new_std(&priv->ctrl_handler, &imx596_ctrl_ops,
+				  V4L2_CID_ANALOGUE_GAIN, IMX596_AGAIN_MIN,
+				  IMX596_AGAIN_MAX, 1, IMX596_AGAIN_DEFAULT);
+		priv->exposure = v4l2_ctrl_new_std(&priv->ctrl_handler,
+						    &imx596_ctrl_ops,
+						    V4L2_CID_EXPOSURE,
+						    IMX596_EXPOSURE_MIN,
+						    exposure_max, 1,
+						    IMX596_EXPOSURE_DEFAULT);
+	}
 	priv->sd.ctrl_handler = &priv->ctrl_handler;
 	if (priv->ctrl_handler.error) {
 		ret = priv->ctrl_handler.error;

@@ -2,11 +2,14 @@
 /*
  * CamX 4080x3060 crop/PLL for dagu Qtech s5kjn1, Android preview D-PHY.
  * PHY is 4-lane D-PHY (0x0114=0x0300); CamX bin 0x0115=1 was C-PHY still.
+ *
+ * MCU page 0x2400 is optional: Qtech NACKs 0x6028=0x2400 until the MCU
+ * wakes. STREAMON writes 0x4000 sensor/PHY/PLL even if MCU is silent.
  */
 #ifndef _S5KJN1_DAGU_REGS_H_
 #define _S5KJN1_DAGU_REGS_H_
 
-static const struct cci_reg_sequence s5kjn1_dagu_4080x3060_mode[] = {
+static const struct cci_reg_sequence s5kjn1_dagu_4080x3060_mcu[] = {
 	{ CCI_REG16(0x6028), 0x2400 },
 	{ CCI_REG16(0x602a), 0x1a28 },
 	{ CCI_REG16(0x6f12), 0x4c00 },
@@ -244,6 +247,9 @@ static const struct cci_reg_sequence s5kjn1_dagu_4080x3060_mode[] = {
 	{ CCI_REG16(0x6f12), 0x0000 },
 	{ CCI_REG16(0x6f12), 0x0000 },
 	{ CCI_REG16(0x6f12), 0x0000 },
+};
+
+static const struct cci_reg_sequence s5kjn1_dagu_4080x3060_mode[] = {
 	{ CCI_REG16(0x6028), 0x4000 },
 	{ CCI_REG16(0xf46a), 0xae80 },
 	{ CCI_REG16(0x0344), 0x0000 },

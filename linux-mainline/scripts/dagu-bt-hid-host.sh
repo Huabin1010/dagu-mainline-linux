@@ -3,17 +3,22 @@
 # bonded — whitelist no longer enables SCAN_PAGE. GNOME never writes
 # Pairable, so keep connectable/bondable/FastConnectable (PSCAN only, not
 # ISCAN). Do not StopDiscovery and do not kill gnome-control-center.
+# btmgmt/bluetoothctl can block on a down mgmt socket; cap each call so
+# bluetooth.service ExecStartPost cannot time out the daemon.
 set -eu
 
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-	btmgmt info >/dev/null 2>&1 && break
+bt() { timeout 2 btmgmt --index 0 "$@" >/dev/null 2>&1 || true; }
+
+i=0
+while [ "$i" -lt 10 ]; do
+	if timeout 1 btmgmt info >/dev/null 2>&1; then
+		break
+	fi
+	i=$((i + 1))
 	sleep 0.3
 done
 
-btmgmt --index 0 connectable on >/dev/null 2>&1 || true
-btmgmt --index 0 bondable on >/dev/null 2>&1 || true
-btmgmt --index 0 fast-conn on >/dev/null 2>&1 || true
-
-if command -v bluetoothctl >/dev/null 2>&1; then
-	bluetoothctl pairable on >/dev/null 2>&1 || true
-fi
+bt connectable on
+bt bondable on
+bt fast-conn on
+timeout 2 bluetoothctl pairable on >/dev/null 2>&1 || true

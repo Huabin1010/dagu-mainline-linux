@@ -108,14 +108,17 @@ bt_main_set MaxConnectionInterval 40
 cat >/usr/local/sbin/dagu-bt-hid-host.sh <<'EOF'
 #!/bin/sh
 set -eu
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-	btmgmt info >/dev/null 2>&1 && break
+bt() { timeout 2 btmgmt --index 0 "$@" >/dev/null 2>&1 || true; }
+i=0
+while [ "$i" -lt 10 ]; do
+	timeout 1 btmgmt info >/dev/null 2>&1 && break
+	i=$((i + 1))
 	sleep 0.3
 done
-btmgmt --index 0 connectable on >/dev/null 2>&1 || true
-btmgmt --index 0 bondable on >/dev/null 2>&1 || true
-btmgmt --index 0 fast-conn on >/dev/null 2>&1 || true
-command -v bluetoothctl >/dev/null 2>&1 && bluetoothctl pairable on >/dev/null 2>&1 || true
+bt connectable on
+bt bondable on
+bt fast-conn on
+timeout 2 bluetoothctl pairable on >/dev/null 2>&1 || true
 EOF
 chmod 755 /usr/local/sbin/dagu-bt-hid-host.sh
 mkdir -p /etc/systemd/system/bluetooth.service.d
@@ -1867,21 +1870,20 @@ monitor.alsa.rules = [
   }
 ]
 EOF
-# Snapshot 50 lists PipeWire Video/Source with a non-empty EnumFormat.
-# libcamera wins CAMSS arbitration but has no UDMABUF (software ISP off →
-# EnumFormat=[] → "No camera found"). spa-v4l2 cannot open MPLANE RDI.
-# Keep libcamera off; dagu-camera-pw-source.py provides NV12 instead.
+# Snapshot lists PipeWire Video/Source with a non-empty EnumFormat.
+# CONFIG_UDMABUF=y turns on libcamera Software ISP (NV12). Do not keep the
+# Python RAW demosaic source as the default path.
+# spa-v4l2 cannot open CAMSS MPLANE RDI; hide those nodes. Venus is
+# /dev/video14/15. Loopback is /dev/video20/21 (WeChat opens them directly;
+# PipeWire should not double-list them).
 cat >/etc/wireplumber/wireplumber.conf.d/60-dagu-camera.conf <<'EOF'
-wireplumber.profiles = {
-  main = {
-    monitor.libcamera = disabled
-  }
-}
 monitor.v4l2.rules = [
   {
     matches = [
+      { api.v4l2.path = "/dev/video0" }
       { api.v4l2.path = "/dev/video1" }
       { api.v4l2.path = "/dev/video2" }
+      { api.v4l2.path = "/dev/video3" }
       { api.v4l2.path = "/dev/video4" }
       { api.v4l2.path = "/dev/video5" }
       { api.v4l2.path = "/dev/video6" }
@@ -1894,6 +1896,8 @@ monitor.v4l2.rules = [
       { api.v4l2.path = "/dev/video13" }
       { api.v4l2.path = "/dev/video14" }
       { api.v4l2.path = "/dev/video15" }
+      { api.v4l2.path = "/dev/video20" }
+      { api.v4l2.path = "/dev/video21" }
     ]
     actions = {
       update-props = {
@@ -1903,23 +1907,71 @@ monitor.v4l2.rules = [
   }
 ]
 EOF
-cat >/etc/systemd/user/dagu-camera-pw-source.service <<'EOF'
+rm -f /etc/systemd/user/dagu-camera-pw-source.service \
+	/etc/systemd/user/default.target.wants/dagu-camera-pw-source.service
+mkdir -p /etc/udev/rules.d /etc/modprobe.d /etc/modules-load.d
+cat >/etc/udev/rules.d/90-dagu-udmabuf.rules <<'EOF'
+KERNEL=="udmabuf", GROUP="video", MODE="0660"
+EOF
+cat >/etc/modprobe.d/v4l2loopback.conf <<'EOF'
+options v4l2loopback devices=2 video_nr=20,21 exclusive_caps=1 card_label=dagu-front,dagu-rear
+EOF
+echo v4l2loopback >/etc/modules-load.d/dagu-v4l2loopback.conf
+cat >/usr/local/sbin/dagu-camera-loopback.sh <<'LOOPEOF'
+#!/bin/sh
+set -eu
+FRONT_DEV="${DAGU_LOOPBACK_FRONT:-/dev/video20}"
+REAR_DEV="${DAGU_LOOPBACK_REAR:-/dev/video21}"
+WIDTH="${DAGU_LOOPBACK_WIDTH:-1280}"
+HEIGHT="${DAGU_LOOPBACK_HEIGHT:-720}"
+log() { printf 'dagu-camera-loopback: %s\n' "$*"; }
+i=0
+while [ ! -e "$FRONT_DEV" ] || [ ! -e "$REAR_DEV" ]; do
+	i=$((i + 1))
+	[ "$i" -gt 60 ] && { log "no $FRONT_DEV / $REAR_DEV"; exit 1; }
+	sleep 0.5
+done
+front_name="${DAGU_LIBCAMERA_FRONT:-}"
+rear_name="${DAGU_LIBCAMERA_REAR:-}"
+if [ -z "$front_name" ] || [ -z "$rear_name" ]; then
+	list=$(cam --list-cameras 2>/dev/null || true)
+	[ -z "$front_name" ] && front_name=$(printf '%s\n' "$list" | sed -n "s/.*'\\(imx596[^']*\\)'.*/\\1/p" | head -1)
+	[ -z "$rear_name" ] && rear_name=$(printf '%s\n' "$list" | sed -n "s/.*'\\(s5kjn1[^']*\\)'.*/\\1/p" | head -1)
+fi
+log "front=$front_name -> $FRONT_DEV rear=$rear_name -> $REAR_DEV"
+pipe() {
+	src_name=$1
+	sink=$2
+	[ -n "$src_name" ] || return 0
+	exec gst-launch-1.0 -q libcamerasrc camera-name="$src_name" \
+		! video/x-raw,format=NV12,width="$WIDTH",height="$HEIGHT" \
+		! videoconvert ! v4l2sink device="$sink" sync=false
+}
+pipe "$front_name" "$FRONT_DEV" &
+p1=$!
+pipe "$rear_name" "$REAR_DEV" &
+p2=$!
+trap 'kill $p1 $p2 2>/dev/null || true' INT TERM
+wait $p1 $p2
+LOOPEOF
+chmod 755 /usr/local/sbin/dagu-camera-loopback.sh
+cat >/etc/systemd/system/dagu-camera-loopback.service <<'EOF'
 [Unit]
-Description=dagu PipeWire NV12 camera for GNOME Snapshot
-After=pipewire.service wireplumber.service
+Description=dagu v4l2loopback NV12 bridge (not Spectra ISP)
+After=systemd-modules-load.service
 Wants=pipewire.service
 
 [Service]
-ExecStart=/usr/bin/python3 /usr/local/bin/dagu-camera-pw-source.py
+Type=simple
+ExecStart=/usr/local/sbin/dagu-camera-loopback.sh
 Restart=on-failure
-RestartSec=2
+RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
-mkdir -p /etc/systemd/user/default.target.wants
-ln -sf /etc/systemd/user/dagu-camera-pw-source.service \
-	/etc/systemd/user/default.target.wants/dagu-camera-pw-source.service
+ln -sf /etc/systemd/system/dagu-camera-loopback.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-camera-loopback.service
 # Do not put hw:0,0 in pipewire context.objects. Opening the PCM
 # before /proc/asound/cards exists exits PipeWire 234 and systemd
 # start-limits the socket for the whole session.

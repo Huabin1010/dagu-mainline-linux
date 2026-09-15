@@ -31,6 +31,11 @@ install_src drivers/gpu/drm/msm/msm_fbdev.c
 install_src drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c
 install_src drivers/media/i2c/imx596-dagu.c
 install_src drivers/media/i2c/s5kjn1-dagu-regs.h
+install_src drivers/media/v4l2loopback-dagu/v4l2loopback.c
+install_src drivers/media/v4l2loopback-dagu/v4l2loopback.h
+install_src drivers/media/v4l2loopback-dagu/v4l2loopback_formats.h
+install_src drivers/media/v4l2loopback-dagu/Makefile
+install_src drivers/media/v4l2loopback-dagu/Kconfig
 
 append_once() {
 	local file=$1
@@ -78,6 +83,14 @@ append_once "$KERNEL_SRC/drivers/watchdog/Makefile" \
 append_once "$KERNEL_SRC/drivers/media/i2c/Makefile" \
 	'imx596-dagu.o' \
 	'obj-$(CONFIG_VIDEO_IMX596_DAGU) += imx596-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/media/Makefile" \
+	'v4l2loopback-dagu' \
+	'obj-$(CONFIG_VIDEO_V4L2LOOPBACK_DAGU) += v4l2loopback-dagu/'
+
+append_once "$KERNEL_SRC/drivers/media/Kconfig" \
+	'v4l2loopback-dagu/Kconfig' \
+	'source "drivers/media/v4l2loopback-dagu/Kconfig"'
 
 append_once "$KERNEL_SRC/drivers/gpu/drm/msm/Makefile" \
 	'msm_gpu_resources_sysfs.o' \
@@ -3055,7 +3068,9 @@ if marker not in text:
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
 marker = "dagu s5kjn1 frame counter"
-if marker not in text:
+# Later delay-sweep replacement owns STREAMON; do not re-stitch
+# the intermediate log+return-0 needle.
+if marker not in text and "dagu: 0x2400 delay sweep then 0x4000 mode" not in text:
     old = '''	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u\\n",
 		 s5kjn1->mode->width, s5kjn1->mode->height);
 	return 0;
@@ -3105,6 +3120,8 @@ if "{ CCI_REG16(0x0114), 0x0301 }" in hdr:
     raise SystemExit("s5kjn1-dagu-regs.h still has C-PHY 0x0114=0x0301")
 if marker not in hdr:
     raise SystemExit("s5kjn1-dagu-regs.h missing Android D-PHY 0x0114")
+if "s5kjn1_dagu_4080x3060_mcu" not in hdr:
+    raise SystemExit("s5kjn1-dagu-regs.h missing MCU 0x2400 table")
 
 # Mainline lane_regs_sm8250 copies CAF combo-mode 0x?904=0x07.
 # dagu sensors each own a PHY (csiphy1 / csiphy4); CAF non-combo 2PH uses 0x03.
@@ -3434,7 +3451,8 @@ if "stop MCU init on 0x2400" not in text:
 
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
-if "dagu: mode table while MCU page" not in text:
+if "dagu: mode table while MCU page" not in text and \
+   "dagu: 0x2400 delay sweep then 0x4000 mode" not in text:
     old_retry = """	cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
 			    ARRAY_SIZE(init_array_setting), &ret);
 	if (ret)
@@ -3489,7 +3507,8 @@ if "dagu: mode table while MCU page" not in text:
 
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
-if "MODE_SELECT before 0x2174" not in text:
+if "MODE_SELECT before 0x2174" not in text and \
+   "dagu: 0x2400 delay sweep then 0x4000 mode" not in text:
     new = """	ret = __v4l2_ctrl_handler_setup(s5kjn1->sd.ctrl_handler);
 
 	/* 0x0a70 then MODE_SELECT while MCU is halted, then 0x2174. */
@@ -3671,7 +3690,8 @@ if "s5kjn1_4080x3072_30fps_mode[] __maybe_unused" not in text:
 
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
-if "dagu: CamX 0x6010/0x6226 SW reset" not in text:
+if "dagu: CamX 0x6010/0x6226 SW reset" not in text and \
+   "dagu: 0x2400 delay sweep then 0x4000 mode" not in text:
     old_skip = """	/* dagu: skip 0x6010/0x6226 SW reset — post-reset 0x6028 NACKs */
 
 	/* Sensor init settings */
@@ -3735,7 +3755,8 @@ if "dagu: CamX 0x6010/0x6226 SW reset" not in text:
         raise SystemExit(f"{path}: SW reset needle missing")
     path.write_text(text)
     print(f"patched {path}: CamX SW reset + 0x2400 retry")
-if "dagu: CamX 0x6010/0x6226 SW reset" not in path.read_text():
+if "dagu: CamX 0x6010/0x6226 SW reset" not in path.read_text() and \
+   "dagu: 0x2400 delay sweep then 0x4000 mode" not in path.read_text():
     raise SystemExit(f"{path}: CamX SW reset missing after patch")
 
 path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
@@ -4485,4 +4506,320 @@ if marker not in text:
     print(f"patched {path}: {marker}")
 if marker not in path.read_text():
     raise SystemExit(f"{path}: CAMSS Venus helper selects missing")
+PY
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if '#include <linux/types.h>' not in text:
+    old = '#include <linux/units.h>\n'
+    if old not in text:
+        raise SystemExit(f"{path}: linux/units.h needle missing")
+    path.write_text(text.replace(old, old + '#include <linux/types.h>\n', 1))
+    print(f"patched {path}: include linux/types.h")
+    text = path.read_text()
+
+marker = "dagu: 0x2400 delay sweep then 0x4000 mode"
+if marker not in text:
+    start = text.find("static int s5kjn1_enable_streams(")
+    end = text.find("static int s5kjn1_disable_streams(")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: enable_streams bounds missing")
+    new = r'''static int s5kjn1_enable_streams(struct v4l2_subdev *sd,
+				 struct v4l2_subdev_state *state, u32 pad,
+				 u64 streams_mask)
+{
+	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
+	const struct s5kjn1_reg_list *reg_list = &s5kjn1->mode->reg_list;
+	static const unsigned int mcu_delays_ms[] = { 10, 20, 50, 100 };
+	bool mcu_ok = false;
+	int i, ret;
+
+	ret = pm_runtime_resume_and_get(s5kjn1->dev);
+	if (ret)
+		return ret;
+
+	dev_info(s5kjn1->dev, "dagu s5kjn1 mclk=%lu Hz\n",
+		 clk_get_rate(s5kjn1->mclk));
+
+	for (i = 0; i < 10; i++) {
+		ret = 0;
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+		if (!ret)
+			break;
+		dev_info(s5kjn1->dev, "dagu s5kjn1 0x6028 retry %d: %d\n",
+			 i, ret);
+		msleep(10);
+	}
+	if (ret)
+		goto error;
+
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), 0x0001, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x0000), S5KJN1_CHIP_ID, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x001e), 0x0007, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6010), 0x0001, &ret);
+	if (ret)
+		goto error;
+	usleep_range(5 * USEC_PER_MSEC, 6 * USEC_PER_MSEC);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6226), 0x0001, &ret);
+	if (ret)
+		goto error;
+	usleep_range(10 * USEC_PER_MSEC, 11 * USEC_PER_MSEC);
+
+	/*
+	 * dagu: 0x2400 delay sweep then 0x4000 mode. MCU NACK is not
+	 * STREAMON failure — Android D-PHY preview lives on page 0x4000.
+	 */
+	for (i = 0; i < ARRAY_SIZE(mcu_delays_ms); i++) {
+		msleep(mcu_delays_ms[i]);
+		ret = 0;
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &ret);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 0x2400 retry %d delay=%u ret=%d\n",
+			 i, mcu_delays_ms[i], ret);
+		if (!ret) {
+			mcu_ok = true;
+			break;
+		}
+	}
+	ret = 0;
+
+	if (mcu_ok) {
+		cci_multi_reg_write(s5kjn1->regmap, init_array_setting,
+				    ARRAY_SIZE(init_array_setting), &ret);
+		if (!ret)
+			cci_multi_reg_write(s5kjn1->regmap,
+					    s5kjn1_dagu_4080x3060_mcu,
+					    ARRAY_SIZE(s5kjn1_dagu_4080x3060_mcu),
+					    &ret);
+		if (ret) {
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 MCU table NACK %d; continue 0x4000\n",
+				 ret);
+			ret = 0;
+			mcu_ok = false;
+		}
+	} else {
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 MCU 0x2400 NACK; 0x4000 D-PHY mode only\n");
+	}
+
+	cci_multi_reg_write(s5kjn1->regmap, reg_list->regs,
+			    reg_list->num_regs, &ret);
+	if (ret)
+		goto error;
+
+	ret = __v4l2_ctrl_handler_setup(s5kjn1->sd.ctrl_handler);
+
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x4000, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x0a70, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0001, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x0a72, &ret);
+	cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0100, &ret);
+	if (ret)
+		goto error;
+	cci_write(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE,
+		  S5KJN1_MODE_STREAMING, &ret);
+	if (ret) {
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 MODE_SELECT NACK %d\n", ret);
+		goto error;
+	}
+	if (mcu_ok) {
+		int page_ret = 0;
+
+		cci_write(s5kjn1->regmap, CCI_REG16(0x6028), 0x2400, &page_ret);
+		if (!page_ret) {
+			cci_write(s5kjn1->regmap, CCI_REG16(0x602a), 0x2174,
+				  &page_ret);
+			cci_write(s5kjn1->regmap, CCI_REG16(0x6f12), 0x0401,
+				  &page_ret);
+			if (page_ret)
+				dev_info(s5kjn1->dev,
+					 "dagu s5kjn1 0x2174 NACK %d\n",
+					 page_ret);
+		} else {
+			dev_info(s5kjn1->dev,
+				 "dagu s5kjn1 post-mode 0x2400 NACK %d\n",
+				 page_ret);
+		}
+	}
+
+	dev_info(s5kjn1->dev, "dagu s5kjn1 streaming %ux%u mcu=%d\n",
+		 s5kjn1->mode->width, s5kjn1->mode->height, mcu_ok);
+	msleep(80);
+	{
+		u64 fc = 0, mode = 0, lanes = 0;
+
+		cci_read(s5kjn1->regmap, CCI_REG8(0x0005), &fc, NULL);
+		cci_read(s5kjn1->regmap, S5KJN1_REG_CTRL_MODE, &mode, NULL);
+		cci_read(s5kjn1->regmap, CCI_REG16(0x0114), &lanes, NULL);
+		dev_info(s5kjn1->dev,
+			 "dagu s5kjn1 fc=0x%llx mode=0x%llx r0114=0x%llx\n",
+			 fc, mode, lanes);
+	}
+	return 0;
+
+error:
+	dev_err(s5kjn1->dev, "failed to start streaming: %d\n", ret);
+	pm_runtime_put_autosuspend(s5kjn1->dev);
+
+	return ret;
+}
+
+'''
+    path.write_text(text[:start] + new + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+marker = "dagu: VIO then VDIG then VANA"
+if marker not in text:
+    start = text.find("static int s5kjn1_power_on(struct device *dev)")
+    end = text.find("static int s5kjn1_power_off(struct device *dev)")
+    if start < 0 or end < 0:
+        raise SystemExit(f"{path}: power_on bounds missing")
+    new = r'''static int s5kjn1_power_on(struct device *dev)
+{
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
+	int ret;
+
+	/* dagu: VIO then VDIG then VANA. CamX: CCI rail before core/analog. */
+	if (s5kjn1->vddio) {
+		ret = regulator_enable(s5kjn1->vddio);
+		if (ret)
+			return ret;
+		usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
+	}
+
+	if (s5kjn1->vddd) {
+		ret = regulator_enable(s5kjn1->vddd);
+		if (ret)
+			goto disable_vddio;
+		usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
+	}
+
+	if (s5kjn1->vdda) {
+		ret = regulator_enable(s5kjn1->vdda);
+		if (ret)
+			goto disable_vddd;
+	}
+
+	if (s5kjn1->afvdd) {
+		ret = regulator_enable(s5kjn1->afvdd);
+		if (ret)
+			goto disable_vdda;
+	}
+
+	ret = clk_prepare_enable(s5kjn1->mclk);
+	if (ret)
+		goto disable_regulators;
+
+	usleep_range(1000, 2000);
+	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 1);
+	usleep_range(1000, 2000);
+	gpiod_set_value_cansleep(s5kjn1->reset_gpio, 0);
+	msleep(20);
+	dev_info(s5kjn1->dev, "dagu s5kjn1 mclk=%lu Hz after XSHUTDOWN\n",
+		 clk_get_rate(s5kjn1->mclk));
+
+	return 0;
+
+disable_regulators:
+	if (s5kjn1->afvdd)
+		regulator_disable(s5kjn1->afvdd);
+
+disable_vdda:
+	if (s5kjn1->vdda)
+		regulator_disable(s5kjn1->vdda);
+
+disable_vddd:
+	if (s5kjn1->vddd) {
+		usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
+		regulator_disable(s5kjn1->vddd);
+	}
+
+disable_vddio:
+	if (s5kjn1->vddio)
+		regulator_disable(s5kjn1->vddio);
+
+	return ret;
+}
+
+'''
+    path.write_text(text[:start] + new + text[end:])
+    print(f"patched {path}: {marker}")
+
+path = root / "drivers/media/i2c/s5kjn1.c"
+text = path.read_text()
+if "dagu: s5kjn1 native crop is mode WxH" not in text:
+    old = """	if (sel->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
+
+	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+		sel->r.left = 0;
+		sel->r.top = 0;
+		sel->r.width = s5kjn1->mode->width;
+		sel->r.height = s5kjn1->mode->width;
+		return 0;
+"""
+    old_height = """	if (sel->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
+
+	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+		sel->r.left = 0;
+		sel->r.top = 0;
+		sel->r.width = s5kjn1->mode->width;
+		sel->r.height = s5kjn1->mode->height;
+		return 0;
+"""
+    new = """	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+	case V4L2_SEL_TGT_NATIVE_SIZE:
+	case V4L2_SEL_TGT_CROP_DEFAULT:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+		/* dagu: s5kjn1 native crop is mode WxH */
+		sel->r.left = 0;
+		sel->r.top = 0;
+		sel->r.width = s5kjn1->mode->width;
+		sel->r.height = s5kjn1->mode->height;
+		return 0;
+"""
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif old_height in text:
+        text = text.replace(old_height, new, 1)
+    else:
+        raise SystemExit(f"{path}: s5kjn1 get_selection needle missing")
+    path.write_text(text)
+    print(f"patched {path}: native crop WxH")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
+text = path.read_text()
+marker = "csiphy4 imx596: keep T_hs"
+if marker not in text:
+    old = """	else if (csiphy->id == 1)
+		settle_cnt = 0x13; /* dagu: Android s5kjn1 D-PHY settle 0x13 */
+	/* dagu: log csiphy settle */
+"""
+    new = """	else if (csiphy->id == 1)
+		settle_cnt = 0x13; /* dagu: Android s5kjn1 D-PHY settle 0x13 */
+	/* csiphy4 imx596: keep T_hs from 678.4 MHz; do not copy rear 0x13. */
+	/* dagu: log csiphy settle */
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: csiphy4 settle comment needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
 PY

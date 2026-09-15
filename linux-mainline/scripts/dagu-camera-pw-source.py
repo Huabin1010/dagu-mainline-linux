@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """PipeWire Video/Source for GNOME Snapshot on dagu.
 
-Snapshot 50 only lists PipeWire nodes with a non-empty EnumFormat.
-libcamera sees s5kjn1 but has no UDMABUF, so it publishes zero formats.
-spa-v4l2 cannot open CAMSS (VIDEO_CAPTURE_MPLANE). This process advertises
-NV12 and only STREAMONs the 12MP RDI when Snapshot actually links.
+Lab-only. Default desktop path is libcamera Software ISP + UDMABUF.
+This process stays for RAW10 bring-up when libcamera is off.
 """
 from __future__ import annotations
 

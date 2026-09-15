@@ -16,4 +16,4 @@
 
 CAF 参考：`vendor/android-dagu/src/HuaJI66_kernel/`
 
-相机：后摄 `s5kjn1` 用主线 `drivers/media/i2c/s5kjn1.c` + overlay `linux-mainline/overlays/linux/drivers/media/i2c/s5kjn1-dagu-regs.h`（CamX 4080×3060 作物 + Android 预览 4-lane D-PHY `0x0114=0x0300`，`0x6010`/`0x6226` SW reset）。前摄 `imx596` 用 overlay `linux-mainline/overlays/linux/drivers/media/i2c/imx596-dagu.c`（CamX init + 2592×1952 4-lane D-PHY）。CAMSS CSIPHY 接 `vreg_l5a_0p88` / `vreg_l9a_1p2`。后摄抓帧走 `/dev/video0` fourcc `pGAA`，前摄 `/dev/video3` `pBAA`。传感器走 SLPI：`stage-firmware.sh` 找到 `slpi.mbn` 后再把 `&slpi` 设为 okay。不要在 AP I2C 上猜总线。
+相机：后摄 `s5kjn1` 用主线 `drivers/media/i2c/s5kjn1.c` + overlay `s5kjn1-dagu-regs.h`（CamX 4080×3060 作物 + Android 预览 4-lane D-PHY `0x0114=0x0300`）。STREAMON 先写 0x4000 传感器/PLL，MCU page `0x2400` 按 10/20/50/100 ms 扫描，NACK 不判失败。前摄 `imx596` 用 overlay `imx596-dagu.c`（CamX init + 2592×1952 4-lane D-PHY，group hold 后再写 `0x0114=3`）。CAMSS CSIPHY 接 `vreg_l5a_0p88` / `vreg_l9a_1p2`。后摄 `/dev/video0` `pGAA`，前摄 `/dev/video3` `pBAA`。App 层：`CONFIG_UDMABUF` + libcamera SoftISP NV12；`v4l2loopback` `/dev/video20/21` 给只认 V4L2 的客户端。传感器走 SLPI：`stage-firmware.sh` 找到 `slpi.mbn` 后再把 `&slpi` 设为 okay。

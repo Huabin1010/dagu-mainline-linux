@@ -57,8 +57,8 @@
 | Wi‑Fi QCA6390 | **已通** | ath11k，iperf 约 600–665 Mbps |
 | 扬声器 CS35L41 | **软件已通** | ADSP `running`（`adsp.mbn`）。SoundWire 扫到 WCD9385 RX/TX，**没有** WSA88xx（外放是 CS35L41×4）。`aplay -l` card 0 `Xiaomi-dagu-CS35L41-WCD9385`。PW 默认 Speakers。见 `linux-mainline/docs/dagu-audio-s2idle.md` |
 | 麦克风 | **已通** | `/tmp/mic.wav` 非空（约 192 KB / 2s） |
-| 后摄 s5kjn1 | **部分** | probe + C-PHY 寄存器对，STREAMON CCI NACK，0 帧 |
-| 前摄 imx596 | **部分** | chip id 读到，开流，0 帧 |
+| 后摄 s5kjn1 | **部分** | D-PHY 4-lane，STREAMON 先写 0x4000；MCU 0x2400 扫描，目标 ≥1 帧 RAW10 |
+| 前摄 imx596 | **部分** | chip id 读到，0x0114 在 group hold 后重写为 4-lane，目标 ≥1 帧 RAW10 |
 | CAMSS VFE/SMMU | **已通** | CSID TPG 出过完整 1 帧（约 15.6 MB） |
 | 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6；`hci0` `F0:6C:5D:71:3A:2A` Powered: yes。DT 对照 elish/`qcom,qca6390-bt`：`max-speed` 3 Mbps + PMU LDO，BT_EN 走 pmu pwrseq。BLE 鼠标走 HOG（`CONFIG_UHID` + `CONFIG_BT_LE`）。经典 HID：`ClassicBondedOnly=false` + `UserspaceHID=persist`。寻呼带 clock offset，HID 主机 Central + FastConnectable，sniff 6–18。Page Timeout 拆 unset-handle ACL。GNOME Settings 是配对 UI：6390 去掉 `HCI_QUIRK_SIMULTANEOUS_DISCOVERY`，type 7 由内核分时 LE/Inquiry；`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。`TemporaryTimeout=180`。保留 sniff / UART RPM / IBS / WakeAllowed |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
@@ -199,13 +199,12 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 
 | 项 | 现状 |
 |----|------|
-| 电源 / MCLK / 复位 / CCI | probe 成功，进 media 图 |
+| 电源 / MCLK / 复位 / CCI | probe 成功，进 media 图。上电顺序 VIO → VDIG → VANA → MCLK → XSHUTDOWN |
 | 预览尺寸 | 4080×3060 GBRG 10-bit，fourcc `pGAA`，`/dev/video0` |
-| PHY | CamX 4080 预览是 **C-PHY 3-trio**（`0x0114=0x0301`）；8160 抓拍才是 D-PHY |
-| DT | `bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>`（值为 **1**），`data-lanes = <1 2 3>` |
-| CSIPHY | `cphy=1`，`c7=0x52`，`c5=0x2a` |
-| CSID | `cfg0` bit24 `PHY_TYPE_SEL` 已置 |
-| STREAMON | **失败**：CCI 写 `0x6028` 切 page `0x2400` NACK（`-ENXIO`），`/tmp/rear.raw` 0 字节 |
+| PHY | 安卓预览 **D-PHY 4-lane**（`0x0114=0x0300`）；不要退回 CamX C-PHY 3-trio |
+| DT | `bus-type = <4>`，`data-lanes = <1 2 3 4>` |
+| CSIPHY | csiphy1 settle `0x13`（安卓 dump） |
+| STREAMON | 先写 page `0x4000` 传感器/PLL；MCU `0x2400` 按 10/20/50/100 ms 扫描，NACK 不判失败。验收：`/tmp/rear.raw` 约 15.6 MB |
 
 已踩过、不要退回去的坑：
 
@@ -214,6 +213,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 主线 init 里 `0x0bcc` 16/8-bit 都 NACK，已从 init_array 拿掉
 - 先 `s_power` 再开 CSIPHY 会在 CAM_CC GDSC 起来前使 `cam_cc_mclk0_clk` stuck off
 - 把 `vreg_l3a_0p9` 改成 1.104V **禁止**
+- STREAMON 不要因 `0x0005` 帧计数为 0 直接 `-ENXIO`（可能只是第一帧还没到）
 
 对照：`dumps/dagu-android-live/camera/com.qti.sensormodule.dagu_qtech_s5kjn1_wide.bin`
 
@@ -224,11 +224,17 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 | 地址 | CAF dtsi 写 `@0x1a`；这颗硅在 **0x10** 读到 chip id `0x0596` |
 | 驱动 | `linux-mainline/overlays/linux/drivers/media/i2c/imx596-dagu.c` |
 | 尺寸 | 2592×1952 BGGR 10-bit，fourcc `pBAA`，`/dev/video3` |
-| PHY | 仍 **D-PHY**（`bus-type = <4>`，4 lane） |
-| 开流 | 驱动报 streaming；`phy=0x1 lanes=0x1` 像 2-lane 读回 |
-| 抓帧 | `/tmp/front.raw` **0 字节**；CSIPHY4 有 IRQ，HS 仍未进 CSID |
+| PHY | **D-PHY** 4-lane（`bus-type = <4>`）。`0x0114=3` 在 group hold 释放后再写一次 |
+| CSIPHY | csiphy4 用 T_hs 公式（678.4 MHz），**不要**抄后摄 settle `0x13` |
+| 抓帧 | 验收 `/tmp/front.raw` 约 6.3 MB |
 
-PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对齐。
+PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 678400000`。
+
+### App 层（SoftISP / Snapshot / loopback）
+
+- `CONFIG_UDMABUF=y`，`/dev/udmabuf`，udev `90-dagu-udmabuf.rules`
+- libcamera simple + Software ISP 出 NV12；WirePlumber **打开** `monitor.libcamera`。Python `dagu-camera-pw-source.py` 不再作为默认源
+- `v4l2loopback` `/dev/video20` 前、`/dev/video21` 后，`exclusive_caps=1`。`dagu-camera-loopback.service` 用 `libcamerasrc` 推 NV12。不是 Spectra ISP
 
 ### SLPI
 
@@ -276,10 +282,12 @@ PLL / lane 尚未按 CamX `com.qti.sensormodule.dagu_aac_imx596_front.bin` 对�
 
 优先级按用户目标（相机出帧）和「听得到喇叭」：
 
-1. **后摄出 ≥1 帧**：对齐 CamX 的 `0x6028` page `0x2400` 写入时机（或先在 `0x4000` 写完再切页）；不要退回瞎猜的 D-PHY PLL
-2. **前摄出 ≥1 帧**：按 CamX imx596 bin 对齐 PLL / lane（读回像 2-lane）
-3. **扬声器听感**：功放已醒，缺 Halo `CAL_SET_STATUS=2`（下次编核）和 Fast Use Case。见 `linux-mainline/docs/dagu-deep-hardware-reclamation.md`。禁止 softvol。`linux-mainline/scripts/dagu-av-test.sh`
-4. **充电验收**：插 5 V 砖后 `pm8150b-charger` `status=Charging`，`bms` `current_now` 为负（充电）；PD 砖看 TCPM log。67W 泵以后再接
+1. **后摄出 ≥1 帧**：`v4l2-ctl` `/tmp/rear.raw` 约 15.6 MB。MCU `0x2400` 扫描已在驱动里；不要退回瞎猜的 C-PHY PLL
+2. **前摄出 ≥1 帧**：`0x0114` 在 group hold 后再写；csiphy4 不抄后摄 settle；`/tmp/front.raw` 约 6.3 MB
+3. **SoftISP / Snapshot**：`/dev/udmabuf` + libcamera NV12。`dagu-libcamera-softisp.sh`。禁止 meson `-Dipmbs`
+4. **v4l2loopback**：`/dev/video20/21`，`dagu-camera-loopback.service`。不是 ISP
+5. **扬声器听感**：功放已醒，缺 Halo `CAL_SET_STATUS=2`（下次编核）和 Fast Use Case。见 `linux-mainline/docs/dagu-deep-hardware-reclamation.md`。禁止 softvol。`linux-mainline/scripts/dagu-av-test.sh`
+6. **充电验收**：插 5 V 砖后 `pm8150b-charger` `status=Charging`，`bms` `current_now` 为负（充电）；PD 砖看 TCPM log。67W 泵以后再接
 5. OTG host：Wi‑Fi SSH 下切 role，插 U 盘 / HID
 6. 霍尔、马达、torch 用 `dagu-periph-test.sh` 点一次
 7. 蓝牙音频（A2DP / 耳机）专项听感；控制器本身已通

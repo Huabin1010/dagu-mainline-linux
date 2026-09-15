@@ -1,0 +1,13 @@
+[Unit]
+Description=dagu v4l2loopback NV12 bridge (not Spectra ISP)
+After=systemd-modules-load.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-camera-loopback.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

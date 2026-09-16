@@ -257,6 +257,8 @@
 			compatible = "ti,bq27z561";
 			reg = <0x55>;
 			monitored-battery = <&battery_r>;
+			/* Not the pack; dual-fg exports bms as TYPE_BATTERY. */
+			xiaomi,pack-cell;
 		};
 	};
 
@@ -275,6 +277,7 @@
 			compatible = "ti,bq27z561";
 			reg = <0x55>;
 			monitored-battery = <&battery_l>;
+			xiaomi,pack-cell;
 		};
 	};
 
@@ -424,14 +427,18 @@
 	};
 
 	/*
-	 * CAF dual-FuelGauge: weighted SoC, max(V), sum(I/charge).
-	 * Do not request fg-master-disable-gpio (117) / fg-slave-disable-gpio
-	 * (91) — CAF uses them to isolate a cell; hogging would drop a pack.
+	 * CAF dual-FuelGauge: RM/FCC SoC, max(V), sum(I/charge).
+	 * fg-*-disable is ACTIVE_HIGH isolate. Default both inactive so both
+	 * packs stay on the charge path (do not hog high — that drops a cell).
 	 */
 	dual-fuel-gauge {
 		compatible = "xiaomi,dual-fuel-gauge";
+		pinctrl-names = "default";
+		pinctrl-0 = <&fg_disable_default>;
 		master-fg = <&fg_master>;
 		slave-fg = <&fg_slave>;
+		fg-master-disable-gpios = <&tlmm 117 GPIO_ACTIVE_HIGH>;
+		fg-slave-disable-gpios = <&tlmm 91 GPIO_ACTIVE_HIGH>;
 	};
 
 	/* Dump ncp3902 GPIO152: wired OTG / reverse-wireless VBUS path. */
@@ -704,6 +711,18 @@
 		pins = "gpio152";
 		function = "gpio";
 		drive-strength = <8>;
+		bias-disable;
+		output-low;
+	};
+
+	/*
+	 * CAF fg-master-disable GPIO117 / fg-slave-disable GPIO91:
+	 * high isolates that cell from the SMB5 path. Hold low.
+	 */
+	fg_disable_default: fg-disable-default-state {
+		pins = "gpio91", "gpio117";
+		function = "gpio";
+		drive-strength = <2>;
 		bias-disable;
 		output-low;
 	};

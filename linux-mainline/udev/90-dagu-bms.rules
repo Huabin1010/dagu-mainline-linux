@@ -1,0 +1,4 @@
+# Desktop sees one pack: dual BQ27Z561 cells stay under bms.
+# UPower 1.91 does not honor UPOWER_IGNORE; TYPE_UNKNOWN on pack-cell
+# is the kernel path. Keep both udev keys for older daemons.
+SUBSYSTEM=="power_supply", KERNEL=="bq27z561-*", ENV{UPOWER_IGNORE}="1", ENV{UPOWER_BATTERY_TYPE}=""

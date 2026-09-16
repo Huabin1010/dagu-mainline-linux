@@ -87,6 +87,13 @@ for p in /sys/class/power_supply/bq27z561-0 /sys/class/power_supply/bq27z561-1; 
 	t=$(readlink -f "$p" 2>/dev/null || true)
 	[ -n "$t" ] && [ -d "$t" ] && chmod 700 "$t" || true
 done
+# UPower runs as root; chmod does not hide the cells. Ignore them in udev.
+# UPower 1.91 still lists TYPE_BATTERY cells; kernel pack-cell → TYPE_UNKNOWN.
+cat >/etc/udev/rules.d/90-dagu-bms.rules <<'EOF'
+SUBSYSTEM=="power_supply", KERNEL=="bq27z561-*", ENV{UPOWER_IGNORE}="1", ENV{UPOWER_BATTERY_TYPE}=""
+EOF
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger --subsystem-match=power_supply 2>/dev/null || true
 
 # Resources lists every /sys/block disk. UFS LUNs sdb–sdf are Android
 # boot/modem slices, not user storage. size=0 makes them "virtual" and the

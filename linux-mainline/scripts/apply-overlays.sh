@@ -2567,6 +2567,27 @@ if marker not in text:
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: {marker}")
 
+path = root / "drivers/power/supply/bq27xxx_battery.c"
+text = path.read_text()
+marker = "dagu: pack-cell is not TYPE_BATTERY"
+if marker not in text:
+    old = """	psy_desc->name = di->name;
+	psy_desc->type = POWER_SUPPLY_TYPE_BATTERY;
+	psy_desc->properties = bq27xxx_chip_data[di->chip].props;
+"""
+    new = """	psy_desc->name = di->name;
+	/* dagu: pack-cell is not TYPE_BATTERY */
+	if (device_property_read_bool(di->dev, "xiaomi,pack-cell"))
+		psy_desc->type = POWER_SUPPLY_TYPE_UNKNOWN;
+	else
+		psy_desc->type = POWER_SUPPLY_TYPE_BATTERY;
+	psy_desc->properties = bq27xxx_chip_data[di->chip].props;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: bq27xxx pack-cell needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
 path = root / "sound/soc/qcom/sm8250.c"
 text = path.read_text()
 marker = "dagu: set I2S fmt on every CS35L41"

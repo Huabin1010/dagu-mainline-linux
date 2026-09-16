@@ -1736,6 +1736,9 @@ mkdir -p /etc/udev/rules.d /etc/modprobe.d /etc/modules-load.d
 cat >/etc/udev/rules.d/90-dagu-udmabuf.rules <<'EOF'
 KERNEL=="udmabuf", GROUP="video", MODE="0660"
 EOF
+cat >/etc/udev/rules.d/90-dagu-bms.rules <<'EOF'
+SUBSYSTEM=="power_supply", KERNEL=="bq27z561-*", ENV{UPOWER_IGNORE}="1", ENV{UPOWER_BATTERY_TYPE}=""
+EOF
 cat >/etc/udev/rules.d/90-dagu-v4l2loopback.rules <<'EOF'
 SUBSYSTEM=="video4linux", ATTR{name}=="dagu-front", GROUP="video", MODE="0660"
 SUBSYSTEM=="video4linux", ATTR{name}=="dagu-rear", GROUP="video", MODE="0660"

@@ -24,15 +24,19 @@ ls /sys/class/udc 2>/dev/null || true
 ls /sys/devices/platform/otg-vbus-export/state 2>/dev/null || echo "no otg-vbus-export"
 echo ===psy===
 for p in /sys/class/power_supply/*; do
-  printf "%s type=%s cap=%s volt=%s curr=%s full=%s design=%s\n" \
+  printf "%s type=%s status=%s cap=%s volt=%s curr=%s now=%s full=%s design=%s\n" \
     "$(basename "$p")" \
     "$(cat "$p/type" 2>/dev/null || echo -)" \
+    "$(cat "$p/status" 2>/dev/null || echo -)" \
     "$(cat "$p/capacity" 2>/dev/null || echo -)" \
     "$(cat "$p/voltage_now" 2>/dev/null || echo -)" \
     "$(cat "$p/current_now" 2>/dev/null || echo -)" \
+    "$(cat "$p/charge_now" 2>/dev/null || echo -)" \
     "$(cat "$p/charge_full" 2>/dev/null || echo -)" \
     "$(cat "$p/charge_full_design" 2>/dev/null || echo -)"
 done
+echo ===upower===
+upower -e 2>/dev/null || true
 echo ===flash===
 ls /sys/class/leds 2>/dev/null || true
 echo ===hall===

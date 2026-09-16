@@ -1347,10 +1347,11 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
-marker = "dagu: I2C proto invalid, not loading QUPFW"
+marker = "dagu: load I2C QUPFW from this SE"
 if marker in text:
     raise SystemExit(0)
-old = """\tif (proto == GENI_SE_INVALID_PROTO) {
+load = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\t/* dagu: load I2C QUPFW from this SE firmware-name, never the wrapper */
 \t\tret = geni_load_se_firmware(&gi2c->se, GENI_SE_I2C);
 \t\tif (ret) {
 \t\t\tdev_err_probe(dev, ret, "i2c firmware load failed ret: %d\\n", ret);
@@ -1358,7 +1359,7 @@ old = """\tif (proto == GENI_SE_INVALID_PROTO) {
 \t\t}
 \t} else if (proto != GENI_SE_I2C) {
 """
-new = """\tif (proto == GENI_SE_INVALID_PROTO) {
+eop = """\tif (proto == GENI_SE_INVALID_PROTO) {
 \t\t/* dagu: I2C proto invalid, not loading QUPFW on this QHEE */
 \t\tdev_err_probe(dev, -EOPNOTSUPP,
 \t\t\t      "I2C proto invalid, not loading QUPFW on this QHEE\\n");
@@ -1366,8 +1367,50 @@ new = """\tif (proto == GENI_SE_INVALID_PROTO) {
 \t\tgoto err_resources;
 \t} else if (proto != GENI_SE_I2C) {
 """
-if old not in text:
+upstream = """\tif (proto == GENI_SE_INVALID_PROTO) {
+\t\tret = geni_load_se_firmware(&gi2c->se, GENI_SE_I2C);
+\t\tif (ret) {
+\t\t\tdev_err_probe(dev, ret, "i2c firmware load failed ret: %d\\n", ret);
+\t\t\tgoto err_resources;
+\t\t}
+\t} else if (proto != GENI_SE_I2C) {
+"""
+if eop in text:
+    text = text.replace(eop, load, 1)
+elif upstream in text:
+    text = text.replace(upstream, load, 1)
+else:
     raise SystemExit(f"{path}: I2C firmware-load block not found")
+path.write_text(text)
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/drivers/spi/spi-geni-qcom.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: load SPI QUPFW from this SE"
+if marker in text:
+    raise SystemExit(0)
+old = """\t} else if (proto == GENI_SE_INVALID_PROTO) {
+\t\tret = geni_load_se_firmware(se, GENI_SE_SPI);
+\t\tif (ret) {
+\t\t\tdev_err(mas->dev, "spi master firmware load failed ret: %d\\n", ret);
+\t\t\tgoto out_pm;
+\t\t}
+"""
+new = """\t} else if (proto == GENI_SE_INVALID_PROTO) {
+\t\t/* dagu: load SPI QUPFW from this SE firmware-name, never the wrapper */
+\t\tret = geni_load_se_firmware(se, GENI_SE_SPI);
+\t\tif (ret) {
+\t\t\tdev_err(mas->dev, "spi master firmware load failed ret: %d\\n", ret);
+\t\t\tgoto out_pm;
+\t\t}
+"""
+if old not in text:
+    raise SystemExit(f"{path}: SPI firmware-load block not found")
 path.write_text(text.replace(old, new, 1))
 print(f"patched {path}: {marker}")
 PY

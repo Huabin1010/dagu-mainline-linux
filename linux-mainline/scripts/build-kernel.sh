@@ -50,6 +50,21 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	"$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m -O "$KBUILD_OUTPUT" \
 		"$KBUILD_OUTPUT/.config" "$ROOT/config/dagu-display.fragment"
 fi
+# Per-SE GENI IRAM (uart6 pattern). Never wrapper firmware-name / ICC.
+# Default stays die; only an explicit experiment fragment may turn GENI on.
+if [[ "${DAGU_GENI_SE_EXPERIMENT:-0}" == 1 && "${DAGU_GENI_SPI_EXPERIMENT:-0}" == 1 ]]; then
+	die "I2C and SPI GENI experiments together — one bus family per B-slot image"
+fi
+if [[ "${DAGU_GENI_SE_EXPERIMENT:-0}" == 1 ]]; then
+	echo "==> merge dagu-geni-i2c-experiment.fragment (CS35L41 per-SE IRAM)"
+	"$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m -O "$KBUILD_OUTPUT" \
+		"$KBUILD_OUTPUT/.config" "$ROOT/config/dagu-geni-i2c-experiment.fragment"
+fi
+if [[ "${DAGU_GENI_SPI_EXPERIMENT:-0}" == 1 ]]; then
+	echo "==> merge dagu-geni-spi-experiment.fragment (Himax spi4 FIFO, no GPI DMA)"
+	"$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m -O "$KBUILD_OUTPUT" \
+		"$KBUILD_OUTPUT/.config" "$ROOT/config/dagu-geni-spi-experiment.fragment"
+fi
 # After display: Kprobes + BTF for BCC/bpftrace. Needs pahole >= 1.22.
 # Keep FUNCTION_TRACER off — a nop at every function perturbs 120 Hz DSC.
 command -v pahole >/dev/null || die "pahole missing — apt install pahole (v1.22+ for CONFIG_DEBUG_INFO_BTF)"
@@ -87,11 +102,22 @@ need_y CONFIG_KPROBE_EVENTS
 need_y CONFIG_BPF_SYSCALL
 need_y CONFIG_BPF_EVENTS
 need_y CONFIG_DEBUG_INFO_BTF
-need_y CONFIG_IKHEADERS
+	need_y CONFIG_IKHEADERS
 grep -q '^CONFIG_DEBUG_INFO_REDUCED=y' "$cfg" && \
 	die "DEBUG_INFO_REDUCED still on — CONFIG_DEBUG_INFO_BTF depends on it being off"
 grep -q '^CONFIG_FUNCTION_TRACER=y' "$cfg" && \
 	die "FUNCTION_TRACER still on — would perturb 120 Hz DSC capture"
+python3 - "$KERNEL_SRC/arch/arm64/boot/dts/qcom/sm8250-xiaomi-dagu.dts" <<'PY' || die "firmware-name on &qupv3_id_0 is forbidden — SE nodes only"
+from pathlib import Path
+import re
+import sys
+text = Path(sys.argv[1]).read_text()
+m = re.search(r"&qupv3_id_0\s*\{[^}]*\}", text)
+if m and re.search(r"^\s*firmware-name\s*=", m.group(0), re.M):
+    raise SystemExit(1)
+PY
+grep -q '^CONFIG_INTERCONNECT_QCOM_SM8250=y' "$cfg" && \
+	die "INTERCONNECT_QCOM_SM8250 still on — BCM vote hangs this QHEE"
 if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	need_y CONFIG_DRM_MSM
 	need_y CONFIG_DRM_PANEL_XIAOMI_DAGU_L81A
@@ -101,8 +127,18 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	need_y CONFIG_REGULATOR_QCOM_REFGEN
 	need_y CONFIG_SCSI_UFS_QCOM
 	need_y CONFIG_PHY_QCOM_QMP_UFS
-	grep -q '^CONFIG_SPI_QCOM_GENI=y' "$cfg" && \
-		die "SPI_QCOM_GENI still on — GENI SPI hangs this QHEE"
+	if grep -q '^CONFIG_SPI_QCOM_GENI=y' "$cfg"; then
+		[[ "${DAGU_GENI_SPI_EXPERIMENT:-0}" == 1 ]] || \
+			die "SPI_QCOM_GENI still on — set DAGU_GENI_SPI_EXPERIMENT=1 for per-SE IRAM only"
+		grep -q 'qcom,skip-wrapper-fw-init' \
+			"$KERNEL_SRC/arch/arm64/boot/dts/qcom/dagu-geni-spi-experiment.dtsi" || \
+			die "SPI GENI experiment DT missing skip-wrapper-fw-init"
+		grep -q 'firmware-name' \
+			"$KERNEL_SRC/arch/arm64/boot/dts/qcom/dagu-geni-spi-experiment.dtsi" || \
+			die "SPI GENI experiment DT missing SE firmware-name"
+		grep -q '^CONFIG_QCOM_GPI_DMA=y' "$cfg" && \
+			die "QCOM_GPI_DMA still on — SPI experiment is FIFO only"
+	fi
 	need_y CONFIG_SPI_GPIO
 	need_y CONFIG_TOUCHSCREEN_HIMAX_DAGU
 	need_y CONFIG_SM_GPUCC_8250
@@ -163,8 +199,16 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	need_y CONFIG_USB_STORAGE
 	need_y CONFIG_USB_HID
 	need_y CONFIG_REGULATOR_QCOM_USB_VBUS
-	grep -q '^CONFIG_I2C_QCOM_GENI=y' "$cfg" && \
-		die "I2C_QCOM_GENI still on — GENI I2C hangs this QHEE like SPI"
+	if grep -q '^CONFIG_I2C_QCOM_GENI=y' "$cfg"; then
+		[[ "${DAGU_GENI_SE_EXPERIMENT:-0}" == 1 ]] || \
+			die "I2C_QCOM_GENI still on — set DAGU_GENI_SE_EXPERIMENT=1 for per-SE IRAM only"
+		grep -q 'qcom,skip-wrapper-fw-init' \
+			"$KERNEL_SRC/arch/arm64/boot/dts/qcom/dagu-geni-i2c-experiment.dtsi" || \
+			die "I2C GENI experiment DT missing skip-wrapper-fw-init"
+		grep -q 'firmware-name' \
+			"$KERNEL_SRC/arch/arm64/boot/dts/qcom/dagu-geni-i2c-experiment.dtsi" || \
+			die "I2C GENI experiment DT missing SE firmware-name"
+	fi
 	grep -q '^CONFIG_FB_SIMPLE=y' "$cfg" && \
 		die "FB_SIMPLE still on — it would fight DRM fbdev over fbcon"
 fi

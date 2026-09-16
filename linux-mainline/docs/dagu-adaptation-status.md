@@ -17,6 +17,8 @@
 - Overlay 驱动清单：`linux-mainline/overlays/README.md`
 - 板级 DT：`linux-mainline/dts/sm8250-xiaomi-dagu.dts`
 - 安卓 dump 硬件清单（未随主线更新）：`docs/hardware-inventory.md`
+- ARM Linux 七维评估（含 Python / CPU 软路径）：`linux-mainline/docs/dagu-arm-linux-eval.md`
+- CAMSS VFE PIX 审计（IFE no-go）：`linux-mainline/docs/dagu-camss-pix-audit.md`
 
 ## 怎么读状态
 
@@ -153,7 +155,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 5GHz 80MHz 2SS PHY 约 866.7 Mbps；iperf3 反向 4 流约 **600–665 Mbps**
 - SSH 示例：`ssh -i linux-mainline/out/id_dagu root@192.168.7.2`（地址随局域网变）
 - SSID/密码只放本机 `tmp/wifi-info.md`，不入库
-- 无可用 RTC 时时钟停在 rootfs 构建日（曾为 2026-07-27）。Chrome 能开 `www.bilibili.com` HTML，但 `static.hdslb.com` CSS 证书 **not yet valid**，页面无样式。开机/连上 Wi-Fi 跑 `linux-mainline/scripts/dagu-time-sync.py`（实机 `/usr/local/sbin/dagu-time-sync.py`、`dagu-time-sync.service`）
+- 无可用 RTC 时时钟停在 rootfs 构建日。产品路径用 `systemd-timesyncd`，不再装 `dagu-time-sync.py`。
 
 ### 麦克风
 
@@ -259,7 +261,7 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 | 充电（SMB5） | PM8150B `@1000` | overlay `linux-mainline/overlays/linux/drivers/power/supply/pm8150b-charger-dagu.c`；关 charger wdog、清 USBIN suspend。5 V 路径 ICL **2 A**（墙充常被 APSD 成 SDP，不要 USB51 500 mA）。AICL 仍可折叠。GPIO74 低电平放行 VBUS |
 | 充电泵 | BQ25970 ×2 | `bq2597x-dagu.c`，i2c-gpio；67W PPS，不是 5 V 主路径 |
 | 无线充探测 | P9418 | `p9418-dagu.c` |
-| 霍尔 | GPIO110 lid、GPIO121 tablet | `SW_LID` / `SW_TABLET_MODE`；folio 磁铁拉低 121，空闲应为平板。活 DT 用 `GPIO_ACTIVE_HIGH`。未刷新核前由 `linux-mainline/scripts/dagu-tablet-mode.py` 注入 |
+| 霍尔 | GPIO110 lid、GPIO121 tablet | `SW_LID` / `SW_TABLET_MODE`；folio 磁铁拉低 121，空闲应为平板。活 DT 用 `GPIO_ACTIVE_HIGH`。不再注入 `dagu-tablet-mode.py` |
 | 音量上 | pm8150 gpio6（elish-common） | |
 | 马达 | PM8150B `@c000` LRA | 主线 `qcom,pmi632-vib` |
 | 闪光灯 | pm8150l `@d300` | `echo 64 > /sys/class/leds/white:flash/brightness` |

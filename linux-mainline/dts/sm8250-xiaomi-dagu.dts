@@ -577,10 +577,31 @@
 		bias-disable;
 	};
 
+	cs35l41_i2c_se1_qup: cs35l41-i2c-se1-qup-state {
+		pins = "gpio4", "gpio5";
+		function = "qup1";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
 	cs35l41_i2c_se3_default: cs35l41-i2c-se3-default-state {
 		pins = "gpio119", "gpio120";
 		function = "gpio";
 		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cs35l41_i2c_se3_qup: cs35l41-i2c-se3-qup-state {
+		pins = "gpio119", "gpio120";
+		function = "qup3";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	himax_spi_qup_default: himax-spi-qup-default-state {
+		pins = "gpio8", "gpio9", "gpio10", "gpio11";
+		function = "qup4";
+		drive-strength = <6>;
 		bias-disable;
 	};
 
@@ -1140,10 +1161,16 @@
 	};
 };
 
-&cdsp { status = "disabled"; };
+&cdsp {
+	/* No product workload. PAS + a real client required before okay. */
+	status = "disabled";
+};
 
 &slpi {
 	firmware-name = "qcom/sm8250/xiaomi/dagu/slpi.mbn";
+	/* Stay disabled until qcom_scm_pas_auth_and_reset succeeds and a
+	 * mainline SSC/QMI sensor client exists. Do not guess LSM6DSO on AP I2C.
+	 */
 	status = "disabled";
 };
 
@@ -1396,11 +1423,10 @@
 		"AMIC3", "MIC BIAS4",
 		"AMIC4", "MIC BIAS4",
 		"AMIC5", "MIC BIAS3",
-		"MIC BIAS1", "Analog Mic1",
-		"MIC BIAS2", "Analog Mic2",
-		"MIC BIAS4", "Analog Mic3",
-		"MIC BIAS4", "Analog Mic4",
-		"MIC BIAS3", "Analog Mic5",
+		/* Do not route Analog MicN into MIC BIASn — ASoC rejects
+		 * non-supply → supply and snd-sm8250 probe returns -EINVAL
+		 * once WCD widgets exist (GENI CS35L41 makes that the
+		 * steady order). AMIC1–5 above already take the bias. */
 		"TX SWR_ADC0", "ADC1_OUTPUT",
 		"TX SWR_ADC1", "ADC2_OUTPUT",
 		"TX SWR_ADC2", "ADC3_OUTPUT",
@@ -1439,7 +1465,7 @@
 		cpu {
 			sound-dai = <&q6afedai TERTIARY_TDM_RX_0>;
 		};
-		codec {
+		tert_tdm_codec: codec {
 			sound-dai = <&cs35l41_tl 0>, <&cs35l41_tr 0>,
 				    <&cs35l41_bl 0>, <&cs35l41_br 0>;
 		};
@@ -1620,4 +1646,6 @@
 	/delete-property/ remote-endpoint;
 };
 
+#include "dagu-geni-i2c-experiment.dtsi"
+#include "dagu-geni-spi-experiment.dtsi"
 #include "local-addresses.dtsi"

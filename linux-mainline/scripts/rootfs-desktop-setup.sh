@@ -40,10 +40,43 @@ apt-get install -y --no-install-recommends \
 	fonts-noto-core fonts-noto-cjk \
 	network-manager onboard keyd \
 	ibus ibus-gtk3 ibus-gtk4 ibus-libpinyin \
-	bluez systemd-timesyncd pci.ids
+	bluez systemd-timesyncd pci.ids \
+	g++ make pkg-config rustc libcamera-dev
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
+
+is_elf() { [ "$(head -c 4 "$1" 2>/dev/null)" = $'\x7fELF' ]; }
+
+install_product_bins() {
+	mkdir -p /usr/local/sbin
+	if [ -d /tmp/dagu-userspace ]; then
+		make -C /tmp/dagu-userspace clean
+		make -C /tmp/dagu-userspace PREFIX=/usr/local
+		make -C /tmp/dagu-userspace PREFIX=/usr/local install
+	fi
+	if [ -d /tmp/dagu-camera-loopback ]; then
+		make -C /tmp/dagu-camera-loopback clean
+		make -C /tmp/dagu-camera-loopback PREFIX=/usr/local
+		make -C /tmp/dagu-camera-loopback PREFIX=/usr/local install
+	fi
+	for b in dagu-camera-loopback dagu-touch-boost dagu-power-button; do
+		is_elf /usr/local/sbin/$b || {
+			echo "rootfs-desktop-setup: $b is not an ELF product binary" >&2
+			exit 1
+		}
+	done
+	rm -f /usr/local/sbin/dagu-camera-loopback.sh \
+		/usr/local/sbin/dagu-touch-boost.py \
+		/usr/local/sbin/dagu-power-button.py \
+		/usr/local/sbin/dagu-tablet-mode.py \
+		/usr/local/sbin/dagu-time-sync.py \
+		/usr/local/bin/dagu-fcitx5-shift-tap.py \
+		/usr/local/sbin/dagu-camera-pw-source.py \
+		/usr/local/sbin/dagu-camera-preview.py
+}
+
+install_product_bins
 
 echo dagu >/etc/hostname
 printf '127.0.0.1\tlocalhost\n127.0.1.1\tdagu\n' >/etc/hosts
@@ -439,8 +472,8 @@ PY
 	fi
 fi
 
-# Folio keyboard: tap Shift → fcitx5 toggle. keyd needs /dev/uinput
-# (CONFIG_INPUT_UINPUT); this kernel ships without it, so use the evdev watcher.
+# Folio keyboard: tap Shift → fcitx5/ibus toggle via keyd + uinput.
+# Display fragment has CONFIG_INPUT_UINPUT=y. Do not install a Python watcher.
 mkdir -p /etc/keyd
 cat >/etc/keyd/dagu.conf <<'EOF'
 [ids]
@@ -451,66 +484,9 @@ leftshift = overloadt(shift, hangul, 400)
 rightshift = overloadt(shift, hangul, 400)
 EOF
 if [ -f /usr/lib/systemd/system/keyd.service ]; then
-	systemctl disable --now keyd.service >/dev/null 2>&1 || true
+	systemctl enable keyd.service >/dev/null 2>&1 || true
 fi
-install -m755 /dev/stdin /usr/local/bin/dagu-fcitx5-shift-tap.py <<'EOF'
-#!/usr/bin/env python3
-from __future__ import annotations
-import os, select, subprocess, time
-from evdev import InputDevice, ecodes, list_devices
-USER="dagu"; UID=1001; RUNTIME=f"/run/user/{UID}"
-DEVICE_NAME="Xiaomi Keyboard"; TAP_SEC=0.50
-SHIFTS={ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT}
-def toggle():
-    env=os.environ.copy()
-    env.update({"HOME":f"/home/{USER}","XDG_RUNTIME_DIR":RUNTIME,
-                "DBUS_SESSION_BUS_ADDRESS":f"unix:path={RUNTIME}/bus",
-                "DISPLAY":":0","WAYLAND_DISPLAY":"wayland-0"})
-    subprocess.run(["runuser","-u",USER,"--","fcitx5-remote","-t"], env=env,
-                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-def open_keyboard():
-    for path in list_devices():
-        try: dev=InputDevice(path)
-        except OSError: continue
-        if dev.name==DEVICE_NAME: return dev
-    return None
-def main():
-    while True:
-        dev=open_keyboard()
-        if dev is None:
-            time.sleep(1.0); continue
-        pending={}
-        try:
-            while True:
-                ready,_,_=select.select([dev.fd],[],[],2.0)
-                if not ready: continue
-                for ev in dev.read():
-                    if ev.type!=ecodes.EV_KEY or ev.value==2: continue
-                    if ev.code in SHIFTS:
-                        if ev.value==1: pending[ev.code]=(ev.timestamp(), False)
-                        elif ev.value==0 and ev.code in pending:
-                            t0,dirty=pending.pop(ev.code)
-                            if not dirty and (ev.timestamp()-t0)<=TAP_SEC: toggle()
-                    elif pending:
-                        pending={k:(t0,True) for k,(t0,_) in pending.items()}
-        except OSError:
-            time.sleep(0.3)
-if __name__=="__main__":
-    main()
-EOF
-cat >/etc/systemd/system/dagu-fcitx5-shift-tap.service <<'EOF'
-[Unit]
-Description=dagu folio Shift tap toggles fcitx5
-After=systemd-udevd.service
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/dagu-fcitx5-shift-tap.py
-Restart=always
-RestartSec=1
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl enable dagu-fcitx5-shift-tap.service >/dev/null 2>&1 || true
+rm -f /usr/local/bin/dagu-fcitx5-shift-tap.py 	/etc/systemd/system/dagu-fcitx5-shift-tap.service 	/etc/systemd/system/multi-user.target.wants/dagu-fcitx5-shift-tap.service
 
 # Mineradio is Electron + Three.js WebGL + CSS backdrop-filter. Same Ozone
 # / LINEAR / grayscale-DPR contract as Chrome. Never notile (WebGL hang).
@@ -1213,7 +1189,7 @@ cat >/etc/fonts/conf.d/99-dagu-gray-fonts.conf <<'EOF'
 EOF
 
 # Short power key: logind lock is a no-op when already locked, so the
-# tablet cannot unblank. Ignore the key here; dagu-power-button.py toggles.
+# tablet cannot unblank. Ignore the key here; dagu-power-button toggles.
 mkdir -p /etc/systemd/logind.conf.d /etc/xdg/autostart /usr/local/bin /usr/local/sbin
 cat >/etc/systemd/logind.conf.d/dagu-power.conf <<'EOF'
 [Login]
@@ -1225,168 +1201,12 @@ IdleAction=ignore
 EOF
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
 systemctl unmask systemd-backlight@backlight:l81a-wled.service >/dev/null 2>&1 || true
-# Keep in sync with linux-mainline/scripts/dagu-power-button.py
-cat >/usr/local/sbin/dagu-power-button.py <<'EOF'
-#!/usr/bin/env python3
-"""dagu: short power key toggles Mutter DPMS only.
-
-DCS 0x51 times out on this video-mode panel (~200 ms × 2 links) and
-does not restore. lock-sessions makes mutter set PowerSaveMode=3 AND
-the lock shield, then a second press races blank-on-lock. Just flip
-PowerSaveMode 0/3; kernel unprepare is a no-op so clocks can return.
-Long press stays logind HandlePowerKeyLongPress=poweroff.
-"""
-import glob
-import os
-import struct
-import subprocess
-import time
-
-KEY_POWER = 116
-EV_KEY = 1
-FMT = "llHHI"
-SIZE = struct.calcsize(FMT)
-LONG_PRESS = 1.2
-
-
-def find_pwrkey():
-    for name_path in glob.glob("/sys/class/input/event*/device/name"):
-        try:
-            with open(name_path, encoding="utf-8") as f:
-                name = f.read().strip()
-        except OSError:
-            continue
-        if name == "pm8941_pwrkey":
-            event = name_path.split("/")[4]
-            return f"/dev/input/{event}"
-    return "/dev/input/event1"
-
-
-def gnome_env():
-    env = os.environ.copy()
-    uid = "1001"
-    try:
-        out = subprocess.check_output(
-            ["loginctl", "list-sessions", "--no-legend"], text=True
-        )
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) >= 3 and parts[2] == "dagu" and "seat" in line:
-                uid = parts[1]
-                break
-    except (OSError, subprocess.SubprocessError):
-        pass
-    env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
-    env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
-    return env
-
-
-def dpms_sysfs():
-    try:
-        with open("/sys/class/drm/card0-DSI-1/dpms", encoding="ascii") as f:
-            return f.read().strip().lower()
-    except OSError:
-        return "on"
-
-
-def mutter_mode():
-    try:
-        out = subprocess.check_output(
-            [
-                "busctl",
-                "--user",
-                "get-property",
-                "org.gnome.Mutter.DisplayConfig",
-                "/org/gnome/Mutter/DisplayConfig",
-                "org.gnome.Mutter.DisplayConfig",
-                "PowerSaveMode",
-            ],
-            env=gnome_env(),
-            text=True,
-        )
-        # "i 0" / "i 3"
-        parts = out.split()
-        return int(parts[-1]) if parts else 0
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return 0 if dpms_sysfs() == "on" else 3
-
-
-def set_mutter(mode):
-    subprocess.run(
-        [
-            "busctl",
-            "--user",
-            "set-property",
-            "org.gnome.Mutter.DisplayConfig",
-            "/org/gnome/Mutter/DisplayConfig",
-            "org.gnome.Mutter.DisplayConfig",
-            "PowerSaveMode",
-            "i",
-            str(mode),
-        ],
-        env=gnome_env(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-def blank():
-    set_mutter(3)
-
-
-def unblank():
-    set_mutter(0)
-
-
-def open_event():
-    path = find_pwrkey()
-    last_err = None
-    for _ in range(60):
-        path = find_pwrkey()
-        try:
-            return os.open(path, os.O_RDONLY)
-        except OSError as err:
-            last_err = err
-            time.sleep(1)
-    raise SystemExit(f"cannot open {path}: {last_err}")
-
-
-def main():
-    fd = open_event()
-    down_at = None
-    last = 0.0
-    while True:
-        data = os.read(fd, SIZE)
-        if len(data) < SIZE:
-            continue
-        _s, _us, etype, code, value = struct.unpack(FMT, data)
-        if etype != EV_KEY or code != KEY_POWER:
-            continue
-        now = time.monotonic()
-        if value == 1:
-            down_at = now
-            continue
-        if value != 0 or down_at is None:
-            continue
-        held = now - down_at
-        down_at = None
-        if held >= LONG_PRESS:
-            continue
-        if now - last < 0.35:
-            continue
-        last = now
-        if mutter_mode() != 0 or dpms_sysfs() != "on":
-            unblank()
-        else:
-            blank()
-
-
-if __name__ == "__main__":
-    main()
-EOF
-chmod 755 /usr/local/sbin/dagu-power-button.py
-# After=multi-user.target + WantedBy=multi-user.target deadlocks the job
-# until someone starts it by hand (power key then does nothing at boot).
+# Short power key: C daemon toggles Mutter PowerSaveMode (DCS 0x51 times out).
+# Hall SW_TABLET_MODE is gpio-keys in DT — do not inject from userspace.
+is_elf /usr/local/sbin/dagu-power-button || {
+	echo "rootfs-desktop-setup: missing dagu-power-button" >&2
+	exit 1
+}
 cat >/etc/systemd/system/dagu-power-button.service <<'EOF'
 [Unit]
 Description=dagu power key toggles mutter DPMS
@@ -1400,7 +1220,7 @@ Group=dagu
 SupplementaryGroups=input
 Environment=XDG_RUNTIME_DIR=/run/user/1001
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus
-ExecStart=/usr/bin/python3 /usr/local/sbin/dagu-power-button.py
+ExecStart=/usr/local/sbin/dagu-power-button
 Restart=always
 RestartSec=1
 
@@ -1409,68 +1229,9 @@ WantedBy=multi-user.target
 EOF
 ln -sf /etc/systemd/system/dagu-power-button.service \
 	/etc/systemd/system/multi-user.target.wants/dagu-power-button.service
-# gpio-keys hall idles as laptop (SW_TABLET_MODE=0); mutter then hides OSK.
-cat >/usr/local/sbin/dagu-tablet-mode.py <<'EOF'
-#!/usr/bin/env python3
-import glob
-import os
-import struct
-import time
-
-EV_SYN = 0
-EV_SW = 5
-SYN_REPORT = 0
-SW_TABLET_MODE = 1
-FMT = "llHHI"
-
-
-def find_gpio_keys():
-    for name_path in glob.glob("/sys/class/input/event*/device/name"):
-        try:
-            with open(name_path, encoding="utf-8") as f:
-                name = f.read().strip()
-        except OSError:
-            continue
-        if name == "gpio-keys":
-            return f"/dev/input/{name_path.split('/')[4]}"
-    return "/dev/input/event4"
-
-
-def emit(fd, etype, code, value):
-    os.write(fd, struct.pack(FMT, 0, 0, etype, code, value))
-
-
-def main():
-    path = find_gpio_keys()
-    fd = os.open(path, os.O_WRONLY)
-    try:
-        while True:
-            emit(fd, EV_SW, SW_TABLET_MODE, 1)
-            emit(fd, EV_SYN, SYN_REPORT, 0)
-            time.sleep(15)
-    finally:
-        os.close(fd)
-
-
-if __name__ == "__main__":
-    main()
-EOF
-chmod 755 /usr/local/sbin/dagu-tablet-mode.py
-cat >/etc/systemd/system/dagu-tablet-mode.service <<'EOF'
-[Unit]
-Description=dagu force SW_TABLET_MODE for GNOME OSK
-After=systemd-udevd.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /usr/local/sbin/dagu-tablet-mode.py
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-ln -sf /etc/systemd/system/dagu-tablet-mode.service \
+rm -f /usr/local/sbin/dagu-power-button.py \
+	/usr/local/sbin/dagu-tablet-mode.py \
+	/etc/systemd/system/dagu-tablet-mode.service \
 	/etc/systemd/system/multi-user.target.wants/dagu-tablet-mode.service
 cat >/usr/local/bin/dagu-blank-on-lock <<'EOF'
 #!/bin/sh
@@ -1608,169 +1369,18 @@ ln -sf /etc/systemd/system/dagu-fix-pam.service \
 # shows HTML without CSS. NTP after Wi-Fi, HTTP Date as fallback.
 ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 printf 'Asia/Shanghai\n' >/etc/timezone
-cat >/usr/local/sbin/dagu-time-sync.py <<'EOF'
-#!/usr/bin/env python3
-from __future__ import annotations
-
-import os
-import socket
-import struct
-import subprocess
-import sys
-from email.utils import parsedate_to_datetime
-from pathlib import Path
-from urllib.request import Request, urlopen
-
-STAMP = Path("/var/lib/dagu/last-good-time")
-NTP_HOSTS = (
-    "ntp.aliyun.com",
-    "ntp.tencent.com",
-    "ntp.tuna.tsinghua.edu.cn",
-    "pool.ntp.org",
-)
-HTTP_URLS = (
-    "http://mirrors.tuna.tsinghua.edu.cn/",
-    "http://detectportal.firefox.com/",
-    "https://www.bilibili.com/",
-)
-
-
-def sntp(host: str, timeout: float = 3.0) -> int:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(timeout)
-    try:
-        sock.sendto(b"\x1b" + 47 * b"\0", (host, 123))
-        data, _ = sock.recvfrom(512)
-    finally:
-        sock.close()
-    if len(data) < 48:
-        raise OSError("short ntp")
-    t = struct.unpack("!12I", data[:48])[10]
-    unix = t - 2208988800
-    if unix < 1_700_000_000:
-        raise OSError(f"ntp sanity {unix}")
-    return unix
-
-
-def http_date(url: str) -> int:
-    req = Request(url, method="HEAD", headers={"User-Agent": "dagu-time-sync"})
-    try:
-        with urlopen(req, timeout=8) as r:
-            raw = r.headers.get("Date")
-    except Exception:
-        req = Request(url, headers={"User-Agent": "dagu-time-sync"})
-        with urlopen(req, timeout=8) as r:
-            raw = r.headers.get("Date")
-            r.read(64)
-    if not raw:
-        raise OSError("no Date")
-    dt = parsedate_to_datetime(raw)
-    unix = int(dt.timestamp())
-    if unix < 1_700_000_000:
-        raise OSError(f"http sanity {unix}")
-    return unix
-
-
-def apply_unix(unix: int) -> None:
-    STAMP.parent.mkdir(parents=True, exist_ok=True)
-    iso = subprocess.check_output(
-        ["date", "-u", "-d", f"@{unix}", "+%Y-%m-%d %H:%M:%S"],
-        text=True,
-    ).strip()
-    subprocess.check_call(["date", "-u", "-s", iso])
-    STAMP.write_text(str(unix) + "\n")
-    try:
-        subprocess.run(
-            ["hwclock", "-w"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except FileNotFoundError:
-        pass
-    pam = "/usr/local/sbin/dagu-fix-pam.sh"
-    if os.access(pam, os.X_OK):
-        subprocess.call([pam])
-
-
-def restore_stamp() -> bool:
-    try:
-        unix = int(STAMP.read_text().strip())
-    except (OSError, ValueError):
-        return False
-    now = int(__import__("time").time())
-    if unix <= now:
-        return False
-    apply_unix(unix)
-    print("restored", unix, file=sys.stderr)
-    return True
-
-
-def main() -> int:
-    restore_stamp()
-    last_err = None
-    for host in NTP_HOSTS:
-        try:
-            unix = sntp(host)
-            apply_unix(unix)
-            print(f"ntp {host} -> {unix}")
-            return 0
-        except Exception as e:
-            last_err = e
-            print(f"ntp {host}: {e}", file=sys.stderr)
-    for url in HTTP_URLS:
-        try:
-            unix = http_date(url)
-            apply_unix(unix)
-            print(f"http {url} -> {unix}")
-            return 0
-        except Exception as e:
-            last_err = e
-            print(f"http {url}: {e}", file=sys.stderr)
-    print(f"dagu-time-sync failed: {last_err}", file=sys.stderr)
-    return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+mkdir -p /etc/systemd/timesyncd.conf.d
+cat >/etc/systemd/timesyncd.conf.d/dagu.conf <<'EOF'
+[Time]
+NTP=ntp.aliyun.com ntp.tencent.com ntp.tuna.tsinghua.edu.cn
+FallbackNTP=ntp.ubuntu.com pool.ntp.org
 EOF
-chmod 755 /usr/local/sbin/dagu-time-sync.py
-cat >/etc/systemd/system/dagu-time-sync.service <<'EOF'
-[Unit]
-Description=dagu NTP/HTTP clock for TLS CDN
-After=network-online.target NetworkManager-wait-online.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 /usr/local/sbin/dagu-time-sync.py
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-ln -sf /etc/systemd/system/dagu-time-sync.service \
-	/etc/systemd/system/multi-user.target.wants/dagu-time-sync.service
-cat >/etc/systemd/system/dagu-time-sync.timer <<'EOF'
-[Unit]
-Description=Refresh dagu wall clock every 6h
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=6h
-AccuracySec=1min
-
-[Install]
-WantedBy=timers.target
-EOF
-ln -sf /etc/systemd/system/dagu-time-sync.timer \
-	/etc/systemd/system/timers.target.wants/dagu-time-sync.timer
-cat >/etc/NetworkManager/dispatcher.d/50-dagu-time-sync <<'EOF'
-#!/bin/sh
-[ "$2" = up ] || exit 0
-systemctl start dagu-time-sync.service
-EOF
-chmod 755 /etc/NetworkManager/dispatcher.d/50-dagu-time-sync
+rm -f /usr/local/sbin/dagu-time-sync.py \
+	/etc/systemd/system/dagu-time-sync.service \
+	/etc/systemd/system/dagu-time-sync.timer \
+	/etc/systemd/system/multi-user.target.wants/dagu-time-sync.service \
+	/etc/systemd/system/timers.target.wants/dagu-time-sync.timer \
+	/etc/NetworkManager/dispatcher.d/50-dagu-time-sync
 systemctl enable systemd-timesyncd.service 2>/dev/null || true
 
 # Hide internal UFS partitions from Files/Nautilus (USB sticks stay visible).
@@ -2131,288 +1741,141 @@ SUBSYSTEM=="video4linux", ATTR{name}=="dagu-front", GROUP="video", MODE="0660"
 SUBSYSTEM=="video4linux", ATTR{name}=="dagu-rear", GROUP="video", MODE="0660"
 SUBSYSTEM=="video4linux", ATTR{name}=="msm_vfe*", GROUP="root", MODE="0600", TAG-="uaccess"
 EOF
+# RustDesk 1.4.9 single-display uinput uses DRM physical 1600x2560. Daily
+# Mutter is transform 270 / scale 1.25 (logical 2048x1280, capture 2560x1600).
+# Keep in sync with linux-mainline/scripts/dagu-rustdesk-uinput-abs.py and
+# linux-mainline/udev/90-dagu-rustdesk-uinput.rules.
+install -m755 /dev/null /usr/local/sbin/dagu-rustdesk-uinput-abs
+cat >/usr/local/sbin/dagu-rustdesk-uinput-abs <<'ABS_EOF'
+#!/usr/bin/env python3
+from __future__ import annotations
+import ctypes, fcntl, glob, os, syslog, sys, xml.etree.ElementTree as ET
+MOUSE_NAME = "mouce-library-fake-mouse"
+DEFAULT_PHY = (1600, 2560)
+ABS_X, ABS_Y = 0, 1
+ROTATED = {1, 3}
+class AbsInfo(ctypes.Structure):
+    _fields_ = [
+        ("value", ctypes.c_int), ("minimum", ctypes.c_int),
+        ("maximum", ctypes.c_int), ("fuzz", ctypes.c_int),
+        ("flat", ctypes.c_int), ("resolution", ctypes.c_int),
+    ]
+def _ioc(dir_, nr):
+    return dir_ | (ctypes.sizeof(AbsInfo) << 16) | (ord("E") << 8) | nr
+def eviocgabs(code):
+    return _ioc(0x80000000, 0x40 + code)
+def eviocsabs(code):
+    return _ioc(0x40000000, 0xC0 + code)
+def log(msg: str) -> None:
+    syslog.syslog(syslog.LOG_INFO, f"dagu-rustdesk-uinput-abs: {msg}")
+    print(f"dagu-rustdesk-uinput-abs: {msg}", file=sys.stderr)
+def drm_mode() -> tuple[int, int]:
+    for path in glob.glob("/sys/class/drm/card*-DSI-1/modes"):
+        try:
+            line = open(path, encoding="ascii").read().splitlines()
+        except OSError:
+            continue
+        if line and "x" in line[0]:
+            w, h = line[0].split("x", 1)
+            return int(w), int(h)
+    return DEFAULT_PHY
+def xml_transform() -> int | None:
+    try:
+        rot = ET.parse("/home/dagu/.config/monitors.xml").getroot().findtext(
+            ".//logicalmonitor/transform/rotation")
+    except (OSError, ET.ParseError):
+        return None
+    if rot in ("right", "left"):
+        return 3
+    if rot == "upside_down":
+        return 2
+    if rot in ("normal", None):
+        return 0
+    return None
+def target_abs(phy_w: int, phy_h: int) -> tuple[int, int]:
+    transform = xml_transform()
+    if transform is None:
+        transform = 3 if phy_h > phy_w else 0
+    if transform in ROTATED:
+        return phy_h, phy_w
+    return phy_w, phy_h
+def find_mouse_nodes(explicit: str | None) -> list[str]:
+    if explicit:
+        return [explicit]
+    nodes = []
+    for path in glob.glob("/sys/class/input/event*/device/name"):
+        try:
+            name = open(path, encoding="utf-8").read().strip()
+        except OSError:
+            continue
+        if name == MOUSE_NAME:
+            ev = os.path.basename(os.path.dirname(os.path.dirname(path)))
+            nodes.append(f"/dev/input/{ev}")
+    return nodes
+def set_abs(node: str, max_x: int, max_y: int) -> None:
+    fd = os.open(node, os.O_RDWR)
+    try:
+        for code, maximum in ((ABS_X, max_x), (ABS_Y, max_y)):
+            info = AbsInfo()
+            fcntl.ioctl(fd, eviocgabs(code), info)
+            info.minimum = 0
+            info.maximum = maximum
+            info.value = min(max(info.value, 0), maximum)
+            fcntl.ioctl(fd, eviocsabs(code), info)
+        ax, ay = AbsInfo(), AbsInfo()
+        fcntl.ioctl(fd, eviocgabs(ABS_X), ax)
+        fcntl.ioctl(fd, eviocgabs(ABS_Y), ay)
+        log(f"{node} ABS {ax.minimum}:{ax.maximum} x {ay.minimum}:{ay.maximum}")
+        if ax.maximum != max_x or ay.maximum != max_y:
+            raise OSError(f"EVIOCSABS did not stick on {node}")
+    finally:
+        os.close(fd)
+def main() -> int:
+    syslog.openlog("dagu-rustdesk-uinput-abs")
+    explicit = sys.argv[1] if len(sys.argv) > 1 else None
+    nodes = find_mouse_nodes(explicit)
+    if not nodes:
+        log(f"no {MOUSE_NAME} node yet")
+        return 0
+    phy_w, phy_h = drm_mode()
+    max_x, max_y = target_abs(phy_w, phy_h)
+    log(f"panel {phy_w}x{phy_h} -> uinput 0:{max_x} x 0:{max_y}")
+    for node in nodes:
+        set_abs(node, max_x, max_y)
+    return 0
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        log(f"failed: {exc}")
+        raise SystemExit(1)
+ABS_EOF
+chmod 755 /usr/local/sbin/dagu-rustdesk-uinput-abs
+cat >/etc/udev/rules.d/90-dagu-rustdesk-uinput.rules <<'EOF'
+ACTION=="add", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="mouce-library-fake-mouse", IMPORT{program}="/usr/local/sbin/dagu-rustdesk-uinput-abs /dev/input/%k"
+EOF
 cat >/etc/modprobe.d/v4l2loopback.conf <<'EOF'
 # exclusive_caps=0: on-demand producer starts after the V4L2 client opens.
 # PipeWire lists video20/21. spa-libcamera is disabled.
-options v4l2loopback devices=2 video_nr=20,21 exclusive_caps=0 card_label=dagu-front,dagu-rear
+# max_buffers=8: xcast/webrtc REQBUFS(4). Default 2 → meeting preview black.
+options v4l2loopback devices=2 video_nr=20,21 exclusive_caps=0 max_buffers=8 card_label=dagu-front,dagu-rear
 EOF
 echo v4l2loopback >/etc/modules-load.d/dagu-v4l2loopback.conf
-# Keep in sync with linux-mainline/scripts/dagu-camera-loopback.sh
-# The live copy is the canonical script; embed it below.
-cat >/usr/local/sbin/dagu-camera-loopback.sh <<'LOOPEOF'
-#!/bin/sh
-# Push libcamera SoftISP NV12 into v4l2loopback /dev/video20 (front) and
-# /dev/video21 (rear) **on demand**. No app → no gst, no CAMSS STREAMON.
-# PipeWire must not monitor spa-libcamera: Chrome would CPU-debayer 12MP
-# on the session CPUs and starve mutter. Snapshot/Chromium open these
-# V4L2 nodes. Not Spectra ISP.
-set -eu
-
-FRONT_DEV="${DAGU_LOOPBACK_FRONT:-/dev/video20}"
-REAR_DEV="${DAGU_LOOPBACK_REAR:-/dev/video21}"
-# libcamera simple IDs from sm8250-xiaomi-dagu.dts (cam --list).
-FRONT_NAME="${DAGU_LIBCAMERA_FRONT:-/base/soc@0/cci@ac50000/i2c-bus@1/camera@10}"
-REAR_NAME="${DAGU_LIBCAMERA_REAR:-/base/soc@0/cci@ac4f000/i2c-bus@0/camera@10}"
-# Viewfinder skip: imx596 2592/2, s5kjn1 4080/4. Not 1280x720 (rear cannot).
-FRONT_W="${DAGU_LOOPBACK_FRONT_WIDTH:-1296}"
-FRONT_H="${DAGU_LOOPBACK_FRONT_HEIGHT:-976}"
-REAR_W="${DAGU_LOOPBACK_REAR_WIDTH:-1020}"
-REAR_H="${DAGU_LOOPBACK_REAR_HEIGHT:-764}"
-POLL_S="${DAGU_LOOPBACK_POLL_S:-0.5}"
-IDLE_S="${DAGU_LOOPBACK_IDLE_S:-1}"
-RESET="${DAGU_CAMSS_RESET:-/usr/local/sbin/dagu-camss-graph-reset.sh}"
-
-log() { printf 'dagu-camera-loopback: %s\n' "$*"; }
-
-usage() {
-	printf 'usage: %s [watch|front|rear|all]\n' "$0" >&2
-	exit 2
+# Product camera path is the Rust+C++ ELF. Do not cat the lab .sh here.
+is_elf /usr/local/sbin/dagu-camera-loopback || {
+	echo "rootfs-desktop-setup: missing dagu-camera-loopback ELF" >&2
+	exit 1
 }
-
-cmd=${1:-watch}
-
-resolve_names() {
-	front_name="${DAGU_LIBCAMERA_FRONT:-$FRONT_NAME}"
-	rear_name="${DAGU_LIBCAMERA_REAR:-$REAR_NAME}"
-	list=$(cam --list 2>/dev/null || cam --list-cameras 2>/dev/null || true)
-	parsed_front=$(printf '%s\n' "$list" | sed -n 's/.*Internal front camera (\([^)]*\)).*/\1/p' | head -1)
-	parsed_rear=$(printf '%s\n' "$list" | sed -n 's/.*Internal back camera (\([^)]*\)).*/\1/p' | head -1)
-	[ -z "${DAGU_LIBCAMERA_FRONT:-}" ] && [ -n "$parsed_front" ] && front_name=$parsed_front
-	[ -z "${DAGU_LIBCAMERA_REAR:-}" ] && [ -n "$parsed_rear" ] && rear_name=$parsed_rear
-}
-
-pipe() {
-	src_name=$1
-	sink=$2
-	w=$3
-	h=$4
-	if [ -z "$src_name" ]; then
-		log "no camera id for $sink"
-		exit 1
-	fi
-	if ! command -v gst-launch-1.0 >/dev/null; then
-		log "gst-launch-1.0 missing"
-		exit 1
-	fi
-	log "pipe $src_name -> $sink ${w}x${h} NV12"
-	# libcamerasrc emits ABGR8888; NV12/size must come after videoconvert.
-	exec gst-launch-1.0 \
-		libcamerasrc camera-name="$src_name" \
-		! videoconvert \
-		! "video/x-raw,format=NV12,width=$w,height=$h" \
-		! v4l2sink device="$sink" sync=false
-}
-
-run_one() {
-	which=$1
-	i=0
-	dev=$FRONT_DEV
-	[ "$which" = rear ] && dev=$REAR_DEV
-	while [ ! -e "$dev" ]; do
-		i=$((i + 1))
-		[ "$i" -gt 60 ] && { log "no $dev"; exit 1; }
-		sleep 0.5
-	done
-	resolve_names
-	case "$which" in
-	front) pipe "$front_name" "$FRONT_DEV" "$FRONT_W" "$FRONT_H" ;;
-	rear) pipe "$rear_name" "$REAR_DEV" "$REAR_W" "$REAR_H" ;;
-	*) log "bad camera $which"; exit 2 ;;
-	esac
-}
-
-run_all() {
-	resolve_names
-	log "all front=$front_name $FRONT_W x $FRONT_H rear=$rear_name $REAR_W x $REAR_H"
-	pipe "$front_name" "$FRONT_DEV" "$FRONT_W" "$FRONT_H" &
-	p1=$!
-	pipe "$rear_name" "$REAR_DEV" "$REAR_W" "$REAR_H" &
-	p2=$!
-	trap 'kill $p1 $p2 2>/dev/null || true' INT TERM
-	wait $p1 $p2
-}
-
-watch() {
-	log "watch $FRONT_DEV $REAR_DEV idle=${IDLE_S}s (SoftISP off until a client streams)"
-	exec python3 - "$FRONT_DEV" "$REAR_DEV" "$0" "$POLL_S" "$IDLE_S" "$RESET" <<'PY'
-import os, signal, sys, time, subprocess
-
-front, rear, script, poll_s, idle_s, reset = (
-    sys.argv[1], sys.argv[2], sys.argv[3],
-    float(sys.argv[4]), float(sys.argv[5]), sys.argv[6],
-)
-GST = {"gst-launch-1.0", "gst-laun"}
-MONITOR = {"pipewire", "wireplumber", "pipewire-pulse"}
-POLL = {"dagu-camera-loop", "dagu-camera-lo"}
-
-
-def comm_of(pid: str) -> str:
-    try:
-        return open(f"/proc/{pid}/comm", encoding="utf-8", errors="ignore").read().strip()
-    except OSError:
-        return ""
-
-
-def holders(dev: str) -> dict[int, str]:
-    found: dict[int, str] = {}
-    try:
-        pids = os.listdir("/proc")
-    except OSError:
-        return found
-    for pid in pids:
-        if not pid.isdigit():
-            continue
-        comm = comm_of(pid)
-        if comm in GST or comm.startswith("gst-launch") or comm in POLL:
-            continue
-        fd_dir = f"/proc/{pid}/fd"
-        try:
-            fds = os.listdir(fd_dir)
-        except OSError:
-            continue
-        for fd in fds:
-            try:
-                target = os.readlink(f"{fd_dir}/{fd}")
-            except OSError:
-                continue
-            if target == dev:
-                found[int(pid)] = comm
-                break
-    return found
-
-
-def buf_count(dev: str) -> int:
-    name = os.path.basename(dev)
-    for path in (
-        f"/sys/devices/virtual/video4linux/{name}/buffers",
-        f"/sys/class/video4linux/{name}/device/buffers",
-    ):
-        try:
-            return int(open(path, encoding="utf-8").read().strip() or "0")
-        except (OSError, ValueError):
-            continue
-    return 0
-
-
-def client_wants(dev: str) -> bool:
-    if not os.path.exists(dev):
-        return False
-    found = holders(dev)
-    if not found:
-        return False
-    if all(c in MONITOR for c in found.values()) and buf_count(dev) == 0:
-        return False
-    return True
-
-
-procs: dict[str, subprocess.Popen] = {}
-started_at: dict[str, float] = {}
-fail_until: dict[str, float] = {}
-idle_since: dict[str, float] = {}
-hw_held = False
-
-
-def release_hw() -> None:
-    global hw_held
-    if procs:
-        return
-    if not hw_held:
-        return
-    if os.path.isfile(reset) and os.access(reset, os.X_OK):
-        subprocess.run([reset], check=False)
-    print("dagu-camera-loopback: idle, CAMSS graph reset", flush=True)
-    hw_held = False
-
-
-def stop(name: str) -> None:
-    p = procs.pop(name, None)
-    started_at.pop(name, None)
-    idle_since.pop(name, None)
-    if p is None:
-        return
-    print(f"dagu-camera-loopback: stop {name}", flush=True)
-    try:
-        os.killpg(p.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
-        p.terminate()
-    try:
-        p.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            p.kill()
-        p.wait(timeout=2)
-
-
-def start(name: str) -> None:
-    global hw_held
-    now = time.monotonic()
-    if name in procs and procs[name].poll() is None:
-        return
-    if now < fail_until.get(name, 0):
-        return
-    print(f"dagu-camera-loopback: start {name}", flush=True)
-    procs[name] = subprocess.Popen(
-        [script, name],
-        start_new_session=True,
-    )
-    started_at[name] = now
-    idle_since.pop(name, None)
-    hw_held = True
-
-
-try:
-    while True:
-        now = time.monotonic()
-        want = {"front": client_wants(front), "rear": client_wants(rear)}
-        for name, needed in want.items():
-            if needed:
-                idle_since.pop(name, None)
-                start(name)
-                continue
-            if name not in procs:
-                continue
-            since = idle_since.setdefault(name, now)
-            if now - since >= idle_s:
-                stop(name)
-        dead = [n for n, p in procs.items() if p.poll() is not None]
-        for n in dead:
-            rc = procs[n].returncode
-            age = now - started_at.get(n, now)
-            procs.pop(n, None)
-            started_at.pop(n, None)
-            print(f"dagu-camera-loopback: {n} exited rc={rc}", flush=True)
-            if age < 2.0:
-                fail_until[n] = now + 8.0
-        release_hw()
-        time.sleep(poll_s)
-finally:
-    for n in list(procs):
-        stop(n)
-    hw_held = True
-    release_hw()
-PY
-}
-
-case "$cmd" in
-watch) watch ;;
-front|rear) run_one "$cmd" ;;
-all) run_all ;;
--h|--help) usage ;;
-*) usage ;;
-esac
-LOOPEOF
-chmod 755 /usr/local/sbin/dagu-camera-loopback.sh
 cat >/etc/systemd/system/dagu-camera-loopback.service <<'EOF'
 [Unit]
 Description=dagu v4l2loopback NV12 both-nodes (not Spectra ISP)
 After=systemd-modules-load.service
+Documentation=file:///usr/local/sbin/dagu-camera-loopback
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/dagu-camera-loopback.sh all
-CPUAffinity=0-3
+ExecStart=/usr/local/sbin/dagu-camera-loopback all
+CPUAffinity=0-5
 Restart=on-failure
 RestartSec=5
 EOF
@@ -2440,7 +1903,10 @@ cat >/etc/libcamera/configuration.yaml <<'EOF'
 version: 1
 configuration:
   software_isp:
+    # DebayerCpu packed-10P skip is the Viewfinder FOV path. GPU EGL ignores it.
     mode: cpu
+    # DebayerCpu default is already 2 on current libcamera; pin it so a
+    # distro rebuild cannot spawn 8 threads and starve mutter/Himax.
     threads: 2
 EOF
 # Do not put hw:0,0 in pipewire context.objects. Opening the PCM
@@ -2551,309 +2017,20 @@ allow-volume-above-100-percent=false
 EOF
 dconf update 2>/dev/null || true
 
-# Hold-drag / Chrome-video clock boost. Idle GPU stays 587 MHz /
-# ondemand; do not set governor=performance. Keep in sync with
-# linux-mainline/scripts/dagu-touch-boost.py
-cat >/usr/local/sbin/dagu-touch-boost.py <<'EOF'
-#!/usr/bin/env python3
-"""Raise GPU/CPU floors while touching, Chrome video, or camera SoftISP.
-
-Idle stays on simple_ondemand / schedutil (GPU min 587 MHz). A hold-drag
-or a <video> used to bounce 587↔670 and leave the prime core at 845 MHz,
-which is the felt hitch / dropped frame. This does not change Chrome
-CPU vs GPU raster. Do not set governor=performance.
-
-Himax is spi-gpio bitbang (IRQF_ONESHOT thread). SoftISP on 5MP/12MP RAW
-saturates the cluster and mutter's libinput loop starves — taps still
-wake the backlight via logind, but folders/close-window do not respond.
-Do not pin SoftISP to the big cluster: pin it to silver CPU0-3 and keep
-Himax/mutter on Gold. Signal is any userspace fd on `/dev/video0` or
-`/dev/video3` (plus gst-launch holding the loopback nodes).
-"""
-from __future__ import annotations
-
-import glob
-import os
-import struct
-import time
-
-EV_KEY, EV_ABS = 0x01, 0x03
-ABS_MT_TRACKING_ID = 0x39
-BTN_TOUCH = 0x14A
-EVENT = struct.Struct("llHHi")
-
-GPU_MIN = "/sys/class/devfreq/3d00000.gpu/min_freq"
-GPU_IDLE = "587000000"
-GPU_HOLD = "670000000"
-
-CPU = (
-    ("/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq", "300000", "1248000"),
-    ("/sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq", "710400", "1766400"),
-    ("/sys/devices/system/cpu/cpufreq/policy7/scaling_min_freq", "844800", "1977600"),
-)
-
-HOLD_TAIL_S = 0.18
-VIDEO_SCAN_S = 0.5
-SOFTISP_CPUS = frozenset({0, 1, 2, 3})
-ALL_CPUS = frozenset(range(os.cpu_count() or 8))
-# comm is TASK_COMM_LEN=16 including NUL → 15 chars.
-SKIP_PIN = {
-    "gnome-shell",
-    "Xwayland",
-    "dagu-touch-boo",
-    "dagu-himax-irq",
+# Touch floors: C daemon (evdev + sysfs). Himax driver also votes after a
+# kernel flash. SoftISP pin is dagu_cam.cpp, not this process.
+is_elf /usr/local/sbin/dagu-touch-boost || {
+	echo "rootfs-desktop-setup: missing dagu-touch-boost ELF" >&2
+	exit 1
 }
-
-
-def write(path: str, value: str) -> None:
-    try:
-        with open(path, "w") as f:
-            f.write(value + "\n")
-    except OSError:
-        pass
-
-
-def find_himax() -> str:
-    for name in sorted(glob.glob("/sys/class/input/event*/device/name")):
-        try:
-            text = open(name, "r", encoding="utf-8", errors="ignore").read()
-        except OSError:
-            continue
-        if "Himax" in text or "HX83121" in text:
-            return "/dev/input/" + name.split("/")[4]
-    return "/dev/input/event3"
-
-
-def apply(hold: bool) -> None:
-    write(GPU_MIN, GPU_HOLD if hold else GPU_IDLE)
-    for path, idle, boosted in CPU:
-        write(path, boosted if hold else idle)
-
-
-BROWSER_MARKERS = (
-    b"/opt/google/chrome/chrome",
-    b"/usr/lib/chromium/chromium",
-    b"/usr/bin/chromium",
-)
-CAM_NODES = ("/dev/video0", "/dev/video3")
-LOOP_NODES = ("/dev/video20", "/dev/video21")
-CAM_COMMS = {
-    "snapshot",
-    "gnome-snapshot",
-    "pipewire",
-    "wireplumber",
-    "cam",
-    "gst-launch-1.0",
-}
-VENUS_NODES = (
-    "/dev/video14",
-    "/dev/video15",
-    "/dev/video-dec0",
-    "/dev/video-enc0",
-)
-
-
-def _is_browser(cmd: bytes) -> bool:
-    return any(m in cmd for m in BROWSER_MARKERS)
-
-
-def _comm(pid: str) -> str:
-    try:
-        with open(f"/proc/{pid}/comm", "r", encoding="utf-8", errors="ignore") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
-def _is_cam_comm(comm: str) -> bool:
-    if comm in CAM_COMMS:
-        return True
-    return comm.startswith("gst-launch") or comm.startswith("gnome-snapsho")
-
-
-def _has_fd(pid: str, nodes: tuple[str, ...]) -> bool:
-    try:
-        fds = os.listdir(f"/proc/{pid}/fd")
-    except OSError:
-        return False
-    for fd in fds:
-        try:
-            target = os.readlink(f"/proc/{pid}/fd/{fd}")
-        except OSError:
-            continue
-        if target in nodes:
-            return True
-    return False
-
-
-def _has_venus_fd(pid: str) -> bool:
-    return _has_fd(pid, VENUS_NODES)
-
-
-def chrome_video_playing() -> bool:
-    """True while Chromium/Chrome is in a Venus or video-compositor path."""
-    for pid in _iter_pids():
-        comm = _comm(pid)
-        if not comm.startswith(("chrome", "chromium", "Chrome")):
-            continue
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as f:
-                cmd = f.read()
-        except OSError:
-            continue
-        if not _is_browser(cmd):
-            continue
-        if _has_venus_fd(pid):
-            return True
-        if b"--type=" in cmd and b"--type=renderer" not in cmd:
-            continue
-        task = f"/proc/{pid}/task"
-        try:
-            tids = os.listdir(task)
-        except OSError:
-            continue
-        for tid in tids:
-            try:
-                with open(f"{task}/{tid}/comm", "r", encoding="utf-8", errors="ignore") as f:
-                    name = f.read().strip()
-            except OSError:
-                continue
-            if name.startswith(("VideoFrame", "FFmpeg", "VideoDecod", "V4L2", "Media")):
-                return True
-    return False
-
-
-def _iter_pids():
-    try:
-        pids = os.listdir("/proc")
-    except OSError:
-        return
-    for pid in pids:
-        if pid.isdigit():
-            yield pid
-
-
-def _has_softisp_thread(pid: str) -> bool:
-    task = f"/proc/{pid}/task"
-    try:
-        tids = os.listdir(task)
-    except OSError:
-        return False
-    for tid in tids:
-        try:
-            with open(f"{task}/{tid}/comm", "r", encoding="utf-8", errors="ignore") as f:
-                name = f.read().strip()
-        except OSError:
-            continue
-        if name.startswith(("SWIspWorker", "DebayerCpu")):
-            return True
-    return False
-
-
-def _is_softisp_proc(comm: str) -> bool:
-    return comm.startswith(("dagu-camera-lo", "gst-launch", "cam")) or comm in {
-        "snapshot",
-        "gnome-snapshot",
-    }
-
-
-def camera_streaming() -> bool:
-    """True while Snapshot/cam/gst is up, or the loopback child has SWIsp.
-
-    Do not walk every process's fd/task table. Cursor keeps thousands of
-    fds; doing that at 8 Hz starves mutter SCHED_DEADLINE.
-    """
-    for pid in _iter_pids():
-        comm = _comm(pid)
-        if comm in ("snapshot", "gnome-snapshot", "cam") or comm.startswith(
-            ("gst-launch", "gnome-snapsho")
-        ):
-            return True
-        if comm.startswith("dagu-camera-lo") and _has_softisp_thread(pid):
-            return True
-        if _is_cam_comm(comm) and _has_fd(pid, LOOP_NODES):
-            return True
-    return False
-
-
-def pin_softisp(enable: bool) -> None:
-    """Keep DebayerCpu/libcamera off Gold so mutter and Himax still run."""
-    cpus = SOFTISP_CPUS if enable else ALL_CPUS
-    for pid in _iter_pids():
-        comm = _comm(pid)
-        if comm in SKIP_PIN or comm.startswith("dagu-camera-lo") or not _is_softisp_proc(comm):
-            continue
-        try:
-            os.sched_setaffinity(int(pid), cpus)
-        except (OSError, ValueError, PermissionError):
-            continue
-
-
-def main() -> None:
-    dev = find_himax()
-    fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
-    apply(False)
-    pin_softisp(False)
-    contacts = 0
-    holding = False
-    drop_at = None
-    video = False
-    last_scan = 0.0
-    pinned = False
-    while True:
-        now = time.monotonic()
-        try:
-            buf = os.read(fd, EVENT.size * 64)
-        except BlockingIOError:
-            buf = b""
-        if buf:
-            for off in range(0, len(buf) - EVENT.size + 1, EVENT.size):
-                _sec, _usec, typ, code, value = EVENT.unpack_from(buf, off)
-                if typ == EV_ABS and code == ABS_MT_TRACKING_ID:
-                    if value >= 0:
-                        contacts += 1
-                    elif contacts > 0:
-                        contacts -= 1
-                elif typ == EV_KEY and code == BTN_TOUCH:
-                    contacts = 1 if value else 0
-        if now - last_scan >= VIDEO_SCAN_S:
-            video = chrome_video_playing() or camera_streaming()
-            if video and not pinned:
-                pin_softisp(True)
-                pinned = True
-            elif not video and pinned:
-                pin_softisp(False)
-                pinned = False
-            last_scan = now
-        want = contacts > 0 or video
-        if want:
-            drop_at = None
-            if not holding:
-                holding = True
-                apply(True)
-        elif holding:
-            if drop_at is None:
-                drop_at = now + HOLD_TAIL_S
-            elif now >= drop_at:
-                holding = False
-                drop_at = None
-                apply(False)
-        time.sleep(0.004)
-
-
-if __name__ == "__main__":
-    main()
-
-EOF
-chmod 755 /usr/local/sbin/dagu-touch-boost.py
 cat >/etc/systemd/system/dagu-touch-boost.service <<'EOF'
 [Unit]
-Description=dagu: raise GPU/CPU floors while touching, Chrome video, or camera
+Description=dagu: raise GPU/CPU floors while touching
 After=dagu-resources-fix.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/dagu-touch-boost.py
+ExecStart=/usr/local/sbin/dagu-touch-boost
 Restart=always
 RestartSec=1
 

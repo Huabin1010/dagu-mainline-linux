@@ -1,0 +1,2 @@
+# DAGU_GENI_SE_EXPERIMENT=1. Per-SE IRAM I2C (uart6 pattern). No wrapper CSR.
+CONFIG_I2C_QCOM_GENI=y

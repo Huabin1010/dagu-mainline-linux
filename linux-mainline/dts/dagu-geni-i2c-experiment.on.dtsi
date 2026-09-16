@@ -1,0 +1,131 @@
+/*
+ * DAGU_GENI_SE_EXPERIMENT=1 only. Per-SE IRAM like uart6.
+ * Do not put firmware-name on &qupv3_id_0. Do not enable GPI DMA.
+ * Failure: flash-boot-legacy.sh restore-a.
+ */
+&amp_i2c_se1 { status = "disabled"; };
+&amp_i2c_se3 { status = "disabled"; };
+
+&i2c1 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
+	pinctrl-names = "default";
+	pinctrl-0 = <&cs35l41_i2c_se1_qup>;
+	clock-frequency = <400000>;
+	status = "okay";
+
+	geni_cs35l41_br: speaker-amp@40 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x40>;
+		reset-gpios = <&tlmm 6 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <7 IRQ_TYPE_LEVEL_LOW>;
+		VA-supply = <&vreg_s4a_1p8>;
+		VP-supply = <&vph_pwr>;
+		cirrus,boost-peak-milliamp = <4000>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,gpio2-src-select = <4>;
+		cirrus,gpio2-output-enable;
+		cirrus,subsystem-id = "dagu";
+		cirrus,fast-switch = "cirrus/BR-music.txt";
+		cirrus,cal-r = <9696>;
+		cirrus,cal-ambient = <23>;
+		cirrus,vpbr-config = <33575690>;
+		sound-name-prefix = "BR";
+		#sound-dai-cells = <1>;
+	};
+
+	geni_cs35l41_bl: speaker-amp@41 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x41>;
+		reset-gpios = <&tlmm 62 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <67 IRQ_TYPE_LEVEL_LOW>;
+		VA-supply = <&vreg_s4a_1p8>;
+		VP-supply = <&vph_pwr>;
+		cirrus,boost-peak-milliamp = <4000>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,gpio2-src-select = <4>;
+		cirrus,gpio2-output-enable;
+		cirrus,right-channel-amp;
+		cirrus,subsystem-id = "dagu";
+		cirrus,fast-switch = "cirrus/BL-music.txt";
+		cirrus,cal-r = <9497>;
+		cirrus,cal-ambient = <23>;
+		cirrus,vpbr-config = <33575690>;
+		sound-name-prefix = "BL";
+		#sound-dai-cells = <1>;
+	};
+};
+
+&i2c3 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
+	pinctrl-names = "default";
+	pinctrl-0 = <&cs35l41_i2c_se3_qup>;
+	clock-frequency = <400000>;
+	status = "okay";
+
+	geni_cs35l41_tl: speaker-amp@41 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x41>;
+		reset-gpios = <&tlmm 78 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <92 IRQ_TYPE_LEVEL_LOW>;
+		VA-supply = <&vreg_s4a_1p8>;
+		VP-supply = <&vph_pwr>;
+		cirrus,boost-peak-milliamp = <4000>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,gpio2-src-select = <4>;
+		cirrus,gpio2-output-enable;
+		cirrus,subsystem-id = "dagu";
+		cirrus,fast-switch = "cirrus/TL-music.txt";
+		cirrus,cal-r = <9524>;
+		cirrus,cal-ambient = <23>;
+		cirrus,vpbr-config = <33575689>;
+		sound-name-prefix = "TL";
+		#sound-dai-cells = <1>;
+	};
+
+	geni_cs35l41_tr: speaker-amp@43 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x43>;
+		reset-gpios = <&tlmm 144 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <129 IRQ_TYPE_LEVEL_LOW>;
+		VA-supply = <&vreg_s4a_1p8>;
+		VP-supply = <&vph_pwr>;
+		cirrus,boost-peak-milliamp = <4000>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,gpio2-src-select = <4>;
+		cirrus,gpio2-output-enable;
+		cirrus,subsystem-id = "dagu";
+		cirrus,fast-switch = "cirrus/TR-music.txt";
+		cirrus,cal-r = <9632>;
+		cirrus,cal-ambient = <23>;
+		cirrus,vpbr-config = <33575689>;
+		sound-name-prefix = "TR";
+		#sound-dai-cells = <1>;
+	};
+};
+
+&tert_tdm_codec {
+	sound-dai = <&geni_cs35l41_tl 0>, <&geni_cs35l41_tr 0>,
+		    <&geni_cs35l41_bl 0>, <&geni_cs35l41_br 0>;
+};

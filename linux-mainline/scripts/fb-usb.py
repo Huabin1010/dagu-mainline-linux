@@ -223,6 +223,17 @@ class Fastboot:
 				print(f"==> slice {i + 1}/{nslice} file_off={off} raw={this}")
 				self.download_and_flash(part, blob)
 
+	def erase(self, part: str) -> None:
+		print(f"Erasing '{part}'")
+		r = self.cmd("erase:" + part, timeout=120000)
+		if not r.startswith("OKAY"):
+			raise SystemExit(r)
+		print("OKAY")
+
+	def reboot(self) -> None:
+		self.cmd("reboot")
+		print("rebooting")
+
 
 def parse_size(s: str) -> int:
 	t = s.strip().upper()
@@ -305,17 +316,6 @@ def build_sparse_slice(fh, offset: int, length: int, total_blks: int) -> bytes:
 		chunks.append(_chunk_hdr(CHUNK_DONT_CARE, suffix_blks, 0))
 	body = b"".join(chunks)
 	return _sparse_header(total_blks, len(chunks)) + body
-
-	def erase(self, part: str) -> None:
-		print(f"Erasing '{part}'")
-		r = self.cmd("erase:" + part, timeout=120000)
-		if not r.startswith("OKAY"):
-			raise SystemExit(r)
-		print("OKAY")
-
-	def reboot(self) -> None:
-		self.cmd("reboot")
-		print("rebooting")
 
 
 def main() -> int:

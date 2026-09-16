@@ -1,0 +1,18 @@
+[Unit]
+Description=dagu power key toggles mutter DPMS
+After=systemd-logind.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+User=dagu
+Group=dagu
+SupplementaryGroups=input
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus
+ExecStart=/usr/local/sbin/dagu-power-button
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,4 @@
+# RustDesk 1.4.9 mouce uinput uses DRM physical 1600x2560 on a single
+# display. Mutter logical space after transform 270 is landscape 2560x1600
+# (scale 1.25 → 2048x1280). IMPORT runs before libinput opens the node.
+ACTION=="add", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="mouce-library-fake-mouse", IMPORT{program}="/usr/local/sbin/dagu-rustdesk-uinput-abs /dev/input/%k"

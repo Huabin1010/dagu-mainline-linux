@@ -26,13 +26,19 @@
 #include <string>
 #include <thread>
 #include <unistd.h>
-#include <vector>
+#include <cmath>
 
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif
 
 using namespace libcamera;
+
+/* Webcam contract for V4L2 apps (wemeet/WeChat/Chrome). SoftISP stays at
+ * skip 2×2 / 4×4; pack center-crops to 16:9 and scales here. 1296×976 and
+ * 1020×764 are not on xcast's size list, so S_FMT 640×480/1280×720 EBUSY. */
+static constexpr unsigned DAGU_WEBCAM_W = 1280;
+static constexpr unsigned DAGU_WEBCAM_H = 720;
 
 static void log(const char *fmt, ...)
 {
@@ -158,6 +164,7 @@ struct Pipe {
 	std::vector<std::unique_ptr<Request>> requests;
 	Stream *stream = nullptr;
 	unsigned w = 0, h = 0, stride = 0;
+	unsigned loop_w = DAGU_WEBCAM_W, loop_h = DAGU_WEBCAM_H;
 	uint32_t fourcc = 0;
 	bool rot180 = false;
 	/* s5kjn1 GBRG Debayer STORE is B,G,R in the same RG24 mmap where
@@ -326,46 +333,69 @@ static void rgb24_row_to_yuyv(const uint8_t *s, uint8_t *d, unsigned w, bool bgr
 	}
 }
 
-static void reverse_yuyv_row(uint8_t *d, unsigned w)
+static const uint8_t *preview_lut()
 {
-	for (unsigned x = 0; x < w / 2; x += 2) {
-		unsigned o = (w - 2 - x) * 2;
-		unsigned i = x * 2;
-		uint8_t y0 = d[i], u = d[i + 1], y1 = d[i + 2], v = d[i + 3];
-		d[i] = d[o + 2];
-		d[i + 1] = d[o + 1];
-		d[i + 2] = d[o];
-		d[i + 3] = d[o + 3];
-		d[o] = y1;
-		d[o + 1] = u;
-		d[o + 2] = y0;
-		d[o + 3] = v;
+	/* DebayerCpu dumps near-linear 8-bit (10-bit RAW in the low bits).
+	 * Snapshot GTK stretches it; wemeet paints YUYV as-is so indoor Y≈47
+	 * is a black preview. 4× preamp + sRGB is the IFE preview tone map. */
+	static uint8_t t[256];
+	static bool init;
+	if (!init) {
+		for (int i = 0; i < 256; i++) {
+			float x = std::min(1.f, (float)i * 4.f / 255.f);
+			float y = (x <= 0.0031308f) ? 12.92f * x
+						    : 1.055f * powf(x, 1.f / 2.4f) - 0.055f;
+			t[i] = (uint8_t)std::min(255, (int)(y * 255.f + 0.5f));
+		}
+		init = true;
 	}
+	return t;
 }
 
-static void rgb_rows_to_yuyv(const uint8_t *src, unsigned stride, unsigned w,
-			     unsigned h, unsigned bpp, int ri, int gi, int bi,
-			     uint8_t *dst, bool rot180)
+static void rgb_to_webcam_yuyv(const uint8_t *src, unsigned stride, unsigned sw,
+			       unsigned sh, unsigned bpp, int ri, int gi, int bi,
+			       uint8_t *dst, unsigned dw, unsigned dh, bool rot180)
 {
-	const bool rgb24 = (bpp == 3 && gi == 1 && (ri + bi) == 2);
-	for (unsigned row = 0; row < h; row++) {
-		unsigned sy = rot180 ? (h - 1 - row) : row;
-		const uint8_t *s = src + sy * stride;
-		uint8_t *d = dst + row * w * 2;
-		if (rgb24) {
-			rgb24_row_to_yuyv(s, d, w, ri == 2);
-			if (rot180)
-				reverse_yuyv_row(d, w);
-			continue;
-		}
-		for (unsigned col = 0; col < w; col += 2) {
-			const uint8_t *p0 = s + col * bpp;
-			const uint8_t *p1 = p0 + bpp;
-			put_yuyv(d + col * 2, p0[ri], p0[gi], p0[bi], p1[ri], p1[gi],
-				 p1[bi]);
-		}
+	unsigned crop_w, crop_h, x0, y0;
+	if (sw * dh >= sh * dw) {
+		crop_h = sh;
+		crop_w = sh * dw / dh;
+		if (crop_w > sw)
+			crop_w = sw;
+		x0 = (sw - crop_w) / 2;
+		y0 = 0;
+	} else {
+		crop_w = sw;
+		crop_h = sw * dh / dw;
+		if (crop_h > sh)
+			crop_h = sh;
+		x0 = 0;
+		y0 = (sh - crop_h) / 2;
+	}
+	crop_w &= ~1u;
+	const uint8_t *lut = preview_lut();
+	thread_local std::vector<uint8_t> rgbrow;
+	rgbrow.resize(dw * 3);
+	for (unsigned dy = 0; dy < dh; dy++) {
+		unsigned sy = y0 + dy * crop_h / dh;
+		if (sy >= sh)
+			sy = sh - 1;
 		if (rot180)
-			reverse_yuyv_row(d, w);
+			sy = sh - 1 - sy;
+		const uint8_t *row = src + sy * stride;
+		for (unsigned dx = 0; dx < dw; dx++) {
+			unsigned sx = x0 + dx * crop_w / dw;
+			if (sx >= sw)
+				sx = sw - 1;
+			if (rot180)
+				sx = sw - 1 - sx;
+			const uint8_t *p = row + sx * bpp;
+			uint8_t *o = rgbrow.data() + dx * 3;
+			o[0] = lut[p[ri]];
+			o[1] = lut[p[gi]];
+			o[2] = lut[p[bi]];
+		}
+		rgb24_row_to_yuyv(rgbrow.data(), dst + dy * dw * 2, dw, false);
 	}
 }
 
@@ -373,38 +403,65 @@ static void pack_yuyv(Pipe *p, FrameBuffer *buf, uint8_t *dst)
 {
 	const auto &planes = buf->planes();
 	if (p->fourcc == formats::NV12.fourcc()) {
+		thread_local std::vector<uint8_t> native;
+		native.resize(p->w * p->h * 2);
 		const uint8_t *y = plane_ptr(p, planes[0]);
 		if (planes.size() == 1) {
 			if (y)
 				nv12_to_yuyv(y, p->stride, y + p->stride * p->h, p->stride,
-					     p->w, p->h, dst);
-			return;
+					     p->w, p->h, native.data());
+		} else {
+			const uint8_t *uv = plane_ptr(p, planes[1]);
+			if (y && uv)
+				nv12_to_yuyv(y, p->stride, uv, p->stride, p->w, p->h,
+					     native.data());
 		}
-		const uint8_t *uv = plane_ptr(p, planes[1]);
-		if (y && uv)
-			nv12_to_yuyv(y, p->stride, uv, p->stride, p->w, p->h, dst);
+		/* Reuse RGB scaler by treating packed YUYV as fake 2-byte pixels is
+		 * wrong. Sample native YUYV macropixels into webcam. */
+		for (unsigned dy = 0; dy < p->loop_h; dy++) {
+			unsigned sy = dy * p->h / p->loop_h;
+			if (p->rot180)
+				sy = p->h - 1 - sy;
+			const uint8_t *srow = native.data() + sy * p->w * 2;
+			uint8_t *drow = dst + dy * p->loop_w * 2;
+			for (unsigned dx = 0; dx < p->loop_w; dx += 2) {
+				unsigned sx = (dx * p->w / p->loop_w) & ~1u;
+				if (p->rot180)
+					sx = (p->w - 2 - sx) & ~1u;
+				drow[dx * 2] = srow[sx * 2];
+				drow[dx * 2 + 1] = srow[sx * 2 + 1];
+				drow[dx * 2 + 2] = srow[sx * 2 + 2];
+				drow[dx * 2 + 3] = srow[sx * 2 + 3];
+			}
+		}
 		return;
 	}
 
 	const uint8_t *src = plane_ptr(p, planes[0]);
 	if (!src)
 		return;
-	if (p->fourcc == fcc4('R', 'G', '2', '4'))
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 3,
-				 p->bgr ? 2 : 0, 1, p->bgr ? 0 : 2, dst, p->rot180);
-	else if (p->fourcc == fcc4('B', 'G', '2', '4'))
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 3, 2, 1, 0, dst, p->rot180);
-	else if (p->fourcc == fcc4('A', 'B', '2', '4') ||
-		 p->fourcc == fcc4('X', 'B', '2', '4'))
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 4, 0, 1, 2, dst, p->rot180);
-	else if (p->fourcc == fcc4('A', 'R', '2', '4') ||
-		 p->fourcc == fcc4('X', 'R', '2', '4') ||
-		 p->fourcc == fcc4('B', 'A', '2', '4'))
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 4, 2, 1, 0, dst, p->rot180);
-	else if (p->fourcc == fcc4('R', 'A', '2', '4'))
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 4, 0, 1, 2, dst, p->rot180);
-	else
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 3, 0, 1, 2, dst, p->rot180);
+	int ri = 0, gi = 1, bi = 2;
+	unsigned bpp = 3;
+	if (p->fourcc == fcc4('R', 'G', '2', '4')) {
+		ri = p->bgr ? 2 : 0;
+		bi = p->bgr ? 0 : 2;
+	} else if (p->fourcc == fcc4('B', 'G', '2', '4')) {
+		ri = 2;
+		bi = 0;
+	} else if (p->fourcc == fcc4('A', 'B', '2', '4') ||
+		   p->fourcc == fcc4('X', 'B', '2', '4')) {
+		bpp = 4;
+	} else if (p->fourcc == fcc4('A', 'R', '2', '4') ||
+		   p->fourcc == fcc4('X', 'R', '2', '4') ||
+		   p->fourcc == fcc4('B', 'A', '2', '4')) {
+		bpp = 4;
+		ri = 2;
+		bi = 0;
+	} else if (p->fourcc == fcc4('R', 'A', '2', '4')) {
+		bpp = 4;
+	}
+	rgb_to_webcam_yuyv(src, p->stride, p->w, p->h, bpp, ri, gi, bi, dst,
+			   p->loop_w, p->loop_h, p->rot180);
 }
 
 static void apply_preview_ctrls(Pipe *p, Request *req)
@@ -412,14 +469,15 @@ static void apply_preview_ctrls(Pipe *p, Request *req)
 	if (!p->camera)
 		return;
 	const ControlInfoMap &infos = p->camera->controls();
-	/* Simple pipeline has no FrameDurationLimits. Uncapped AE was ~11 fps
-	 * indoors (long exposure). Pin shutter so skip preview holds 30 fps. */
+	/* IPASoft AnalogueGain is the sensor code (imx596 0–960), not 1.0–16.0.
+	 * 8.0 left PGA at ~1×; wemeet mmap Y≈47. No sensor helper, so AGC
+	 * does not ramp — pin CamX 16× and 30 fps shutter. */
 	if (infos.find(&controls::AeEnable) != infos.end())
 		req->controls().set(controls::AeEnable, false);
 	if (infos.find(&controls::ExposureTime) != infos.end())
-		req->controls().set(controls::ExposureTime, 16000);
+		req->controls().set(controls::ExposureTime, 33000);
 	if (infos.find(&controls::AnalogueGain) != infos.end())
-		req->controls().set(controls::AnalogueGain, 8.0f);
+		req->controls().set(controls::AnalogueGain, 960.0f);
 }
 
 static void on_complete(Pipe *p, Request *req)
@@ -436,8 +494,20 @@ static int open_loop(Pipe *p, unsigned w, unsigned h)
 		log("open %s: %m", p->dev.c_str());
 		return -1;
 	}
-	if (set_loop_yuyv(p->loop_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, w, h) < 0)
+	p->loop_w = w;
+	p->loop_h = h;
+	v4l2_format cap{};
+	cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	if (ioctl(p->loop_fd, VIDIOC_G_FMT, &cap) == 0 && cap.fmt.pix.width >= 2 &&
+	    cap.fmt.pix.height >= 2 && cap.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV) {
+		p->loop_w = cap.fmt.pix.width;
+		p->loop_h = cap.fmt.pix.height;
+	} else if (set_loop_yuyv(p->loop_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, w, h) < 0) {
 		log("S_FMT %s: %m", p->dev.c_str());
+		return -1;
+	}
+	if (set_loop_yuyv(p->loop_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, p->loop_w, p->loop_h) < 0)
+		log("S_FMT output %s %ux%u: %m", p->dev.c_str(), p->loop_w, p->loop_h);
 	s_ctrl(p->loop_fd, 0x0098f900, 1);
 	s_ctrl(p->loop_fd, 0x0098f902, 400);
 	return 0;
@@ -520,7 +590,7 @@ static int start_camera(Pipe *p, unsigned want_w, unsigned want_h)
 static void pipe_thread(Pipe *p)
 {
 	dagu_pin_cpu_0_3();
-	std::vector<uint8_t> yuyv(p->w * p->h * 2);
+	std::vector<uint8_t> yuyv(p->loop_w * p->loop_h * 2);
 	unsigned frames = 0;
 	unsigned long pack_us = 0;
 	auto t0 = std::chrono::steady_clock::now();
@@ -553,15 +623,21 @@ static void pipe_thread(Pipe *p)
 					log("write %s: %m", p->dev.c_str());
 				frames++;
 				if (frames == 1) {
-					log("first frame %s -> %s", p->id.c_str(), p->dev.c_str());
+					log("first frame %s -> %s %ux%u", p->id.c_str(),
+					    p->dev.c_str(), p->loop_w, p->loop_h);
 					dagu_pin_all_threads();
 				}
 				if ((frames % 60) == 0) {
 					auto t1 = std::chrono::steady_clock::now();
 					double s = std::chrono::duration<double>(t1 - t0).count();
+					auto gain = req->metadata().get(controls::AnalogueGain);
+					auto exp = req->metadata().get(controls::ExposureTime);
 					if (s > 0.2)
-						log("%s fps %.1f pack=%.1fms", p->dev.c_str(),
-						    60.0 / s, pack_us / 60.0 / 1000.0);
+						log("%s fps %.1f pack=%.1fms gain=%s exp=%s",
+						    p->dev.c_str(), 60.0 / s,
+						    pack_us / 60.0 / 1000.0,
+						    gain ? std::to_string(*gain).c_str() : "-",
+						    exp ? std::to_string(*exp).c_str() : "-");
 					t0 = t1;
 					pack_us = 0;
 				}
@@ -615,7 +691,7 @@ int dagu_pipe_start(int slot, const char *camera_id, const char *loopback_dev,
 		pipe_teardown(p);
 		return -1;
 	}
-	if (open_loop(p, p->w, p->h) < 0) {
+	if (open_loop(p, DAGU_WEBCAM_W, DAGU_WEBCAM_H) < 0) {
 		pipe_teardown(p);
 		return -1;
 	}

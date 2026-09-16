@@ -6,7 +6,9 @@
  *   L0/gpio8=MISO L1/gpio9=MOSI L2/gpio10=SCLK L3/gpio11=CS,
  * IRQ GPIO39, RST GPIO100 (owned by the panel), 1600×2560.
  *
- * Bus is spi-gpio on those pads: GENI SE MMIO hangs this QHEE.
+ * Bus is spi-gpio on those pads by default: GENI SE MMIO without
+ * per-SE IRAM + skip-wrapper hangs this QHEE. FIFO experiment is
+ * DAGU_GENI_SPI_EXPERIMENT=1 only (no GPI DMA).
  *
  * Protocol from CAF hxchipset himax_platform.c / himax_ic_HX83121.c:
  *   spi->mode = SPI_MODE_3 (DT spi-cpha is overridden in the factory probe)
@@ -18,7 +20,9 @@
  * then a new tracking ID — GNOME OSK then types one letter per glitch.
  */
 
+#include <linux/cpufreq.h>
 #include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/input/touchscreen.h>
@@ -27,6 +31,8 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/pm_qos.h>
 #include <linux/spi/spi.h>
 #include <linux/workqueue.h>
 
@@ -40,20 +46,103 @@
 #define HIMAX_TOUCHSCREEN_RATIO	8
 #define HIMAX_IRQ_DRAIN		8
 #define HIMAX_LIFT_MS		80
+#define HIMAX_BOOST_MS		180
+#define HIMAX_CPU_SILVER_HOLD	1248000
+#define HIMAX_CPU_GOLD_HOLD	1766400
+#define HIMAX_CPU_PRIME_HOLD	1977600
+#define HIMAX_GPU_HOLD_KHZ	670000
 
 struct himax_dagu {
 	struct spi_device *spi;
 	struct input_dev *input;
 	struct delayed_work irq_work;
 	struct delayed_work lift_work;
+	struct delayed_work boost_work;
 	struct mutex lock;
+	struct freq_qos_request qos_silver;
+	struct freq_qos_request qos_gold;
+	struct freq_qos_request qos_prime;
+	struct dev_pm_qos_request qos_gpu;
+	struct device *gpu;
 	u32 max_x;
 	u32 max_y;
 	u8 xfer[HIMAX_BUS_R_HLEN + HIMAX_EVENT_LEN];
 	u8 empty_streak;
 	bool fingers_down;
+	bool boost_on;
+	bool qos_ready;
 	unsigned long lift_deadline;
 };
+
+static int himax_qos_add_cpu(struct freq_qos_request *req, unsigned int cpu,
+			     unsigned int khz)
+{
+	struct cpufreq_policy *policy;
+	int ret;
+
+	policy = cpufreq_cpu_get(cpu);
+	if (!policy)
+		return -ENODEV;
+	ret = freq_qos_add_request(&policy->constraints, req, FREQ_QOS_MIN, khz);
+	cpufreq_cpu_put(policy);
+	return ret;
+}
+
+static void himax_qos_init(struct himax_dagu *ts)
+{
+	ts->gpu = bus_find_device_by_name(&platform_bus_type, NULL,
+					  "3d00000.gpu");
+	if (ts->gpu &&
+	    dev_pm_qos_add_request(ts->gpu, &ts->qos_gpu,
+				   DEV_PM_QOS_MIN_FREQUENCY, 0)) {
+		put_device(ts->gpu);
+		ts->gpu = NULL;
+	}
+	/* Extra vote of 0 until a finger is down — do not pin idle floors. */
+	if (himax_qos_add_cpu(&ts->qos_silver, 0, 0))
+		return;
+	himax_qos_add_cpu(&ts->qos_gold, 4, 0);
+	himax_qos_add_cpu(&ts->qos_prime, 7, 0);
+	ts->qos_ready = true;
+}
+
+static void himax_boost_apply(struct himax_dagu *ts, bool on)
+{
+	if (!ts->qos_ready || on == ts->boost_on)
+		return;
+	ts->boost_on = on;
+	if (freq_qos_request_active(&ts->qos_silver))
+		freq_qos_update_request(&ts->qos_silver,
+					on ? HIMAX_CPU_SILVER_HOLD : 0);
+	if (freq_qos_request_active(&ts->qos_gold))
+		freq_qos_update_request(&ts->qos_gold,
+					on ? HIMAX_CPU_GOLD_HOLD : 0);
+	if (freq_qos_request_active(&ts->qos_prime))
+		freq_qos_update_request(&ts->qos_prime,
+					on ? HIMAX_CPU_PRIME_HOLD : 0);
+	if (ts->gpu)
+		dev_pm_qos_update_request(&ts->qos_gpu,
+					  on ? HIMAX_GPU_HOLD_KHZ : 0);
+}
+
+static void himax_boost_workfn(struct work_struct *work)
+{
+	struct himax_dagu *ts = container_of(to_delayed_work(work),
+					     struct himax_dagu, boost_work);
+
+	himax_boost_apply(ts, false);
+}
+
+static void himax_boost_touch(struct himax_dagu *ts, bool down)
+{
+	if (down) {
+		cancel_delayed_work(&ts->boost_work);
+		himax_boost_apply(ts, true);
+	} else {
+		mod_delayed_work(system_wq, &ts->boost_work,
+				 msecs_to_jiffies(HIMAX_BOOST_MS));
+	}
+}
 
 static int himax_bus_read(struct himax_dagu *ts, u8 cmd, u8 *buf, u32 len)
 {
@@ -155,6 +244,7 @@ static void himax_lift_workfn(struct work_struct *work)
 	}
 	himax_lift_unlocked(ts);
 	mutex_unlock(&ts->lock);
+	himax_boost_touch(ts, false);
 }
 
 static void himax_report(struct himax_dagu *ts, const u8 *buf)
@@ -176,6 +266,7 @@ static void himax_report(struct himax_dagu *ts, const u8 *buf)
 		cancel_delayed_work(&ts->lift_work);
 		himax_lift_unlocked(ts);
 		mutex_unlock(&ts->lock);
+		himax_boost_touch(ts, false);
 		return;
 	}
 
@@ -209,6 +300,7 @@ static void himax_report(struct himax_dagu *ts, const u8 *buf)
 		cancel_delayed_work(&ts->lift_work);
 	}
 	mutex_unlock(&ts->lock);
+	himax_boost_touch(ts, ts->fingers_down);
 }
 
 static irqreturn_t himax_irq(int irq, void *data)
@@ -264,6 +356,8 @@ static int himax_probe(struct spi_device *spi)
 	mutex_init(&ts->lock);
 	INIT_DELAYED_WORK(&ts->irq_work, himax_enable_irq);
 	INIT_DELAYED_WORK(&ts->lift_work, himax_lift_workfn);
+	INIT_DELAYED_WORK(&ts->boost_work, himax_boost_workfn);
+	himax_qos_init(ts);
 	/* CAF himax_chip_common_probe: spi->mode = SPI_MODE_3, not DT CPHA. */
 	spi->mode = SPI_MODE_3;
 	spi->bits_per_word = 8;
@@ -349,6 +443,19 @@ static void himax_remove(struct spi_device *spi)
 		return;
 	cancel_delayed_work_sync(&ts->irq_work);
 	cancel_delayed_work_sync(&ts->lift_work);
+	cancel_delayed_work_sync(&ts->boost_work);
+	himax_boost_apply(ts, false);
+	if (freq_qos_request_active(&ts->qos_silver))
+		freq_qos_remove_request(&ts->qos_silver);
+	if (freq_qos_request_active(&ts->qos_gold))
+		freq_qos_remove_request(&ts->qos_gold);
+	if (freq_qos_request_active(&ts->qos_prime))
+		freq_qos_remove_request(&ts->qos_prime);
+	if (ts->gpu) {
+		dev_pm_qos_remove_request(&ts->qos_gpu);
+		put_device(ts->gpu);
+		ts->gpu = NULL;
+	}
 }
 
 static const struct of_device_id himax_of_match[] = {

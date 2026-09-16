@@ -63,10 +63,14 @@ rm -f "$ROOTFS/etc/systemd/system/multi-user.target.wants/dagu-usb-rndis.service
 
 echo "==> rootfs-desktop-setup.sh (GNOME + UCM + tablet session)"
 chroot_mount
+rm -rf "$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback"
+cp -a "$ROOT/userspace" "$ROOTFS/tmp/dagu-userspace"
+cp -a "$ROOT/camera-loopback" "$ROOTFS/tmp/dagu-camera-loopback"
 install -m 755 "$ROOT/scripts/rootfs-desktop-setup.sh" "$ROOTFS/tmp/rootfs-desktop-setup.sh"
 chroot "$ROOTFS" env ROOT_PASSWORD="$PASS" SUITE="$SUITE" MIRROR="$MIRROR" \
 	/bin/bash /tmp/rootfs-desktop-setup.sh
-rm -f "$ROOTFS/tmp/rootfs-desktop-setup.sh"
+rm -rf "$ROOTFS/tmp/rootfs-desktop-setup.sh" \
+	"$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback"
 
 # Public image: no builder SSH keys, new machine-id on first boot.
 rm -rf "$ROOTFS/root/.ssh"

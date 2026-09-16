@@ -1,8 +1,10 @@
 CXX ?= g++
 RUSTC ?= rustc
 PREFIX ?= /usr/local
-CXXFLAGS ?= -O2 -std=c++17 -fPIC -pthread -I/usr/include/libcamera
-LDFLAGS ?= -lcamera -lcamera-base -lstdc++ -pthread
+PKG_CFLAGS := $(shell pkg-config --cflags libcamera 2>/dev/null)
+PKG_LIBS := $(shell pkg-config --libs libcamera 2>/dev/null)
+CXXFLAGS ?= -O2 -std=c++17 -fPIC -pthread $(or $(PKG_CFLAGS),-I/usr/include/libcamera)
+LDFLAGS ?= $(or $(PKG_LIBS),-lcamera -lcamera-base) -lstdc++ -pthread
 
 .PHONY: all install clean
 
@@ -22,7 +24,8 @@ dagu-camera-loopback: libdagu_cam.a src/main.rs
 		-C link-arg=-lstdc++ -C link-arg=-pthread
 
 install: dagu-camera-loopback
-	install -m755 dagu-camera-loopback $(PREFIX)/sbin/dagu-camera-loopback
+	install -d $(DESTDIR)$(PREFIX)/sbin
+	install -m755 dagu-camera-loopback $(DESTDIR)$(PREFIX)/sbin/dagu-camera-loopback
 
 clean:
 	rm -f dagu_cam.o libdagu_cam.a dagu-camera-loopback

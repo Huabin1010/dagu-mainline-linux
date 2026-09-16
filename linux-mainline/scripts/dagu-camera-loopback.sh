@@ -1,4 +1,8 @@
 #!/bin/sh
+# LAB ONLY. Product images must ship the Rust+C++ ELF
+# /usr/local/sbin/dagu-camera-loopback — never this script under that name.
+# Python fd walk + gst videoconvert froze mutter. Do not install.
+#
 # Push libcamera SoftISP NV12 into v4l2loopback /dev/video20 (front) and
 # /dev/video21 (rear) **on demand**. No app → no gst, no CAMSS STREAMON.
 # PipeWire must not monitor spa-libcamera: Chrome would CPU-debayer 12MP

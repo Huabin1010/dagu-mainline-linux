@@ -17,6 +17,9 @@ const FRONT_W: u32 = 1296;
 const FRONT_H: u32 = 976;
 const REAR_W: u32 = 1020;
 const REAR_H: u32 = 764;
+/* xcast / Qt v4l2 reject 1296×976. SoftISP still skip-sizes; pack scales. */
+const LOOP_W: u32 = 1280;
+const LOOP_H: u32 = 720;
 const RESET: &str = "/usr/local/sbin/dagu-camss-graph-reset.sh";
 const BIN: &str = "/usr/local/sbin/dagu-camera-loopback";
 
@@ -48,14 +51,11 @@ fn comm(pid: &str) -> String {
         .to_string()
 }
 
-fn is_camera_client(name: &str) -> bool {
-    name == "pipewire"
-        || name == "pipewire-pulse"
-        || name.starts_with("snapshot")
-        || name.starts_with("chrome")
-        || name.starts_with("chromium")
-        || name == "firefox"
-        || name.starts_with("WebKit")
+fn skip_fd_scan(name: &str) -> bool {
+    /* Producer holds OUTPUT on the same node. Cursor's fd table is huge
+     * and walking it at poll rate froze mutter. Everyone else (wemeetapp,
+     * wechat, pipewire, snapshot) is a real consumer. */
+    name.starts_with("dagu-camera") || name.starts_with("cursor") || name.starts_with("Cursor")
 }
 
 fn pid_holds(pid: &str, dev: &str) -> bool {
@@ -87,7 +87,7 @@ fn holds(dev: &str, skip_pid: u32) -> bool {
             continue;
         }
         let name = comm(pid);
-        if !is_camera_client(&name) {
+        if skip_fd_scan(&name) {
             continue;
         }
         if pid_holds(pid, dev) {
@@ -166,9 +166,9 @@ fn ensure_slot(slot: i32, kids: &mut [Option<Child>; 2]) {
         kill_child(&mut kids[other]);
         camss_reset();
         if slot == 0 {
-            stamp(REAR_DEV, REAR_W, REAR_H);
+            stamp(REAR_DEV, LOOP_W, LOOP_H);
         } else {
-            stamp(FRONT_DEV, FRONT_W, FRONT_H);
+            stamp(FRONT_DEV, LOOP_W, LOOP_H);
         }
     }
     if child_alive(&mut kids[me]) {
@@ -184,9 +184,9 @@ fn watch() -> ! {
         dagu_pin_cpu_0_3();
     }
     /* Do not restart WirePlumber here. Killing it drops Snapshot's PW target. */
-    stamp(FRONT_DEV, FRONT_W, FRONT_H);
-    stamp(REAR_DEV, REAR_W, REAR_H);
-    eprintln!("dagu-camera-loopback: rust watch on CPU 0-3 (SoftISP in child, SIGKILL on idle)");
+    stamp(FRONT_DEV, LOOP_W, LOOP_H);
+    stamp(REAR_DEV, LOOP_W, LOOP_H);
+    eprintln!("dagu-camera-loopback: rust watch YUYV {LOOP_W}x{LOOP_H} (SoftISP child, SIGKILL on idle)");
 
     let mut kids: [Option<Child>; 2] = [None, None];
     let mut idle_since: Option<Instant> = None;
@@ -215,8 +215,8 @@ fn watch() -> ! {
                 kill_child(&mut kids[1]);
                 if had || hw {
                     camss_reset();
-                    stamp(FRONT_DEV, FRONT_W, FRONT_H);
-                    stamp(REAR_DEV, REAR_W, REAR_H);
+                    stamp(FRONT_DEV, LOOP_W, LOOP_H);
+                    stamp(REAR_DEV, LOOP_W, LOOP_H);
                     eprintln!("dagu-camera-loopback: idle, CAMSS graph reset");
                     hw = false;
                 }

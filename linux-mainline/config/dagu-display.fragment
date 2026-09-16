@@ -104,8 +104,8 @@ CONFIG_SERIAL_QCOM_GENI=y
 CONFIG_SERIAL_DEV_BUS=y
 CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
 
-# Speakers: CS35L41 on i2c-gpio (SE1 gpio4/5, SE3 gpio119/120). Do not turn
-# on I2C_QCOM_GENI — geni_load_se_firmware / geni_se_init hang this QHEE.
+# Speakers: CS35L41 on i2c-gpio (SE1 gpio4/5, SE3 gpio119/120).
+# I2C_QCOM_GENI only via DAGU_GENI_SE_EXPERIMENT=1 (per-SE IRAM, skip wrapper).
 # Playback/capture go through ADSP Q6 (adsp.mbn from modem_a).
 CONFIG_I2C=y
 CONFIG_I2C_ALGOBIT=y

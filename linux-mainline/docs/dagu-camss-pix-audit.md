@@ -4,11 +4,21 @@ Date: 2026-09-16.
 Tree: `linux-mainline/linux/drivers/media/platform/qcom/camss/` (live compile tree, not committed).  
 Question: can Viewfinder leave `DebayerCpu` and take IFE PIX NV12 on this SoC?
 
-## Verdict: no-go
+## Verdict: Linux no-go (Android PIX is proven)
 
-Mainline `qcom-camss` on SM8250 is **CSIPHY + CSID + VFE RDI** (RAW dump to memory). There is **no product PIX/ISP path** that writes YUV/NV12. Android preview IFE 3A/3DNR is CamX, not a Kconfig.
+Mainline `qcom-camss` on SM8250 is still **CSIPHY + CSID + VFE RDI** only. That is a Linux gap, not a hardware gap.
 
-Do **not** okay `&cdsp` to “fix” this. Hexagon cannot replace IFE. Keep rear D-PHY `0x0114=0x0300` skip 4×4 and front skip 2×2.
+HyperOS rear preview on 53dcc70 (Magisk, 2026-09-16) runs **Titan 480 IFE PIX**, not CPU SoftISP:
+
+- VFE1 CAMIF ver3 SOF/EOF/EPOCH (`reg_update` `0x41` @ `0x34`)
+- BUS WM4/WM5 **DISP Y/C** `en_cfg=0x1` (`MODE_QCOM_PLAIN`) **1920×1080 / 1920×540 UBWC**
+- WM23 RDI0 stays on for ZSL RAW (`en_cfg=0x10001` `MODE_MIPI_RAW`)
+- CSID1 + IFE1 IRQs live; IFE0 idle
+- CamX graph name `RealTimeFeatureZSLPreviewRaw` (IFE + IPE). `com.qti.feature2.softispprocess.so` is on the filesystem and is not this path
+
+Dump: `dumps/dagu-android-live/camera-ife-20260916/INDEX.txt`. `/dev/mem` MMIO is `STRICT_DEVMEM` ENODEV; CLC (demux/demosaic/MNDS21) is still CamX CDM, not a kernel table.
+
+Do **not** okay `&cdsp` to “fix” this. Hexagon cannot replace IFE. Keep rear D-PHY `0x0114=0x0300` skip 4×4 and front skip 2×2 until Linux PIX NV12 is proven. Do **not** `STREAMON` PIX with BUS DISP alone — missing CLC hangs CAMNOC.
 
 ## Evidence in the live tree
 
@@ -61,4 +71,11 @@ Default remains `status = "disabled"`. Open only when PAS auth works **and** the
 
 ## Revisit trigger
 
-A later mainline `vfe_ops` that programs IFE PIX NV12 **without** CamX, proven on this board with skip-aligned full FOV, would reopen the PIX path. Until then this note is the go/no-go record.
+Linux `vfe_ops_480` must program, without CamX blobs:
+
+1. CSID1 IPP (`pxl_cfg0` `0x200`, D-PHY 4-lane, no C-PHY)
+2. CAMIF `0x2660` + `reg_update` `0x41`
+3. CLC demux13 + demosaic34 + MNDS21 to 1920×1080 (offsets still from dump/reverse, not guessed)
+4. BUS WM4/WM5 DISP Y/C **linear** NV12 (`en_cfg=0x1`, no UBWC)
+
+Proven on B slot: NV12 frames, skip-aligned full FOV, `g_serial` `0525:a4a7` >30s, CSID SOT still masked. Until then DebayerCpu remains the flight preview.

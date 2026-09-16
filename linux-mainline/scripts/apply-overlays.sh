@@ -2966,6 +2966,33 @@ if "gcfg.slot_mask = 0xFF" in text:
     path.write_text(text)
     print(f"patched {path}: TDM GROUP 4-slot mask")
 
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+marker = "dagu: GROUP bit_width is sample width, not slot_width"
+if marker not in text:
+    old = """		gcfg.num_channels = tdm->nslots_per_frame ?: 4;
+		gcfg.sample_rate = tdm->sample_rate;
+		gcfg.bit_width = tdm->slot_width ?: 32;
+		gcfg.nslots_per_frame = tdm->nslots_per_frame ?: 4;
+		gcfg.slot_width = tdm->slot_width ?: 32;
+"""
+    new = """		gcfg.num_channels = tdm->nslots_per_frame ?: 4;
+		gcfg.sample_rate = tdm->sample_rate;
+		/*
+		 * dagu: GROUP bit_width is sample width, not slot_width.
+		 * Android TERT_TDM_RX_0 is S24_LE in 32-bit slots. Using
+		 * slot_width (32) here made ADSP treat S24_LE DMA words as
+		 * 32-bit samples — 8 MSB zeros ≈ -48 dB at "full" volume.
+		 */
+		gcfg.bit_width = tdm->bit_width ?: 24;
+		gcfg.nslots_per_frame = tdm->nslots_per_frame ?: 4;
+		gcfg.slot_width = tdm->slot_width ?: 32;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: TDM GROUP bit_width needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
 # SM8250 VFE puts the CAMNOC RCG rates on camnoc_axi_src, but
 # vfe_match_clock_names() only matches camnoc_axi (a branch with rate {0}).
 # Without ICC the RCG stays parked at XO 19.2 MHz and RDI DMA never completes.

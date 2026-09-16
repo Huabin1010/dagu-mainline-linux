@@ -6,7 +6,7 @@ After=systemd-modules-load.service
 Type=simple
 ExecStart=/usr/local/sbin/dagu-camera-loopback watch
 ExecStopPost=/usr/local/sbin/dagu-camss-graph-reset.sh
-CPUAffinity=0-3
+CPUAffinity=0-5
 Restart=always
 RestartSec=2
 

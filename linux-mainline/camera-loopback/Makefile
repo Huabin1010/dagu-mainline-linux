@@ -9,7 +9,7 @@ LDFLAGS ?= -lcamera -lcamera-base -lstdc++ -pthread
 all: dagu-camera-loopback
 
 dagu_cam.o: cpp/dagu_cam.cpp cpp/dagu_cam.h
-	$(CXX) $(CXXFLAGS) -c cpp/dagu_cam.cpp -o dagu_cam.o
+	$(CXX) $(CXXFLAGS) -O3 -c cpp/dagu_cam.cpp -o dagu_cam.o
 
 libdagu_cam.a: dagu_cam.o
 	ar rcs libdagu_cam.a dagu_cam.o

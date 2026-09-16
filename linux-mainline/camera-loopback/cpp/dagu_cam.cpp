@@ -3,14 +3,19 @@
 
 #include <libcamera/libcamera.h>
 #include <libcamera/framebuffer_allocator.h>
+#include <libcamera/control_ids.h>
 
 #include <cstdarg>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <array>
+#include <cerrno>
 #include <chrono>
+#include <unordered_map>
 #include <condition_variable>
+#include <deque>
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/videodev2.h>
@@ -22,6 +27,10 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 using namespace libcamera;
 
@@ -47,10 +56,15 @@ void dagu_pin_cpu_0_3(void)
 
 void dagu_pin_all_threads(void)
 {
-	cpu_set_t set;
-	CPU_ZERO(&set);
+	/* DebayerCpu skip 2x2/4x4 needs A77. Little-only was ~11 fps.
+	 * Leave CPU 6-7 for mutter SCHED_DEADLINE. */
+	cpu_set_t little, big;
+	CPU_ZERO(&little);
+	CPU_ZERO(&big);
 	for (int i = 0; i < 4; i++)
-		CPU_SET(i, &set);
+		CPU_SET(i, &little);
+	CPU_SET(4, &big);
+	CPU_SET(5, &big);
 	DIR *d = opendir("/proc/self/task");
 	if (!d)
 		return;
@@ -58,7 +72,22 @@ void dagu_pin_all_threads(void)
 		if (e->d_name[0] < '0' || e->d_name[0] > '9')
 			continue;
 		int tid = atoi(e->d_name);
-		sched_setaffinity(tid, sizeof(set), &set);
+		char path[64];
+		snprintf(path, sizeof(path), "/proc/self/task/%d/comm", tid);
+		char name[32] = {};
+		FILE *f = fopen(path, "r");
+		if (f) {
+			if (!fgets(name, sizeof(name), f))
+				name[0] = 0;
+			fclose(f);
+		}
+		/* SWIspWorker is the DebayerCpu thread. Missing it left
+		 * skip-4x4 on A55 at 86ms/frame and starved the session. */
+		bool isp = strstr(name, "Camera") || strstr(name, "Debayer") ||
+			   strstr(name, "IPA") || strstr(name, "simple") ||
+			   strstr(name, "soft") || strstr(name, "SWIsp") ||
+			   strstr(name, "Isp");
+		sched_setaffinity(tid, sizeof(cpu_set_t), isp ? &big : &little);
 	}
 	closedir(d);
 }
@@ -131,13 +160,21 @@ struct Pipe {
 	unsigned w = 0, h = 0, stride = 0;
 	uint32_t fourcc = 0;
 	bool rot180 = false;
+	/* s5kjn1 GBRG Debayer STORE is B,G,R in the same RG24 mmap where
+	 * imx596 BGGR is R,G,B. RGB pack makes rear Coke/red go blue. */
+	bool bgr = false;
 	std::mutex mu;
 	std::condition_variable cv;
-	Request *ready = nullptr;
+	std::deque<Request *> done;
 	bool stop = false;
 	std::thread th;
 	int loop_fd = -1;
 	std::string id, dev;
+	struct Map {
+		void *ptr = MAP_FAILED;
+		size_t len = 0;
+	};
+	std::unordered_map<int, Map> fdmap;
 };
 
 static CameraManager *g_cm;
@@ -153,23 +190,32 @@ static CameraManager *cm()
 	return g_cm;
 }
 
-static void yuyv_rot180(uint8_t *f, unsigned w, unsigned h)
+static const uint8_t *plane_ptr(Pipe *p, const FrameBuffer::Plane &pl)
 {
-	const unsigned stride = w * 2;
-	std::vector<uint8_t> tmp(stride * h);
-	std::memcpy(tmp.data(), f, tmp.size());
-	for (unsigned y = 0; y < h; y++) {
-		const uint8_t *src_row = tmp.data() + (h - 1 - y) * stride;
-		uint8_t *dst_row = f + y * stride;
-		for (unsigned x = 0; x < w; x += 2) {
-			const uint8_t *s = src_row + (w - 2 - x) * 2;
-			uint8_t *d = dst_row + x * 2;
-			d[0] = s[2];
-			d[1] = s[1];
-			d[2] = s[0];
-			d[3] = s[3];
-		}
+	int fd = pl.fd.get();
+	auto it = p->fdmap.find(fd);
+	if (it == p->fdmap.end()) {
+		void *m = mmap(nullptr, pl.length, PROT_READ, MAP_SHARED, fd, 0);
+		if (m == MAP_FAILED)
+			return nullptr;
+		Pipe::Map mp;
+		mp.ptr = m;
+		mp.len = pl.length;
+		it = p->fdmap.emplace(fd, mp).first;
 	}
+	unsigned off = pl.offset == FrameBuffer::Plane::kInvalidOffset ? 0 : pl.offset;
+	if (off >= it->second.len)
+		return nullptr;
+	return static_cast<const uint8_t *>(it->second.ptr) + off;
+}
+
+static void unmap_all(Pipe *p)
+{
+	for (auto &kv : p->fdmap) {
+		if (kv.second.ptr != MAP_FAILED)
+			munmap(kv.second.ptr, kv.second.len);
+	}
+	p->fdmap.clear();
 }
 
 static void nv12_to_yuyv(const uint8_t *y, unsigned y_stride, const uint8_t *uv,
@@ -214,102 +260,178 @@ static void put_yuyv(uint8_t *d, int r0, int g0, int b0, int r1, int g1, int b1)
 	d[3] = static_cast<uint8_t>(V);
 }
 
+/* DebayerCpu STORE_PIXEL is named BGR. Front BGGR skip-2×2 lands R,G,B
+ * in the RG24 mmap; rear GBRG skip-4×4 lands B,G,R. */
+static void rgb24_row_to_yuyv(const uint8_t *s, uint8_t *d, unsigned w, bool bgr)
+{
+	unsigned x = 0;
+#if defined(__aarch64__)
+	for (; x + 16 <= w; x += 16) {
+		uint8x16x3_t p = vld3q_u8(s + x * 3);
+		uint8x16_t r = bgr ? p.val[2] : p.val[0];
+		uint8x16_t g = p.val[1];
+		uint8x16_t b = bgr ? p.val[0] : p.val[2];
+		uint16x8_t rlo = vmovl_u8(vget_low_u8(r));
+		uint16x8_t glo = vmovl_u8(vget_low_u8(g));
+		uint16x8_t blo = vmovl_u8(vget_low_u8(b));
+		uint16x8_t rhi = vmovl_u8(vget_high_u8(r));
+		uint16x8_t ghi = vmovl_u8(vget_high_u8(g));
+		uint16x8_t bhi = vmovl_u8(vget_high_u8(b));
+		uint16x8_t ylo = vaddq_u16(
+			vshrq_n_u16(vaddq_u16(vaddq_u16(vmulq_n_u16(rlo, 66), vmulq_n_u16(glo, 129)),
+					      vaddq_u16(vmulq_n_u16(blo, 25), vdupq_n_u16(128))),
+				    8),
+			vdupq_n_u16(16));
+		uint16x8_t yhi = vaddq_u16(
+			vshrq_n_u16(vaddq_u16(vaddq_u16(vmulq_n_u16(rhi, 66), vmulq_n_u16(ghi, 129)),
+					      vaddq_u16(vmulq_n_u16(bhi, 25), vdupq_n_u16(128))),
+				    8),
+			vdupq_n_u16(16));
+		uint8x16_t yy = vcombine_u8(vqmovn_u16(ylo), vqmovn_u16(yhi));
+		const uint8x16_t even_idx = { 0, 2, 4, 6, 8, 10, 12, 14,
+					      0, 0, 0, 0, 0, 0, 0, 0 };
+		uint8x8_t re8 = vget_low_u8(vqtbl1q_u8(r, even_idx));
+		uint8x8_t ge8 = vget_low_u8(vqtbl1q_u8(g, even_idx));
+		uint8x8_t be8 = vget_low_u8(vqtbl1q_u8(b, even_idx));
+		int16x8_t re = vreinterpretq_s16_u16(vmovl_u8(re8));
+		int16x8_t ge = vreinterpretq_s16_u16(vmovl_u8(ge8));
+		int16x8_t be = vreinterpretq_s16_u16(vmovl_u8(be8));
+		int16x8_t u = vaddq_s16(
+			vshrq_n_s16(vaddq_s16(vaddq_s16(vmulq_n_s16(re, -38), vmulq_n_s16(ge, -74)),
+					      vaddq_s16(vmulq_n_s16(be, 112), vdupq_n_s16(128))),
+				    8),
+			vdupq_n_s16(128));
+		int16x8_t vv = vaddq_s16(
+			vshrq_n_s16(vaddq_s16(vaddq_s16(vmulq_n_s16(re, 112), vmulq_n_s16(ge, -94)),
+					      vaddq_s16(vmulq_n_s16(be, -18), vdupq_n_s16(128))),
+				    8),
+			vdupq_n_s16(128));
+		uint8x8_t ye = vget_low_u8(vuzp1q_u8(yy, yy));
+		uint8x8_t yo = vget_low_u8(vuzp2q_u8(yy, yy));
+		uint8x8x4_t out;
+		out.val[0] = ye;
+		out.val[1] = vqmovun_s16(u);
+		out.val[2] = yo;
+		out.val[3] = vqmovun_s16(vv);
+		vst4_u8(d + x * 2, out);
+	}
+#endif
+	for (; x + 1 < w; x += 2) {
+		const uint8_t *p0 = s + x * 3;
+		const uint8_t *p1 = p0 + 3;
+		if (bgr)
+			put_yuyv(d + x * 2, p0[2], p0[1], p0[0], p1[2], p1[1], p1[0]);
+		else
+			put_yuyv(d + x * 2, p0[0], p0[1], p0[2], p1[0], p1[1], p1[2]);
+	}
+}
+
+static void reverse_yuyv_row(uint8_t *d, unsigned w)
+{
+	for (unsigned x = 0; x < w / 2; x += 2) {
+		unsigned o = (w - 2 - x) * 2;
+		unsigned i = x * 2;
+		uint8_t y0 = d[i], u = d[i + 1], y1 = d[i + 2], v = d[i + 3];
+		d[i] = d[o + 2];
+		d[i + 1] = d[o + 1];
+		d[i + 2] = d[o];
+		d[i + 3] = d[o + 3];
+		d[o] = y1;
+		d[o + 1] = u;
+		d[o + 2] = y0;
+		d[o + 3] = v;
+	}
+}
+
 static void rgb_rows_to_yuyv(const uint8_t *src, unsigned stride, unsigned w,
 			     unsigned h, unsigned bpp, int ri, int gi, int bi,
-			     uint8_t *dst)
+			     uint8_t *dst, bool rot180)
 {
+	const bool rgb24 = (bpp == 3 && gi == 1 && (ri + bi) == 2);
 	for (unsigned row = 0; row < h; row++) {
-		const uint8_t *s = src + row * stride;
+		unsigned sy = rot180 ? (h - 1 - row) : row;
+		const uint8_t *s = src + sy * stride;
 		uint8_t *d = dst + row * w * 2;
+		if (rgb24) {
+			rgb24_row_to_yuyv(s, d, w, ri == 2);
+			if (rot180)
+				reverse_yuyv_row(d, w);
+			continue;
+		}
 		for (unsigned col = 0; col < w; col += 2) {
 			const uint8_t *p0 = s + col * bpp;
 			const uint8_t *p1 = p0 + bpp;
-			put_yuyv(d, p0[ri], p0[gi], p0[bi], p1[ri], p1[gi], p1[bi]);
-			d += 4;
+			put_yuyv(d + col * 2, p0[ri], p0[gi], p0[bi], p1[ri], p1[gi],
+				 p1[bi]);
 		}
+		if (rot180)
+			reverse_yuyv_row(d, w);
 	}
 }
 
 static void pack_yuyv(Pipe *p, FrameBuffer *buf, uint8_t *dst)
 {
 	const auto &planes = buf->planes();
-	auto map_plane = [&](unsigned i) -> const uint8_t * {
-		int fd = planes[i].fd.get();
-		unsigned off = planes[i].offset == FrameBuffer::Plane::kInvalidOffset
-				       ? 0
-				       : planes[i].offset;
-		void *m = mmap(nullptr, planes[i].length, PROT_READ, MAP_SHARED, fd, 0);
-		if (m == MAP_FAILED)
-			return nullptr;
-		return static_cast<const uint8_t *>(m) + off;
-	};
-	auto unmap_plane = [&](const uint8_t *base, unsigned i) {
-		if (!base)
-			return;
-		unsigned off = planes[i].offset == FrameBuffer::Plane::kInvalidOffset
-				       ? 0
-				       : planes[i].offset;
-		munmap(const_cast<uint8_t *>(base) - off, planes[i].length);
-	};
-
 	if (p->fourcc == formats::NV12.fourcc()) {
+		const uint8_t *y = plane_ptr(p, planes[0]);
 		if (planes.size() == 1) {
-			const uint8_t *src = map_plane(0);
-			if (src)
-				nv12_to_yuyv(src, p->stride, src + p->stride * p->h, p->stride,
+			if (y)
+				nv12_to_yuyv(y, p->stride, y + p->stride * p->h, p->stride,
 					     p->w, p->h, dst);
-			unmap_plane(src, 0);
 			return;
 		}
-		const uint8_t *y = map_plane(0);
-		const uint8_t *uv = planes.size() > 1 ? map_plane(1) : nullptr;
+		const uint8_t *uv = plane_ptr(p, planes[1]);
 		if (y && uv)
 			nv12_to_yuyv(y, p->stride, uv, p->stride, p->w, p->h, dst);
-		if (uv)
-			unmap_plane(uv, 1);
-		if (y)
-			unmap_plane(y, 0);
 		return;
 	}
 
-	const uint8_t *src = map_plane(0);
+	const uint8_t *src = plane_ptr(p, planes[0]);
 	if (!src)
 		return;
-	/* DRM 24-bit little-endian: RG24 stores B,G,R in memory. Treating
-	 * that as R,G,B swaps Coke red into blue and cools the whole frame. */
 	if (p->fourcc == fcc4('R', 'G', '2', '4'))
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 3, 2, 1, 0, dst);
+		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 3,
+				 p->bgr ? 2 : 0, 1, p->bgr ? 0 : 2, dst, p->rot180);
 	else if (p->fourcc == fcc4('B', 'G', '2', '4'))
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 3, 0, 1, 2, dst);
+		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 3, 2, 1, 0, dst, p->rot180);
 	else if (p->fourcc == fcc4('A', 'B', '2', '4') ||
 		 p->fourcc == fcc4('X', 'B', '2', '4'))
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 4, 0, 1, 2, dst);
+		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 4, 0, 1, 2, dst, p->rot180);
 	else if (p->fourcc == fcc4('A', 'R', '2', '4') ||
 		 p->fourcc == fcc4('X', 'R', '2', '4') ||
 		 p->fourcc == fcc4('B', 'A', '2', '4'))
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 4, 2, 1, 0, dst);
+		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 4, 2, 1, 0, dst, p->rot180);
 	else if (p->fourcc == fcc4('R', 'A', '2', '4'))
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 4, 0, 1, 2, dst);
-	else {
-		log("unhandled fourcc %.4s, packing as RG24 LE",
-		    reinterpret_cast<char *>(&p->fourcc));
-		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 3, 2, 1, 0, dst);
-	}
-	unmap_plane(src, 0);
+		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 4, 0, 1, 2, dst, p->rot180);
+	else
+		rgb_rows_to_yuyv(src, p->stride, p->w, p->h, 3, 0, 1, 2, dst, p->rot180);
+}
+
+static void apply_preview_ctrls(Pipe *p, Request *req)
+{
+	if (!p->camera)
+		return;
+	const ControlInfoMap &infos = p->camera->controls();
+	/* Simple pipeline has no FrameDurationLimits. Uncapped AE was ~11 fps
+	 * indoors (long exposure). Pin shutter so skip preview holds 30 fps. */
+	if (infos.find(&controls::AeEnable) != infos.end())
+		req->controls().set(controls::AeEnable, false);
+	if (infos.find(&controls::ExposureTime) != infos.end())
+		req->controls().set(controls::ExposureTime, 16000);
+	if (infos.find(&controls::AnalogueGain) != infos.end())
+		req->controls().set(controls::AnalogueGain, 8.0f);
 }
 
 static void on_complete(Pipe *p, Request *req)
 {
 	std::lock_guard<std::mutex> g(p->mu);
-	if (p->ready)
-		p->ready->reuse(Request::ReuseBuffers);
-	p->ready = req;
+	p->done.push_back(req);
 	p->cv.notify_one();
 }
 
 static int open_loop(Pipe *p, unsigned w, unsigned h)
 {
-	p->loop_fd = open(p->dev.c_str(), O_RDWR | O_CLOEXEC);
+	p->loop_fd = open(p->dev.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
 	if (p->loop_fd < 0) {
 		log("open %s: %m", p->dev.c_str());
 		return -1;
@@ -341,14 +463,14 @@ static int start_camera(Pipe *p, unsigned want_w, unsigned want_h)
 		return -1;
 	}
 	StreamConfiguration &sc = p->config->at(0);
-	sc.pixelFormat = formats::NV12;
+	sc.pixelFormat = formats::RGB888;
 	sc.size.width = want_w;
 	sc.size.height = want_h;
-	sc.bufferCount = 4;
+	sc.bufferCount = 6;
 	p->config->validate();
 	if (p->camera->configure(p->config.get())) {
-		log("configure NV12 failed, trying ABGR");
-		sc.pixelFormat = formats::ABGR8888;
+		log("configure RGB888 failed, trying NV12");
+		sc.pixelFormat = formats::NV12;
 		sc.size.width = want_w;
 		sc.size.height = want_h;
 		p->config->validate();
@@ -387,8 +509,10 @@ static int start_camera(Pipe *p, unsigned want_w, unsigned want_h)
 		log("camera start failed");
 		return -1;
 	}
-	for (auto &req : p->requests)
+	for (auto &req : p->requests) {
+		apply_preview_ctrls(p, req.get());
 		p->camera->queueRequest(req.get());
+	}
 	dagu_pin_all_threads();
 	return 0;
 }
@@ -398,36 +522,54 @@ static void pipe_thread(Pipe *p)
 	dagu_pin_cpu_0_3();
 	std::vector<uint8_t> yuyv(p->w * p->h * 2);
 	unsigned frames = 0;
+	unsigned long pack_us = 0;
+	auto t0 = std::chrono::steady_clock::now();
 	while (true) {
 		Request *req = nullptr;
 		{
 			std::unique_lock<std::mutex> lk(p->mu);
-			p->cv.wait_for(lk, std::chrono::milliseconds(500),
-				       [&] { return p->stop || p->ready; });
+		p->cv.wait_for(lk, std::chrono::milliseconds(500),
+			       [&] { return p->stop || !p->done.empty(); });
 			if (p->stop)
 				break;
-			req = p->ready;
-			p->ready = nullptr;
+			if (p->done.empty())
+				continue;
+			req = p->done.front();
+			p->done.pop_front();
 		}
 		if (!req)
 			continue;
 		if (req->status() == Request::RequestComplete) {
 			FrameBuffer *buf = req->findBuffer(p->stream);
 			if (buf && p->loop_fd >= 0) {
+				auto tp = std::chrono::steady_clock::now();
 				pack_yuyv(p, buf, yuyv.data());
-				if (p->rot180)
-					yuyv_rot180(yuyv.data(), p->w, p->h);
+				pack_us += (unsigned long)std::chrono::duration_cast<
+					std::chrono::microseconds>(
+					std::chrono::steady_clock::now() - tp)
+					.count();
 				ssize_t n = write(p->loop_fd, yuyv.data(), yuyv.size());
-				(void)n;
+				if (n < 0 && errno != EAGAIN && errno != EINTR)
+					log("write %s: %m", p->dev.c_str());
 				frames++;
-				if (frames == 1)
+				if (frames == 1) {
 					log("first frame %s -> %s", p->id.c_str(), p->dev.c_str());
+					dagu_pin_all_threads();
+				}
+				if ((frames % 60) == 0) {
+					auto t1 = std::chrono::steady_clock::now();
+					double s = std::chrono::duration<double>(t1 - t0).count();
+					if (s > 0.2)
+						log("%s fps %.1f pack=%.1fms", p->dev.c_str(),
+						    60.0 / s, pack_us / 60.0 / 1000.0);
+					t0 = t1;
+					pack_us = 0;
+				}
 			}
 		}
 		req->reuse(Request::ReuseBuffers);
+		apply_preview_ctrls(p, req);
 		p->camera->queueRequest(req);
-		if ((frames & 31) == 0)
-			dagu_pin_all_threads();
 	}
 }
 
@@ -450,8 +592,9 @@ static void pipe_teardown(Pipe *p)
 		close(p->loop_fd);
 		p->loop_fd = -1;
 	}
+	unmap_all(p);
 	p->stop = false;
-	p->ready = nullptr;
+	p->done.clear();
 	p->stream = nullptr;
 }
 
@@ -463,11 +606,11 @@ int dagu_pipe_start(int slot, const char *camera_id, const char *loopback_dev,
 	Pipe *p = &g_pipe[slot];
 	if (p->th.joinable())
 		return 0;
-	dagu_pin_cpu_0_3();
 	p->id = camera_id;
 	p->dev = loopback_dev;
 	p->stop = false;
 	p->rot180 = (slot == 0); /* imx596: loopback has no V4L2 rotation */
+	p->bgr = (slot == 1); /* s5kjn1 GBRG: RG24 bytes are B,G,R */
 	if (start_camera(p, w, h) < 0) {
 		pipe_teardown(p);
 		return -1;
@@ -477,8 +620,8 @@ int dagu_pipe_start(int slot, const char *camera_id, const char *loopback_dev,
 		return -1;
 	}
 	p->th = std::thread(pipe_thread, p);
-	log("start slot %d %s -> %s rot180=%d", slot, camera_id, loopback_dev,
-	    p->rot180 ? 1 : 0);
+	log("start slot %d %s -> %s rot180=%d bgr=%d", slot, camera_id,
+	    loopback_dev, p->rot180 ? 1 : 0, p->bgr ? 1 : 0);
 	return 0;
 }
 

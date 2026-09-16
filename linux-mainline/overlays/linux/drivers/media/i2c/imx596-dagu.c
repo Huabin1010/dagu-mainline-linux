@@ -54,8 +54,13 @@
 /* CamX preview 0x0202/0x0203. Indoor if too bright, drop back toward 0x0400. */
 #define IMX596_EXPOSURE_DEFAULT		0x1886
 #define IMX596_AGAIN_MIN		0
-/* Analog PGA 0..0x7f. Do not expose 12-bit 0x0fff — SoftISP AE saturates it. */
-#define IMX596_AGAIN_MAX		0x7f
+/*
+ * CamX 0x0204/0x0205 is Sony 10-bit analog: gain = 1024/(1024-code).
+ * Mode table 0x0020 ≈ 1.03×. 0x03C0 = 16× (IMX586/QBC family CamX max).
+ * 0x7f was a 7-bit PGA cap (1.14×) — indoor RAW sits on OB and SoftISP
+ * looks black vs Android IFE. 0x0fff is not analog (invalid for the law).
+ */
+#define IMX596_AGAIN_MAX		0x3c0
 #define IMX596_AGAIN_DEFAULT		0x20
 #define IMX596_REG_EXPOSURE		CCI_REG16(0x0202)
 #define IMX596_REG_AGAIN		CCI_REG16(0x0204)

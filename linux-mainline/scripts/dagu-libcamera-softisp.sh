@@ -25,6 +25,16 @@ for dest in /etc/libcamera /usr/share/libcamera; do
 		break
 	fi
 done
+IPA_SIMPLE="$ROOT/libcamera/ipa/simple"
+if [ -d "$IPA_SIMPLE" ]; then
+	mkdir -p /usr/share/libcamera/ipa/simple
+	for y in imx596.yaml s5kjn1.yaml; do
+		if [ -f "$IPA_SIMPLE/$y" ]; then
+			cp "$IPA_SIMPLE/$y" "/usr/share/libcamera/ipa/simple/$y"
+			log "installed /usr/share/libcamera/ipa/simple/$y (no gray-world Awb)"
+		fi
+	done
+fi
 
 insert_props() {
 	file=$1

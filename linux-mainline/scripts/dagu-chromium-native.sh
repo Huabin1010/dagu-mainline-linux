@@ -105,6 +105,9 @@ set -- --enable-features="$ENABLE_FEAT" "$@"
 if [ -n "$DISABLE_FEAT" ]; then
 	set -- --disable-features="$DISABLE_FEAT" "$@"
 fi
+# GNOME Wayland: mutter text-input-v3 → IBus (fcitx5). GTK_IM_MODULE=fcitx
+# plus --disable-gtk-ime leaves Chromium with no IME.
+unset GTK_IM_MODULE
 exec "$CHROME_BIN" \
 	--ozone-platform=wayland \
 	--ozone-platform-hint=wayland \

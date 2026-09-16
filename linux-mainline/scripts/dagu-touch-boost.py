@@ -36,7 +36,7 @@ CPU = (
 )
 
 HOLD_TAIL_S = 0.18
-VIDEO_SCAN_S = 0.12
+VIDEO_SCAN_S = 0.5
 SOFTISP_CPUS = frozenset({0, 1, 2, 3})
 ALL_CPUS = frozenset(range(os.cpu_count() or 8))
 # comm is TASK_COMM_LEN=16 including NUL → 15 chars.
@@ -135,12 +135,9 @@ def _has_venus_fd(pid: str) -> bool:
 
 def chrome_video_playing() -> bool:
     """True while Chromium/Chrome is in a Venus or video-compositor path."""
-    try:
-        pids = os.listdir("/proc")
-    except OSError:
-        return False
-    for pid in pids:
-        if not pid.isdigit():
+    for pid in _iter_pids():
+        comm = _comm(pid)
+        if not comm.startswith(("chrome", "chromium", "Chrome")):
             continue
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
@@ -196,11 +193,18 @@ def _has_softisp_thread(pid: str) -> bool:
     return False
 
 
-def camera_streaming() -> bool:
-    """True while Snapshot/cam/gst is up, or a SoftISP worker thread exists.
+def _is_softisp_proc(comm: str) -> bool:
+    return comm.startswith(("dagu-camera-lo", "gst-launch", "cam")) or comm in {
+        "snapshot",
+        "gnome-snapshot",
+    }
 
-    pipewire/wireplumber keep `/dev/video0` open for enumeration. That is
-    not STREAMON — do not boost or pin from the fd alone.
+
+def camera_streaming() -> bool:
+    """True while Snapshot/cam/gst is up, or the loopback child has SWIsp.
+
+    Do not walk every process's fd/task table. Cursor keeps thousands of
+    fds; doing that at 8 Hz starves mutter SCHED_DEADLINE.
     """
     for pid in _iter_pids():
         comm = _comm(pid)
@@ -208,7 +212,7 @@ def camera_streaming() -> bool:
             ("gst-launch", "gnome-snapsho")
         ):
             return True
-        if _has_softisp_thread(pid):
+        if comm.startswith("dagu-camera-lo") and _has_softisp_thread(pid):
             return True
         if _is_cam_comm(comm) and _has_fd(pid, LOOP_NODES):
             return True
@@ -220,9 +224,7 @@ def pin_softisp(enable: bool) -> None:
     cpus = SOFTISP_CPUS if enable else ALL_CPUS
     for pid in _iter_pids():
         comm = _comm(pid)
-        if comm in SKIP_PIN:
-            continue
-        if not (_has_fd(pid, CAM_NODES) or _has_fd(pid, LOOP_NODES)):
+        if comm in SKIP_PIN or comm.startswith("dagu-camera-lo") or not _is_softisp_proc(comm):
             continue
         try:
             os.sched_setaffinity(int(pid), cpus)

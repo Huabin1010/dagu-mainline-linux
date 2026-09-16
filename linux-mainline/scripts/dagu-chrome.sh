@@ -84,6 +84,9 @@ if [ "${DAGU_CHROME_VULKAN:-0}" = "1" ]; then
 	ANGLE="vulkan"
 	set -- --enable-gpu-rasterization --enable-zero-copy "$@"
 fi
+# GNOME Wayland: mutter text-input-v3 → IBus (fcitx5). GTK_IM_MODULE=fcitx
+# plus --disable-gtk-ime leaves Chrome with no IME. Do not ozone=x11 here.
+unset GTK_IM_MODULE
 exec /opt/google/chrome/chrome \
 	--ozone-platform=wayland \
 	--ozone-platform-hint=wayland \

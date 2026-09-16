@@ -1,0 +1,12 @@
+[Unit]
+Description=dagu folio Shift tap toggles fcitx5
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dagu-fcitx5-shift-tap.py
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

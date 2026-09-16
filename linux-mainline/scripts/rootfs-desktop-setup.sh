@@ -36,9 +36,9 @@ apt-get install -y --no-install-recommends \
 	gnome-snapshot gstreamer1.0-libcamera libcamera-ipa libspa-0.2-libcamera \
 	gir1.2-gst-plugins-base-1.0 \
 	libgl1-mesa-dri libgbm1 mesa-vulkan-drivers \
-	libinput-bin xserver-xorg-input-libinput \
+	libinput-bin xserver-xorg-input-libinput python3-evdev \
 	fonts-noto-core fonts-noto-cjk \
-	network-manager onboard \
+	network-manager onboard keyd \
 	ibus ibus-gtk3 ibus-gtk4 ibus-libpinyin \
 	bluez systemd-timesyncd pci.ids
 
@@ -262,6 +262,7 @@ if [ "${DAGU_CHROME_VULKAN:-0}" = "1" ]; then
 	ANGLE="vulkan"
 	set -- --enable-gpu-rasterization --enable-zero-copy "$@"
 fi
+unset GTK_IM_MODULE
 exec /opt/google/chrome/chrome \
 	--ozone-platform=wayland \
 	--ozone-platform-hint=wayland \
@@ -333,6 +334,7 @@ set -- --enable-features="$ENABLE_FEAT" "$@"
 if [ -n "$DISABLE_FEAT" ]; then
 	set -- --disable-features="$DISABLE_FEAT" "$@"
 fi
+unset GTK_IM_MODULE
 exec "$CHROME_BIN" \
 	--ozone-platform=wayland \
 	--ozone-platform-hint=wayland \
@@ -436,6 +438,79 @@ p.write_text("".join(out))
 PY
 	fi
 fi
+
+# Folio keyboard: tap Shift → fcitx5 toggle. keyd needs /dev/uinput
+# (CONFIG_INPUT_UINPUT); this kernel ships without it, so use the evdev watcher.
+mkdir -p /etc/keyd
+cat >/etc/keyd/dagu.conf <<'EOF'
+[ids]
+15d9:00a3
+
+[main]
+leftshift = overloadt(shift, hangul, 400)
+rightshift = overloadt(shift, hangul, 400)
+EOF
+if [ -f /usr/lib/systemd/system/keyd.service ]; then
+	systemctl disable --now keyd.service >/dev/null 2>&1 || true
+fi
+install -m755 /dev/stdin /usr/local/bin/dagu-fcitx5-shift-tap.py <<'EOF'
+#!/usr/bin/env python3
+from __future__ import annotations
+import os, select, subprocess, time
+from evdev import InputDevice, ecodes, list_devices
+USER="dagu"; UID=1001; RUNTIME=f"/run/user/{UID}"
+DEVICE_NAME="Xiaomi Keyboard"; TAP_SEC=0.50
+SHIFTS={ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT}
+def toggle():
+    env=os.environ.copy()
+    env.update({"HOME":f"/home/{USER}","XDG_RUNTIME_DIR":RUNTIME,
+                "DBUS_SESSION_BUS_ADDRESS":f"unix:path={RUNTIME}/bus",
+                "DISPLAY":":0","WAYLAND_DISPLAY":"wayland-0"})
+    subprocess.run(["runuser","-u",USER,"--","fcitx5-remote","-t"], env=env,
+                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def open_keyboard():
+    for path in list_devices():
+        try: dev=InputDevice(path)
+        except OSError: continue
+        if dev.name==DEVICE_NAME: return dev
+    return None
+def main():
+    while True:
+        dev=open_keyboard()
+        if dev is None:
+            time.sleep(1.0); continue
+        pending={}
+        try:
+            while True:
+                ready,_,_=select.select([dev.fd],[],[],2.0)
+                if not ready: continue
+                for ev in dev.read():
+                    if ev.type!=ecodes.EV_KEY or ev.value==2: continue
+                    if ev.code in SHIFTS:
+                        if ev.value==1: pending[ev.code]=(ev.timestamp(), False)
+                        elif ev.value==0 and ev.code in pending:
+                            t0,dirty=pending.pop(ev.code)
+                            if not dirty and (ev.timestamp()-t0)<=TAP_SEC: toggle()
+                    elif pending:
+                        pending={k:(t0,True) for k,(t0,_) in pending.items()}
+        except OSError:
+            time.sleep(0.3)
+if __name__=="__main__":
+    main()
+EOF
+cat >/etc/systemd/system/dagu-fcitx5-shift-tap.service <<'EOF'
+[Unit]
+Description=dagu folio Shift tap toggles fcitx5
+After=systemd-udevd.service
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dagu-fcitx5-shift-tap.py
+Restart=always
+RestartSec=1
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable dagu-fcitx5-shift-tap.service >/dev/null 2>&1 || true
 
 # Mineradio is Electron + Three.js WebGL + CSS backdrop-filter. Same Ozone
 # / LINEAR / grayscale-DPR contract as Chrome. Never notile (WebGL hang).
@@ -2282,7 +2357,7 @@ After=systemd-modules-load.service
 Type=simple
 ExecStart=/usr/local/sbin/dagu-camera-loopback watch
 ExecStopPost=/usr/local/sbin/dagu-camss-graph-reset.sh
-CPUAffinity=0-3
+CPUAffinity=0-5
 Restart=always
 RestartSec=2
 
@@ -2435,7 +2510,7 @@ CPU = (
 )
 
 HOLD_TAIL_S = 0.18
-VIDEO_SCAN_S = 0.12
+VIDEO_SCAN_S = 0.5
 SOFTISP_CPUS = frozenset({0, 1, 2, 3})
 ALL_CPUS = frozenset(range(os.cpu_count() or 8))
 # comm is TASK_COMM_LEN=16 including NUL → 15 chars.
@@ -2534,12 +2609,9 @@ def _has_venus_fd(pid: str) -> bool:
 
 def chrome_video_playing() -> bool:
     """True while Chromium/Chrome is in a Venus or video-compositor path."""
-    try:
-        pids = os.listdir("/proc")
-    except OSError:
-        return False
-    for pid in pids:
-        if not pid.isdigit():
+    for pid in _iter_pids():
+        comm = _comm(pid)
+        if not comm.startswith(("chrome", "chromium", "Chrome")):
             continue
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
@@ -2578,11 +2650,43 @@ def _iter_pids():
             yield pid
 
 
+def _has_softisp_thread(pid: str) -> bool:
+    task = f"/proc/{pid}/task"
+    try:
+        tids = os.listdir(task)
+    except OSError:
+        return False
+    for tid in tids:
+        try:
+            with open(f"{task}/{tid}/comm", "r", encoding="utf-8", errors="ignore") as f:
+                name = f.read().strip()
+        except OSError:
+            continue
+        if name.startswith(("SWIspWorker", "DebayerCpu")):
+            return True
+    return False
+
+
+def _is_softisp_proc(comm: str) -> bool:
+    return comm.startswith(("dagu-camera-lo", "gst-launch", "cam")) or comm in {
+        "snapshot",
+        "gnome-snapshot",
+    }
+
+
 def camera_streaming() -> bool:
-    """True while anyone holds a CAMSS RDI node, or gst holds loopback."""
+    """True while Snapshot/cam/gst is up, or the loopback child has SWIsp.
+
+    Do not walk every process's fd/task table. Cursor keeps thousands of
+    fds; doing that at 8 Hz starves mutter SCHED_DEADLINE.
+    """
     for pid in _iter_pids():
         comm = _comm(pid)
-        if _has_fd(pid, CAM_NODES):
+        if comm in ("snapshot", "gnome-snapshot", "cam") or comm.startswith(
+            ("gst-launch", "gnome-snapsho")
+        ):
+            return True
+        if comm.startswith("dagu-camera-lo") and _has_softisp_thread(pid):
             return True
         if _is_cam_comm(comm) and _has_fd(pid, LOOP_NODES):
             return True
@@ -2594,9 +2698,7 @@ def pin_softisp(enable: bool) -> None:
     cpus = SOFTISP_CPUS if enable else ALL_CPUS
     for pid in _iter_pids():
         comm = _comm(pid)
-        if comm in SKIP_PIN:
-            continue
-        if not (_has_fd(pid, CAM_NODES) or _has_fd(pid, LOOP_NODES)):
+        if comm in SKIP_PIN or comm.startswith("dagu-camera-lo") or not _is_softisp_proc(comm):
             continue
         try:
             os.sched_setaffinity(int(pid), cpus)

@@ -48,13 +48,14 @@ CONFIG_SCSI_UFS_QCOM=y
 CONFIG_PHY_QCOM_QMP_UFS=y
 CONFIG_EXT4_FS=y
 
-# Himax on spi-gpio (CAF gpio8–11). GENI QUP still off — load/se_init hangs QHEE.
+# Himax on QUP0 SE4 GENI SPI FIFO (gpio8–11 + IRQ39). GPI DMA stays off.
+# Product: per-SE IRAM + skip-wrapper. Do not bind GPIO100.
 CONFIG_SPI=y
 CONFIG_SPI_MASTER=y
 CONFIG_SPI_BITBANG=y
 CONFIG_SPI_GPIO=y
 CONFIG_TOUCHSCREEN_HIMAX_DAGU=y
-# CONFIG_SPI_QCOM_GENI is not set
+CONFIG_SPI_QCOM_GENI=y
 # CONFIG_QCOM_GPI_DMA is not set
 
 # Keep menu/PSCI idle compiled in; runtime off is vendor_boot `cpuidle.off=1`.
@@ -104,13 +105,13 @@ CONFIG_SERIAL_QCOM_GENI=y
 CONFIG_SERIAL_DEV_BUS=y
 CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
 
-# Speakers: CS35L41 on i2c-gpio (SE1 gpio4/5, SE3 gpio119/120).
-# I2C_QCOM_GENI only via DAGU_GENI_SE_EXPERIMENT=1 (per-SE IRAM, skip wrapper).
+# Speakers: CS35L41 on GENI I2C SE1/SE3 (per-SE IRAM, skip wrapper).
+# Remaining QUP clients (KTZ / FG / nanosic) stay i2c-gpio.
 # Playback/capture go through ADSP Q6 (adsp.mbn from modem_a).
 CONFIG_I2C=y
 CONFIG_I2C_ALGOBIT=y
 CONFIG_I2C_GPIO=y
-# CONFIG_I2C_QCOM_GENI is not set
+CONFIG_I2C_QCOM_GENI=y
 CONFIG_SOUND=y
 CONFIG_SND=y
 CONFIG_SND_PROC_FS=y

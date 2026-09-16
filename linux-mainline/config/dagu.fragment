@@ -153,8 +153,8 @@ CONFIG_ARM_QCOM_CPUFREQ_HW=y
 CONFIG_QCOM_TSENS=y
 CONFIG_NVMEM_QCOM_QFPROM=y
 
-# P4 Himax: GENI SPI hangs this QHEE; display.fragment enables spi-gpio + Himax.
-# CONFIG_SPI_QCOM_GENI is not set
+# P4 Himax: QUP0 SE4 GENI SPI FIFO (per-SE IRAM). GPI/wrapper CSR stay off.
+CONFIG_SPI_QCOM_GENI=y
 
 # P5 QCA6390 / ath11k + BT (no MPSS on this APQ tablet)
 CONFIG_PCI=y
@@ -191,8 +191,8 @@ CONFIG_SND=y
 CONFIG_SND_SOC=y
 CONFIG_SND_SOC_CS35L41=y
 CONFIG_SND_SOC_CS35L41_I2C=y
-# Default path is i2c-gpio. DAGU_GENI_SE_EXPERIMENT=1 turns this on.
-# CONFIG_I2C_QCOM_GENI is not set
+# CS35L41 on GENI I2C SE1/SE3 (uart6 per-SE IRAM). KTZ/FG/nanosic stay i2c-gpio.
+CONFIG_I2C_QCOM_GENI=y
 CONFIG_QCOM_APR=y
 CONFIG_SOUNDWIRE=y
 CONFIG_SND_SOC_QCOM=y

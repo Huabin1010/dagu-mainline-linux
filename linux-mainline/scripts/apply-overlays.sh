@@ -1415,6 +1415,97 @@ path.write_text(text.replace(old, new, 1))
 print(f"patched {path}: {marker}")
 PY
 
+python3 - "$KERNEL_SRC/drivers/spi/spi-geni-qcom.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: SPI FIFO only, never SE DMA or GPI"
+if marker in text:
+    raise SystemExit(0)
+old = """static bool geni_can_dma(struct spi_controller *ctlr,
+			 struct spi_device *slv, struct spi_transfer *xfer)
+{
+	struct spi_geni_master *mas = spi_controller_get_devdata(slv->controller);
+	u32 len, fifo_size;
+
+	if (mas->cur_xfer_mode == GENI_GPI_DMA)
+		return true;
+
+	/* Set SE DMA mode for SPI target. */
+	if (ctlr->target)
+		return true;
+
+	len = get_xfer_len_in_words(xfer, mas);
+	fifo_size = mas->tx_fifo_depth * mas->fifo_width_bits / xfer->bits_per_word;
+
+	if (len > fifo_size)
+		return true;
+	else
+		return false;
+}
+"""
+new = """static bool geni_can_dma(struct spi_controller *ctlr,
+			 struct spi_device *slv, struct spi_transfer *xfer)
+{
+	/* dagu: SPI FIFO only, never SE DMA or GPI — another MMIO surface
+	 * on this QHEE. Himax 56-byte frames fit FIFO watermark IRQs.
+	 */
+	return false;
+}
+"""
+if old not in text:
+    raise SystemExit(f"{path}: geni_can_dma block not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/drivers/spi/spi-geni-qcom.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu SPI FIFO proto"
+want = """		dev_info(mas->dev,
+			 "dagu SPI FIFO proto=%u depth=%u width=%u fifo_if_dis=%u skip_wrap=%d\\n",
+			 geni_se_read_proto(se), mas->tx_fifo_depth, mas->fifo_width_bits, fifo_disable,
+			 device_property_read_bool(mas->dev, "qcom,skip-wrapper-fw-init"));
+"""
+if want in text:
+    raise SystemExit(0)
+stale = """		dev_info(mas->dev,
+			 "dagu SPI FIFO proto=%u depth=%u width=%u fifo_if_dis=%u skip_wrap=%d\\n",
+			 proto, mas->tx_fifo_depth, mas->fifo_width_bits, fifo_disable,
+			 device_property_read_bool(mas->dev, "qcom,skip-wrapper-fw-init"));
+"""
+if stale in text:
+    path.write_text(text.replace(stale, want, 1))
+    print(f"patched {path}: {marker} (re-read proto after SE firmware)")
+    raise SystemExit(0)
+old = """	case 0:
+		mas->cur_xfer_mode = GENI_SE_FIFO;
+		geni_se_select_mode(se, GENI_SE_FIFO);
+		/* setup_fifo_params assumes that these registers start with a zero value */
+		writel(0, se->base + SE_SPI_LOOPBACK);
+"""
+new = """	case 0:
+		mas->cur_xfer_mode = GENI_SE_FIFO;
+		geni_se_select_mode(se, GENI_SE_FIFO);
+		dev_info(mas->dev,
+			 "dagu SPI FIFO proto=%u depth=%u width=%u fifo_if_dis=%u skip_wrap=%d\\n",
+			 geni_se_read_proto(se), mas->tx_fifo_depth, mas->fifo_width_bits, fifo_disable,
+			 device_property_read_bool(mas->dev, "qcom,skip-wrapper-fw-init"));
+		/* setup_fifo_params assumes that these registers start with a zero value */
+		writel(0, se->base + SE_SPI_LOOPBACK);
+"""
+if old not in text:
+    raise SystemExit(f"{path}: SPI FIFO select block not found")
+path.write_text(text.replace(old, new, 1))
+print(f"patched {path}: {marker}")
+PY
+
 python3 - "$KERNEL_SRC/drivers/gpu/drm/drm_fb_helper.c" <<'PY'
 from pathlib import Path
 import sys

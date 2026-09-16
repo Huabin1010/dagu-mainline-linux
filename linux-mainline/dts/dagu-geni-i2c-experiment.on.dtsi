@@ -1,5 +1,5 @@
 /*
- * DAGU_GENI_SE_EXPERIMENT=1 only. Per-SE IRAM like uart6.
+ * Product: CS35L41 on GENI I2C SE1/SE3. Per-SE IRAM like uart6.
  * Do not put firmware-name on &qupv3_id_0. Do not enable GPI DMA.
  * Failure: flash-boot-legacy.sh restore-a.
  */

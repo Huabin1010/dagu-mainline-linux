@@ -1,7 +1,6 @@
 /*
- * DAGU_GENI_SPI_EXPERIMENT=1 only. After I2C GENI is stable.
- * Himax on QUP0 SE4 FIFO (no GPI DMA). Do not bind GPIO100.
- * Failure: restore himax_spi spi-gpio via unset flag + restore-a if needed.
+ * Product: Himax on QUP0 SE4 FIFO (no GPI DMA). Do not bind GPIO100.
+ * Per-SE IRAM + skip-wrapper, never wrapper CSR. Failure: restore-a.
  */
 &himax_spi { status = "disabled"; };
 
@@ -19,7 +18,7 @@
 	spi-max-frequency = <4000000>;
 	status = "okay";
 
-	touchscreen@0 {
+	himax_ts_geni: touchscreen@0 {
 		compatible = "himax,hx83121-dagu", "himax,hxcommon";
 		reg = <0>;
 		spi-max-frequency = <4000000>;
@@ -32,5 +31,6 @@
 		touchscreen-size-x = <1600>;
 		touchscreen-size-y = <2560>;
 		himax,display-coords = <0 1600 0 2560>;
+		/* GPIO100 is panel tp-reset; do not bind it here. */
 	};
 };

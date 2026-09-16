@@ -6,18 +6,16 @@
  *   L0/gpio8=MISO L1/gpio9=MOSI L2/gpio10=SCLK L3/gpio11=CS,
  * IRQ GPIO39, RST GPIO100 (owned by the panel), 1600×2560.
  *
- * Bus is spi-gpio on those pads by default: GENI SE MMIO without
- * per-SE IRAM + skip-wrapper hangs this QHEE. FIFO experiment is
- * DAGU_GENI_SPI_EXPERIMENT=1 only (no GPI DMA).
+ * Bus is QUP0 SE4 GENI SPI FIFO: per-SE IRAM + skip-wrapper, never
+ * wrapper CSR / GPI DMA / SE DMA. GPIO100 is panel tp-reset — do not bind.
  *
  * Protocol from CAF hxchipset himax_platform.c / himax_ic_HX83121.c:
  *   spi->mode = SPI_MODE_3 (DT spi-cpha is overridden in the factory probe)
  *   read  cmd 0x30 via [0xF3, cmd, 0x00] + payload
  *   10 fingers × 4 bytes; HX_TOUCH_INFO_POINT_CNT = 52 for HX_MAX_PT=10.
  *
- * LEVEL_LOW + spi-gpio will re-enter while the line is still low. A
- * checksum-fail / 0xff / n=0 glitch in that stream must not emit a lift
- * then a new tracking ID — GNOME OSK then types one letter per glitch.
+ * LEVEL_LOW + a still-low IRQ must not emit a lift then a new tracking
+ * ID — GNOME OSK then types one letter per checksum-fail / 0xff / n=0.
  */
 
 #include <linux/cpufreq.h>

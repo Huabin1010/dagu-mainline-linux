@@ -37,8 +37,8 @@
 - 刷写用 `linux-mainline/scripts/fb-usb.py` / `flash-boot.sh flash-b`，不要 Google `fastboot reboot`
 - **禁止** `DAGU_PRIMARY_ENTRY_PROBE=1`，禁止在 `linux-mainline/linux/arch/arm64/kernel/head.S` 的 `primary_entry` 插 PSCI `SYSTEM_RESET`
 - 刷完 `g_serial` `0525:a4a7` 须保持 **>30s**，不能在约 25s 变回兔子 `18d1:d00d`
-- **禁止**给 `&qupv3_id_0` 加 `firmware-name`、写 QUPV3 wrapper CSR、`CONFIG_SPI_QCOM_GENI`、`CONFIG_I2C_QCOM_GENI`、`CONFIG_INTERCONNECT_QCOM_SM8250`。uart6 只把 stock `qupv3fw.elf` 写进 SE6 IRAM。
-- Himax 走 `spi-gpio`（CAF gpio8–11 + IRQ39），不要绑 GPIO100（面板 `tp-reset`）
+- **禁止**给 `&qupv3_id_0` 加 `firmware-name`、写 QUPV3 wrapper CSR、`CONFIG_QCOM_GPI_DMA`、`CONFIG_INTERCONNECT_QCOM_SM8250`。uart6 / CS35L41 / Himax 只把 stock `qupv3fw.elf` 写进 **该 SE 的 IRAM**，并带 `qcom,skip-wrapper-fw-init`。
+- Himax 走 QUP0 SE4 **GENI SPI FIFO**（CAF gpio8–11 + IRQ39），不要绑 GPIO100（面板 `tp-reset`）
 - **禁止**把 `vreg_l3a_0p9` 改成 1.104V（CX 轨，会硬复位回兔子）
 - 控制台：`python3 linux-mainline/scripts/dagu-console.py`（`/dev/ttyACM0`）
 - **适配，不妥协**：旧「花屏合同」是 Ozone 标 LINEAR + GBM 却选 UBWC。official-152 已把 `gbm_bo_get_modifier()` 如实交给 `zwp_linux_buffer_params_v1.add`。2026-09-13 已撕合同：Chrome **不再** `LD_PRELOAD libdagu-linear-mod.so`，窗口 2477×1560 / 标签 1823×88 均为 `QCOM_COMPRESSED`。Mutter 去掉 `disable-direct-scanout`（主 fb 仍 UBWC）。`DAGU_TEAR_CONTRACT=1` 走 Turnip，`chrome://gpu` Vulkan=Enabled，Venus 仍 `/dev/video14`。**禁止**给 gnome-shell 设 `FD_MESA_DEBUG=notile` / `dagu-mesa` / `libdagu-linear-mod.so`。不要关 GPU 栅格。包装：`linux-mainline/scripts/dagu-chromium-native.sh`。
@@ -138,13 +138,14 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 
 ### 触控
 
-- Himax HX83121，`spi-gpio`（gpio8–11 + IRQ39）
+- Himax HX83121，QUP0 SE4 **GENI SPI FIFO**（gpio8–11 + IRQ39）。spi-gpio 节点 `himax_spi` 保持 disabled
 - 驱动：`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`
-- `&spi4` / `&gpi_dma0` disabled；`# CONFIG_SPI_QCOM_GENI is not set`
+- `&spi4` okay + per-SE `firmware-name` + `qcom,skip-wrapper-fw-init`；`&gpi_dma0` disabled；`CONFIG_SPI_QCOM_GENI=y`，**禁止** GPI DMA
+- 板上 #244：`geni_spi 990000.spi: dagu SPI FIFO proto=1 depth=16 width=32 fifo_if_dis=0 skip_wrap=1`。装固件前 proto=255（INVALID），装完是 SPI=1。`spi4.0` → himax-dagu，IRQ gpio39
 - IRQ 亲和：`dagu-himax-irq-affinity.service` 把 himax IRQ 持久绑到 CPU4–7（Gold）。不要跟 SoftISP 抢 CPU0。
 - Snapshot 开后置点不了：Himax 仍报点（背光会醒），mutter 被 12MP CPU SoftISP 饿死。默认关掉常驻 `dagu-camera-loopback` 双路 STREAMON；Viewfinder Bayer skip（后置 /4、前置 /2），StillCapture 仍全幅。SoftISP cpuset CPU0–3。板上推送：`linux-mainline/scripts/dagu-snapshot-touch-deploy.sh`。libcamera 源码：`dagu-libcamera-softisp.sh`。验收：预览实时且关窗口跟手。
 - 滑动断触：IRQ 线程里不要 `dev_info`（`ignore_loglevel` 会堵 fbcon/串口）；DT 用 `IRQ_TYPE_LEVEL_LOW`，坏帧（全 0xff）不当抬手
-- OSK 连打字母：LEVEL_LOW + spi-gpio 会在一次按住里读到校验失败 / n=0 毛刺，tracking ID 被拆成多次点击。驱动排空 IRQ、校验和、连续空帧才抬手，80ms 超时兜底（`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`）
+- OSK 连打字母：LEVEL_LOW 会在一次按住里读到校验失败 / n=0 毛刺，tracking ID 被拆成多次点击。驱动排空 IRQ、校验和、连续空帧才抬手，80ms 超时兜底（`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`）
 - 滑动微跳帧（2026-09-13）：静置仍抽帧，停抓 SYN。`vblank timeout: 400000` 是 **DSC_IDX=22**（L81A 双 DSC），不是幽灵 `SSPP_CURSOR0`。`MUTTER_DEBUG_DISABLE_HW_CURSORS=1` 早已生效。细账 `linux-mainline/docs/dagu-idle-pipeline.md`。
 - Chrome 屏上键盘：`linux-mainline/scripts/dagu-osk-focus@dagu/` 同时闸 `KeyboardManager.open`、`KeyboardActor.open` 和延迟的 `Actor._open`（GNOME 300ms rest timer 会绕过 `open()`）。点标签栏/关标签立刻收起；点地址栏立刻弹出；点网页只在随后有光标时才弹。`linux-mainline/scripts/dagu-snap@local/` 只截屏，禁止再调 `Main.keyboard.open`。改扩展 JS 后 gnome-shell 会缓存模块，需要重新登录才生效；`disable-user-extensions` 必须为 false。
 
@@ -176,7 +177,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 
 ### 扬声器（CS35L41 ×4）
 
-- 总线：`i2c-gpio` 模拟 QUP SE1（gpio4/5）和 SE3（gpio119/120），**不开** `I2C_QCOM_GENI`
+- 总线：QUP0 SE1/SE3 **GENI I2C**（per-SE IRAM + skip-wrapper）。gpio 位bang 节点 `amp_i2c_se1` / `amp_i2c_se3` 保持 disabled。KTZ / 电量 / 键盘仍 `i2c-gpio`
 - 播放：ADSP Q6 + `TERT_TDM_RX_0`，2ch S24_LE 48 kHz，CAF `TDM_MAX_SLOTS=4`
 - DAPM：四颗 `TL/TR/BL/BR Main AMP: On`；`speaker-test -l 3` 完整 3 轮 440 Hz
 - overlay：`linux-mainline/scripts/apply-overlays.sh` 里 TDM `bit_width` 保持 16/24（slot_width=32）；强行 32 会让 AFE `0x100ef` 返回 `ADSP_EBADPARAM`
@@ -275,15 +276,13 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 
 | 项 | 原因 |
 |----|------|
-| `CONFIG_SPI_QCOM_GENI` / `&spi4` | `geni_load_se_fw` / `geni_se_init` 写 SE MMIO 挂死这套 QHEE |
-| `CONFIG_I2C_QCOM_GENI` | 同上；喇叭/电量改 i2c-gpio |
-| 给 `&qupv3_id_0` 加 `firmware-name` / 写 wrapper CSR | 会打回兔子；uart6 只把 stock `qupv3fw.elf` 写进 SE6 IRAM |
+| `CONFIG_QCOM_GPI_DMA` / SPI SE DMA | Himax 走 FIFO watermark；GPI/SE DMA 是另一块这套 QHEE 上的 MMIO |
+| 给 `&qupv3_id_0` 加 `firmware-name` / 写 wrapper CSR | 会打回兔子。GENI 产品路径只装 **该 SE IRAM** + `qcom,skip-wrapper-fw-init`（uart6 / CS35L41 / Himax） |
 | `CONFIG_INTERCONNECT_QCOM_SM8250` | BCM `rpmh_write_batch` 超时，拖死 USB/MDSS/CPU OPP。Venus 用 ICC stub + 删 DT interconnects，不要靠开 provider |
 | `&usb_1_qmpphy` | P0 只要 HS gadget；SS 未训 |
 | Type-C → DWC3 graph | 等 TCPM 曾让 DWC3 停在 otg、无 UDC；节点本身已 okay 做充电 |
 | `&cdsp` | 继续 disabled；不要顺手跟 Venus 一起开 |
 | `&slpi` | 未验签名固件前不开 |
-| GENI 触控 / 给 `&qupv3_id_0` 加 `firmware-name` | 与 SPI 同一挂点 |
 
 ---
 

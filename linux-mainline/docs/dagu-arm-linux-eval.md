@@ -2,8 +2,8 @@
 
 记录日期：**2026-09-16**。  
 设备：小米平板 5 Pro 12.4（代号 **dagu**，型号 **22081281AC**，SoC **SM8250-AC / 骁龙 870**）。  
-当前每天在跑的系统：Linux **7.0** + Ubuntu arm64 桌面（userdata），只刷 **B 槽**。A 槽是救援计算机（TWRP / HyperOS）。  
-本文件按「ARM Linux 系统综合评估维度表」对照 **原厂安卓硬件能力** 与 **主线 Linux 实机落地**，并单独标出 **Python / CPU 软路径** 的性能短板。
+当前每天在跑的系统：Linux **7.0** `#244` + Ubuntu arm64 桌面（userdata），只刷 **B 槽**。A 槽是救援计算机（TWRP / HyperOS）。  
+本文件按「ARM Linux 系统综合评估维度表」对照 **原厂安卓硬件能力** 与 **主线 Linux 实机落地**，并单独标出 **Python / CPU 软路径** 的性能短板。板上证据以 `#244` 为准（2026-09-16 12:18 CST）。
 
 对照底稿（不要把本文件当成唯一真相；子系统细账以它们为准）：
 
@@ -45,15 +45,15 @@ Python / 软路径严重程度：
 
 | 一级维度 | 硬件账面 | Linux 落地 | 平板权重 | 结论 |
 |----------|----------|------------|----------|------|
-| 1. 核心算力与存储 | 骁龙 870 一线 | CPU/GPU/UFS 已通；NPU/CDSP 关；ICC 关 | 高 | 够用。瓶颈不在核数，在 **QHEE 禁掉的总线** 和 **SoftISP 吃 CPU** |
+| 1. 核心算力与存储 | 骁龙 870 一线 | CPU/GPU/UFS 已通；NPU/CDSP 关；ICC 关 | 高 | 够用。瓶颈不在核数，在 **无 ICC 带宽投票** 和 **SoftISP 吃 CPU** |
 | 2. 多媒体 | Venus + Spectra 480 + Hexagon | Venus 4K60 已通；**Spectra IFE 没接**；相机是 CPU SoftISP | 极高 | 视频正路。相机是最大的软路径洞 |
 | 3. 外设与感知 | 120 Hz + 双摄 + 四喇叭 + IMU | 显示/触控/麦/喇叭已通；IMU/ALS 关；DP 未接 | 极高 | 日常能用。传感器和 Type-C 异显缺 |
 | 4. 网络 | QCA6390 Wi‑Fi 6 + BT 5.x | ath11k ~600 Mbps；蓝牙 HID 已通；无蜂窝 | 高 | 够用。无以太网、无 5G（本 SKU 本就没有） |
-| 5. 总线扩展 | PCIe / USB3 / QUP GENI | PCIe0 只给 Wi‑Fi；GENI SPI/I2C **禁止**；USB3 未训 | 中 | 平板够。工控总线本机没有 |
-| 6. 软件生态 | 原厂 4.19 BSP | 主线 7.0 + Ubuntu + 大量 overlay | 极高 | 主线是资产。QHEE / 闭源 blob / 无 ICC 是天花板 |
-| 7. 功耗热可靠 | PM8150 / 双电芯 / 被动散热 | DVFS 已通；s2idle 电源键可醒；无 RTC | 高 | 能睡。充电/霍尔/无线充还没专项验收 |
+| 5. 总线扩展 | PCIe / USB3 / QUP GENI | PCIe0 只给 Wi‑Fi；**Himax SE4 + CS35L41 SE1/SE3 已走 GENI**；USB3 未训 | 中 | 平板够。工控总线本机没有 |
+| 6. 软件生态 | 原厂 4.19 BSP | 主线 7.0 + Ubuntu + 大量 overlay | 极高 | 主线是资产。QHEE 禁的是 **wrapper CSR / ICC / GPI**，不是 GENI SE |
+| 7. 功耗热可靠 | PM8150 / 双电芯 / 被动散热 | DVFS 已通；s2idle 电源键可醒；无 RTC | 高 | 能睡。充电/无线充 DT 已写，未专项烤机 |
 
-一句话：这不是「芯片算力不够」，是 **HyperOS 这套 QHEE 把 GENI / ICC 钉死**，再加 **主线没有 Spectra ISP / Hexagon CDSP**。能飞的子系统已经按硬件正路接上；剩下的短板几乎全是 **CPU 软 ISP、GPIO 位bang、Python 常驻脚本**。
+一句话：这不是「芯片算力不够」。**打回兔子的是 QUPV3 wrapper CSR 和 ICC BCM 投票，不是 GENI。** `#244` 上 uart6 / Himax / CS35L41 都是 per-SE IRAM + `skip-wrapper-fw-init`。主线仍没有 Spectra IFE / Hexagon CDSP，所以相机还是 CPU SoftISP。尚未迁走的只有 KTZ / 电量 / 磁吸键盘的 **i2c-gpio**。
 
 ---
 
@@ -152,7 +152,7 @@ Linux 只打通了 **CAMSS RDI**（CSIPHY → CSID → VFE RDI → 内存 RAW10�
 | 考察点 | 安卓 | Linux |
 |--------|------|-------|
 | ADSP | `adsp.mbn` running | **同**，`remoteproc0` `adsp` `running` |
-| 外放 | CS35L41 ×4，Halo DSP Protection + Music 调音 | 软件已通：TDM 32-bit slot、`PCM Source=DSP`、prot.bin。听感对齐还差 Halo `CAL_SET_STATUS=2` / Fast Use Case 灌表 |
+| 外放 | CS35L41 ×4，Halo DSP Protection + Music 调音 | **已通**（GENI I2C SE1/SE3）。TDM 32-bit slot + sample 24、`PCM Source=DSP`、prot.bin。`#244` 四颗都写上 `CAL_SET_STATUS=2`（TL 9524 / TR 9632 / BL 9497 / BR 9696）。Fast Use Case `*-music.txt` 已灌。禁止 softvol |
 | 麦 | WCD9385 AMIC5，Fluence AEC/NS | **无 Fluence**。模拟增益 18 dB，喇叭 440 Hz 回录能检出 |
 | AEC / ANC / KWS | ADSP Fluence / voice UI | **未做**。会议回声靠 CPU 或应用自己 |
 | 3.5 mm | 无 | 无 |
@@ -207,8 +207,8 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 | ALS tcs3701 / rohm_bu27030 | SLPI | 同上 |
 | 霍尔 GPIO110/121 | gpio-keys | DT 已写 `SW_LID` / `SW_TABLET_MODE`。**已迁走**：不再装 `dagu-tablet-mode.py` |
 | 距离 / 地磁 | 未作为交付 | 未做 |
-| 触控 Himax HX83121 | GENI SPI | **`spi-gpio` 位bang**（gpio8–11 + IRQ39）。IRQ 绑 Gold。禁止 GPIO100 |
-| 磁吸键盘 | QUP I2C | DT `i2c-gpio-se2`。未专项验收。禁止开 GENI i2c2 |
+| 触控 Himax HX83121 | GENI SPI | **已通** `#244`：`990000.spi` / `spi4.0`，`dagu SPI FIFO proto=1 depth=16 width=32 fifo_if_dis=0 skip_wrap=1`。gpio8–11 function qup4，IRQ gpio39 LEVEL_LOW。probe 读 event30 不是全 `0xff`。禁止 GPIO100、禁止 GPI/SE DMA |
+| 磁吸键盘 | QUP I2C | DT `i2c-gpio-se2`。未专项验收。禁止未测就开 GENI `&i2c2` |
 
 ---
 
@@ -235,11 +235,22 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 | USB | DWC3 HS + SS PHY | HS **gadget** `g_serial` `0525:a4a7` 已通（验收：>30 s 不回兔子）。OTG host / USB3 / DP **未训**。切 host 会掉串口 |
 | SATA | 无 | 无 |
 | CAN / RS-485 / RS-232 | 无 | 无 |
-| QUP GENI SPI/I2C | 原厂总线 | **有意关闭**。`geni_se_init` / wrapper CSR 打回兔子。触控、喇叭、背光、电量、键盘全部 **GPIO 位bang** |
+| QUP GENI SPI/I2C | 原厂总线 | **产品路径已开。** `#244`：`990000.spi` Himax FIFO；`984000.i2c` / `98c000.i2c` 四颗 CS35L41；uart6 仍 SE6 IRAM。禁止 wrapper CSR、`CONFIG_QCOM_GPI_DMA`、ICC。背光 KTZ（se9/11）、电量/充电（se0/13/15/16）、键盘（se2）仍 **i2c-gpio** |
 | UART | uart6 蓝牙 | 只把 `qupv3fw.elf` 写进 **SE6 IRAM**。禁止给 `&qupv3_id_0` 加 `firmware-name` |
 | GPIO / PWM / ADC | PMIC + TLMM | 音量键、电源键、闪光灯 DT 已写 |
 
-工控维度对本板不适用。真正的扩展税是：**所有中速外设都在 GPIO 上模拟控制器**。
+工控维度对本板不适用。扩展税已经不是「GENI 全关」，而是 **KTZ / FG / nanosic 还在 gpio 位bang**，以及 USB3/DP 未训。
+
+板上 `#244` 遥测（不是实验开关）：
+
+```
+geni_spi 990000.spi: dagu SPI FIFO proto=1 depth=16 width=32 fifo_if_dis=0 skip_wrap=1
+himax-dagu spi4.0: HX83121 1600x2560 irq 193
+cs35l41 {1-0040,1-0041,3-0041,3-0043}: SET_STATUS=2
+g_serial 0525:a4a7 held >30s；A 槽未动
+```
+
+历史挂死路径是 `&qupv3_id_0` 的 wrapper CSR，加上 SPI `geni_can_dma` 给 Himax 帧选 SE DMA。产品构建强制 per-SE `firmware-name` + `qcom,skip-wrapper-fw-init` + FIFO。
 
 ---
 
@@ -263,7 +274,7 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 
 - 账面 4K 硬解但用户态没有 V4L2 → 官方 Chrome 153 就是这样，一线改 Chromium `use_v4l2_codec`
 - 闭源 blob 换板即挂 → zap / venus / adsp **禁止**用 elish
-- 主线开 ICC / GENI 「更正确」→ 这套 QHEE 上是毁机路径
+- 主线开 ICC / wrapper CSR 「更正确」→ 这套 QHEE 上是毁机路径。GENI SE 本身要 per-SE IRAM + skip-wrapper
 
 ---
 
@@ -286,7 +297,7 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 
 ## 8. Python 与 CPU 软路径清单（重点）
 
-这是评估表里「能看不能用」最容易藏的地方。硬件解码已经不是 Python；**相机、触控总线、若干开机守护进程才是。**
+这是评估表里「能看不能用」最容易藏的地方。硬件解码已经不是 Python；触控总线在 `#244` 也已经不是。**还在热路径上的是相机 SoftISP。**
 
 ### 8.1 像素热路径（P0）
 
@@ -313,7 +324,7 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 | `dagu-time-sync.py` | Python | 曾开机一次 | NTP | **已迁走**。`systemd-timesyncd` |
 | `dagu-fcitx5-shift-tap.py` | Python + evdev | 曾按需 | 磁吸键盘点 Shift | **已迁走**。`keyd` + `CONFIG_INPUT_UINPUT=y` |
 
-根因没变：**Himax 默认仍是 spi-gpio 位bang**。GENI 只允许 `DAGU_GENI_SE_EXPERIMENT` / `DAGU_GENI_SPI_EXPERIMENT` 的 per-SE IRAM（uart6 同款），禁止 wrapper CSR 与 ICC。用户态升频救的是位bang/SoftISP，**不能**把 IFE 变出来。
+根因：**打回兔子的是 QUPV3 wrapper CSR，不是 GENI SE。** `#244` 产品默认：Himax `990000.spi` FIFO `proto=1 skip_wrap=1`；CS35L41 在 `984000.i2c` / `98c000.i2c`；`g_serial` >30 s。升频救的是 SoftISP，**不能**把 IFE 变出来。
 
 ### 8.3 不是性能问题的 Python（P2）
 
@@ -327,8 +338,9 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 
 | 软路径 | 本应走的硬件 | 为什么软 | 体感 |
 |--------|----------------|----------|------|
-| `spi-gpio` 读 Himax | QUP SE4 GENI SPI | 默认关 `CONFIG_SPI_QCOM_GENI`。`DAGU_GENI_SPI_EXPERIMENT=1` 才试 per-SE FIFO（不开 GPI DMA） | 触控线程占用 Gold；和 SoftISP 抢核就「点不了」 |
-| `i2c-gpio` 喇叭 / 背光 / 电量 / 键盘 | QUP GENI I2C | 默认关。`DAGU_GENI_SE_EXPERIMENT=1` 先迁 CS35L41（uart6 同款 IRAM）。禁止 wrapper CSR | 音频/背光 I2C 慢，不是 UI 热路径 |
+| `spi-gpio` 读 Himax | QUP SE4 GENI SPI | **已迁走** `#244`：per-SE IRAM + FIFO，`geni_can_dma` 强制 false（不开 GPI/SE DMA） | 触控走硬件 FIFO，不再 Gold 位bang |
+| `i2c-gpio` 喇叭 | QUP GENI I2C | **已迁走** `#242` 起：CS35L41 在 SE1/SE3；`#244` 同镜 | 喇叭 I2C 不再位bang |
+| `i2c-gpio` 背光 / 电量 / 键盘 | QUP GENI I2C | `#244` 仍有 `i2c-gpio-se{0,2,8,9,11,13,15,16}`。禁止未测就开 GENI i2c2/9/11 | 背光/键盘 I2C 仍慢 |
 | ICC stub（空投票） | `CONFIG_INTERCONNECT_QCOM_SM8250` | BCM `rpmh_write_batch` 超时拖死 USB/MDSS | 高带宽多客户时没有互连 QoS |
 | UFS CLK_SCALING off | ufshc devfreq | 与 QUERY_ATTR 死锁 panic | 固定时钟，功耗略差 |
 | 无 Fluence | ADSP 语音拓扑 | 主线 mixer 没接 | 免提回声 |
@@ -377,7 +389,7 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 | 二级 | 指标 | dagu Linux |
 |------|------|------------|
 | PCIe/USB/SATA | Gen3、USB3 | PCIe0 **已通**。USB3/SATA **无/未训** |
-| 工控 | CAN/RS485/PWM | **无此硬件**。GPIO 位bang 代替 GENI |
+| 工控 | CAN/RS485/PWM | **无此硬件**。Himax/喇叭已走 GENI；其余仍 gpio |
 
 ### 维度 6
 
@@ -405,11 +417,11 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 
 | 项 | 飞行合格？ |
 |----|------------|
-| 合成 / 触控 | 合格可用，静置仍可能抽帧；SoftISP 开时必须绑核 |
+| 合成 / 触控 | 触控总线合格（GENI SPI FIFO `#244`）。静置仍可能抽帧。SoftISP 开时必须绑核，否则 mutter 被饿死（Himax 仍在报点） |
 | GPU UI | 合格（Turnip，禁止软栅格） |
 | 硬解 1080p/4K | 合格（Chromium + gst-play） |
 | 相机预览 30 fps | **预览合格，画质不合格**（无 IFE 3A/NR，skip 后分辨率低） |
-| 四喇叭 | 软件合格，听感还差校准位 |
+| 四喇叭 | 合格：GENI I2C + Halo `SET_STATUS=2` + Music prot.bin。禁止 softvol |
 | 休眠 | 电源键合格；无 RTC 不能远程闹钟 |
 
 ### 若拿它当 NVR / 机顶盒
@@ -433,7 +445,7 @@ NPU **没有**。相机是 CPU SoftISP。弱光/HDR 比不过安卓 IFE。要视
 1. 后置 D-PHY 4-lane + skip 4×4 1020×764；前置 D-PHY + skip 2×2 1296×976  
 2. Venus stateful V4L2，Chrome `use_v4l2_codec`，禁止官方 Chrome 软解充数  
 3. Turnip + UBWC 主 fb，禁止 llvmpipe / notile  
-4. 只刷 B 槽；SM8250 ICC 永不放行；GENI 默认关，实验才 per-SE IRAM  
+4. 只刷 B 槽；SM8250 ICC / GPI DMA / wrapper CSR 永不放行；GENI 产品路径是 per-SE IRAM + skip-wrapper  
 5. 相机默认走 v4l2loopback，禁止 spa-libcamera 打满会话核  
 
 下一刀按「删软路径」而不是「再包一层 Python」：
@@ -442,11 +454,13 @@ NPU **没有**。相机是 CPU SoftISP。弱光/HDR 比不过安卓 IFE。要视
 |--------|----|----------------|
 | 1 | 板上 `dagu-camera-loopback` 必须是 **Rust ELF** | **已迁走** P0 fd walk / gst |
 | 2 | SoftISP 预览保持 skip；StillCapture 全幅另议 | 禁止 12MP CPU 预览 |
-| 3 | 扬声器 Halo `CAL_SET_STATUS=2` + Fast Use Case | 禁止 softvol |
+| 3 | 扬声器 Halo `CAL_SET_STATUS=2` + Fast Use Case | **已迁走** `#244` 四颗 `SET_STATUS=2`。禁止 softvol |
 | 4 | 霍尔走 gpio-keys | **已迁走** `dagu-tablet-mode.py` |
-| 5 | 触控升频进 himax-dagu + C daemon | **已迁走** Python 解释器 |
-| 6 | SLPI：PAS 验签 + 有客户端再 okay | 不要 AP 上猜 I2C。见 PIX 审计笔记 |
-| 7 | USB3 + DP | 现在只有 HS gadget |
-| 8 | Spectra IFE / CDSP | **PIX no-go**（`dagu-camss-pix-audit.md`）。CDSP 无工作负荷不开 |
+| 5 | Himax GENI SPI FIFO + 内核 `freq_qos` | **已迁走** spi-gpio 与 Python 升频 |
+| 6 | CS35L41 GENI I2C SE1/SE3 | **已迁走** 功放 i2c-gpio |
+| 7 | KTZ / FG / nanosic 按 uart6 同款收 GENI | 仍 `i2c-gpio-se{0,2,8,9,11,13,15,16}`。一次只迁已测 SE |
+| 8 | SLPI：PAS 验签 + 有客户端再 okay | 不要 AP 上猜 I2C。见 PIX 审计笔记 |
+| 9 | USB3 + DP | 现在只有 HS gadget |
+| 10 | Spectra IFE / CDSP | **PIX no-go**（`dagu-camss-pix-audit.md`）。CDSP 无工作负荷不开 |
 
-**Python 不是这台机器的架构。** 产品路径已迁走：loopback 二进制、C 版电源键/触控升频、timesyncd、keyd、霍尔 gpio-keys。仍软的是 **DebayerCpu + spi-gpio/i2c-gpio**；GENI 只允许带 `skip-wrapper-fw-init` 的 per-SE 实验，失败 `restore-a`。
+**Python 不是这台机器的架构。** `#244` 产品路径：loopback ELF、C 版电源键/触控升频、timesyncd、keyd、霍尔 gpio-keys、Himax GENI SPI FIFO、CS35L41 GENI I2C。仍软的是 **DebayerCpu** 和 KTZ/FG/nanosic 的 **i2c-gpio**。禁止 wrapper CSR / GPI DMA / ICC；失败 `restore-a`。

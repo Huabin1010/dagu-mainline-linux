@@ -60,8 +60,7 @@ id=$(wpctl status 2>/dev/null | awk '
 ')
 if [ -n "${id:-}" ]; then
 	wpctl set-default "$id" >/dev/null 2>&1 || true
-	wpctl set-mute "$id" 0 >/dev/null 2>&1 || true
-	wpctl set-volume "$id" 1.0 >/dev/null 2>&1 || true
+	# Volume/mute live in WirePlumber default-routes. Do not slam 100%.
 fi
 
 src=$(wpctl status 2>/dev/null | awk '

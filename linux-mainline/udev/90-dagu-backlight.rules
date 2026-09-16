@@ -1,0 +1,2 @@
+# Persist l81a-wled on every slider change (shutdown save misses reboot -f).
+ACTION=="change", SUBSYSTEM=="backlight", KERNEL=="l81a-wled", RUN+="/usr/lib/systemd/systemd-backlight save backlight:l81a-wled"

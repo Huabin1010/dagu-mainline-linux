@@ -1168,11 +1168,18 @@ sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
 power-button-action='nothing'
 idle-dim=false
+ambient-enabled=false
 
 [org/gnome/desktop/media-handling]
 automount=false
 automount-open=false
 autorun-never=true
+EOF
+mkdir -p /etc/dconf/db/local.d/locks
+cat >/etc/dconf/db/local.d/locks/dagu-brightness <<'EOF'
+/org/gnome/settings-daemon/plugins/power/idle-dim
+/org/gnome/settings-daemon/plugins/power/ambient-enabled
+/org/gnome/desktop/session/idle-delay
 EOF
 dconf update 2>/dev/null || true
 mkdir -p /etc/fonts/conf.d
@@ -1739,6 +1746,25 @@ EOF
 cat >/etc/udev/rules.d/90-dagu-bms.rules <<'EOF'
 SUBSYSTEM=="power_supply", KERNEL=="bq27z561-*", ENV{UPOWER_IGNORE}="1", ENV{UPOWER_BATTERY_TYPE}=""
 EOF
+cat >/etc/udev/rules.d/90-dagu-backlight.rules <<'EOF'
+# Persist l81a-wled on every slider change (shutdown save misses reboot -f).
+ACTION=="change", SUBSYSTEM=="backlight", KERNEL=="l81a-wled", RUN+="/usr/lib/systemd/systemd-backlight save backlight:l81a-wled"
+EOF
+mkdir -p /etc/dconf/db/local.d/locks
+cat >/etc/dconf/db/local.d/00-dagu-brightness <<'EOF'
+[org/gnome/settings-daemon/plugins/power]
+idle-dim=false
+ambient-enabled=false
+
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+EOF
+cat >/etc/dconf/db/local.d/locks/dagu-brightness <<'EOF'
+/org/gnome/settings-daemon/plugins/power/idle-dim
+/org/gnome/settings-daemon/plugins/power/ambient-enabled
+/org/gnome/desktop/session/idle-delay
+EOF
+dconf update 2>/dev/null || true
 cat >/etc/udev/rules.d/90-dagu-v4l2loopback.rules <<'EOF'
 SUBSYSTEM=="video4linux", ATTR{name}=="dagu-front", GROUP="video", MODE="0660"
 SUBSYSTEM=="video4linux", ATTR{name}=="dagu-rear", GROUP="video", MODE="0660"
@@ -1955,8 +1981,7 @@ id=$(wpctl status 2>/dev/null | awk '
 ')
 if [ -n "${id:-}" ]; then
 	wpctl set-default "$id" >/dev/null 2>&1 || true
-	wpctl set-mute "$id" 0 >/dev/null 2>&1 || true
-	wpctl set-volume "$id" 1.0 >/dev/null 2>&1 || true
+	# Volume/mute live in WirePlumber default-routes. Do not slam 100%.
 fi
 src=$(wpctl status 2>/dev/null | awk '
 	$0 ~ /Sources:/{s=1}

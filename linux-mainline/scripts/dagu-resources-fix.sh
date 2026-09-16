@@ -92,8 +92,51 @@ done
 cat >/etc/udev/rules.d/90-dagu-bms.rules <<'EOF'
 SUBSYSTEM=="power_supply", KERNEL=="bq27z561-*", ENV{UPOWER_IGNORE}="1", ENV{UPOWER_BATTERY_TYPE}=""
 EOF
+cat >/etc/udev/rules.d/90-dagu-backlight.rules <<'EOF'
+ACTION=="change", SUBSYSTEM=="backlight", KERNEL=="l81a-wled", RUN+="/usr/lib/systemd/systemd-backlight save backlight:l81a-wled"
+EOF
+mkdir -p /etc/dconf/profile /etc/dconf/db/local.d/locks
+if [ ! -f /etc/dconf/profile/user ]; then
+	cat >/etc/dconf/profile/user <<'EOF'
+user-db:user
+system-db:local
+EOF
+fi
+cat >/etc/dconf/db/local.d/00-dagu-brightness <<'EOF'
+[org/gnome/settings-daemon/plugins/power]
+idle-dim=false
+ambient-enabled=false
+
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+EOF
+cat >/etc/dconf/db/local.d/locks/dagu-brightness <<'EOF'
+/org/gnome/settings-daemon/plugins/power/idle-dim
+/org/gnome/settings-daemon/plugins/power/ambient-enabled
+/org/gnome/desktop/session/idle-delay
+EOF
+dconf update 2>/dev/null || true
+# Live session: GNOME defaults overrode idle-dim and saved ~30% as the
+# "last" backlight. Lock the keys and drop the 100% volume slam.
+if [ -f /usr/local/sbin/dagu-audio-up.sh ]; then
+	sed -i '/wpctl set-volume "\$id" 1.0/d' /usr/local/sbin/dagu-audio-up.sh || true
+	sed -i '/wpctl set-mute "\$id" 0/d' /usr/local/sbin/dagu-audio-up.sh || true
+fi
+if [ -d /run/user/1001 ]; then
+	sudo -u dagu env \
+		DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \
+		XDG_RUNTIME_DIR=/run/user/1001 \
+		gsettings set org.gnome.settings-daemon.plugins.power idle-dim false \
+		>/dev/null 2>&1 || true
+	sudo -u dagu env \
+		DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \
+		XDG_RUNTIME_DIR=/run/user/1001 \
+		gsettings set org.gnome.settings-daemon.plugins.power ambient-enabled false \
+		>/dev/null 2>&1 || true
+fi
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger --subsystem-match=power_supply 2>/dev/null || true
+udevadm trigger --subsystem-match=backlight 2>/dev/null || true
 
 # Resources lists every /sys/block disk. UFS LUNs sdb–sdf are Android
 # boot/modem slices, not user storage. size=0 makes them "virtual" and the

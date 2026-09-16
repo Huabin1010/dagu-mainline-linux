@@ -23,6 +23,7 @@
 Windows on ARM / edk2-msm 移植在 [`port/dagu/`](port/dagu/) 和 [`docs/uefi-port-dagu.md`](docs/uefi-port-dagu.md)，**不是**现在每天在跑的系统。
 
 **刷机指南：** [简体中文](docs/zh-CN/flash-guide.md) · [English](docs/flash-guide.md)
+**Rootfs / 桌面镜像：** [简体中文](docs/zh-CN/rootfs-guide.md) · [English](docs/rootfs-guide.md)
 
 ## 快速开始
 
@@ -47,9 +48,8 @@ cp linux-mainline/dts/local-addresses.dtsi.example \
 # 6. 打包 boot.img
 ./linux-mainline/scripts/build-bootimg.sh
 
-# 7. 制作 Ubuntu rootfs（密码不要写进 git）
-ROOT_PASSWORD=... ./linux-mainline/scripts/build-rootfs.sh
-./linux-mainline/scripts/build-rootfs-image.sh
+# 7. userdata 上的 Ubuntu 桌面（或从 Release 下 rootfs-desktop.ext4.zst）
+ROOT_PASSWORD=... ./linux-mainline/scripts/build-rootfs-desktop.sh
 
 # 8. 刷机（设备进入 fastboot）。用仓内 USB 工具，不要用 Google fastboot 37。
 ./linux-mainline/scripts/flash-rootfs.sh          # userdata，会清空安卓 /data
@@ -66,7 +66,7 @@ ROOT_PASSWORD=... ./linux-mainline/scripts/build-rootfs.sh
 - userdata 已是 Ubuntu 后，**不要** `fastboot reboot` 进当前槽的原厂安卓 `boot`。用仓内脚本。
 - 救砖：音量下 + 电源进 fastboot，或 9008 EDL 刷官方 `flash_all`（**不要 lock**）。见 [EDL 流程](docs/dagu-edl-recovery-full-playbook.md)。
 
-登录：USB ACM `ttyACM0`，或 USB RNDIS SSH（`root@192.168.7.2`）/ 平板 Wi-Fi 地址。**仓库里没有 root 密码。** 导出 `ROOT_PASSWORD`，或写到已忽略的 `linux-mainline/out/root-password`。
+登录：USB ACM `ttyACM0`，或 USB RNDIS SSH（`root@192.168.7.2`）/ 平板 Wi-Fi 地址。**预构建**桌面账号是 `dagu` / `dagu`。本机编镜像：导出 `ROOT_PASSWORD`，或写到已忽略的 `linux-mainline/out/root-password`。
 
 ## 目录结构
 

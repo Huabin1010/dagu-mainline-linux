@@ -82,13 +82,12 @@ cd linux-mainline
 
 ## Ubuntu（userdata）
 
-本机只跑 Ubuntu。`out/rootfs.ext4` 刷进 **userdata**（约 228 GiB，不是 A/B），开机后 `dagu-resize-root` 会把 4 G 镜像扩到整盘。
+本机只跑 Ubuntu。桌面镜像刷进 **userdata**（约 228 GiB，不是 A/B），开机后 `dagu-resize-root` 把 8 GiB 镜像扩到整盘。教程：[rootfs-guide.md](../docs/zh-CN/rootfs-guide.md)。
 
 ```bash
-./scripts/build-rootfs.sh
-./scripts/build-rootfs-image.sh
+ROOT_PASSWORD=... ./scripts/build-rootfs-desktop.sh
 ./scripts/flash-rootfs.sh
-# 等价：fastboot flash userdata out/rootfs.ext4
+./scripts/flash-boot.sh flash-b
 ```
 
 initramfs 按 GPT 名 `userdata`（回退 `/dev/sda34`）挂 ext4，再 `switch_root`。还没刷过、或仍是安卓 f2fs 时，留在 ramdisk + RNDIS。

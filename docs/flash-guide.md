@@ -17,8 +17,9 @@ GitHub [Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases) sh
 | `dtbo-stub.img` | `dtbo_b` | Stub with board-ids. **Never** flash `dtbo-empty.img` |
 | `vbmeta-disabled.img` | `vbmeta_b` | Verification off |
 | `SHA256SUMS` | — | Check before flashing |
+| `rootfs-desktop.ext4.zst` | `userdata` | GNOME desktop. **Wipes Android `/data`** |
 
-Ubuntu lives on **userdata** (not A/B). A 4 GiB desktop `rootfs.ext4` is **not** in the release (too large, and it would wipe `/data`). Build it locally with `linux-mainline/scripts/build-rootfs.sh`.
+Ubuntu lives on **userdata** (not A/B). Flash or rebuild: [rootfs guide](rootfs-guide.md) · [简体中文](zh-CN/rootfs-guide.md).
 
 ## Host USB
 
@@ -55,18 +56,18 @@ cp linux-mainline/dts/local-addresses.dtsi.example \
 DAGU_MINIMAL=1 DAGU_DISPLAY=1 ./linux-mainline/scripts/build-kernel.sh
 ./linux-mainline/scripts/build-bootimg.sh
 
-ROOT_PASSWORD=... ./linux-mainline/scripts/build-rootfs.sh
-./linux-mainline/scripts/build-rootfs-image.sh
+# Desktop userdata: download rootfs-desktop.ext4.zst from Releases, or:
+ROOT_PASSWORD=... ./linux-mainline/scripts/build-rootfs-desktop.sh
 ./linux-mainline/scripts/flash-rootfs.sh          # userdata — Android /data is gone
 ./linux-mainline/scripts/flash-boot.sh flash-b    # dtbo_b + vbmeta_b + vendor_boot_b + boot_b
 ```
 
-Or download the release boot chain and only build userdata locally:
+Or download the release (boot chain + desktop rootfs):
 
 ```bash
-gh release download v0.1.0 --repo Huabin1010/dagu-mainline-linux --dir linux-mainline/out
-cd linux-mainline/out && sha256sum -c SHA256SUMS
-# copy the four images next to the scripts' defaults, then:
+gh release download --repo Huabin1010/dagu-mainline-linux --dir linux-mainline/out
+cd linux-mainline/out && sha256sum -c SHA256SUMS && sha256sum -c rootfs-desktop.SHA256SUMS
+cd ../..
 ./linux-mainline/scripts/flash-rootfs.sh
 ./linux-mainline/scripts/flash-boot.sh flash-b
 ```
@@ -98,9 +99,9 @@ DAGU_HOST=<tablet-wifi-ip> ./linux-mainline/scripts/dagu-mic-deploy.sh
 | USB RNDIS SSH | `ssh -i linux-mainline/out/id_dagu root@192.168.7.2` |
 | Wi-Fi SSH | tablet LAN address, same key |
 
-The root password is **not** in git. Use `ROOT_PASSWORD` at image build time, or `linux-mainline/out/root-password` (gitignored).
+The **prebuilt** desktop logs in as `dagu` / `dagu` (root is the same). Change it. Local builds use `ROOT_PASSWORD`; do not commit it.
 
-Desktop: GNOME Speakers + **Built-in Microphone** (WCD9385 AMIC5, Android speaker-mic path).
+Desktop: GNOME Speakers + **Built-in Microphone** (WCD9385 AMIC5, Android speaker-mic path). Userdata steps: [rootfs guide](rootfs-guide.md).
 
 ## Unbrick
 
@@ -121,4 +122,4 @@ EDL 9008 + official `flash_all`: [dagu EDL playbook](dagu-edl-recovery-full-play
 - Flash `dtbo-empty.img` (`dt_entry_count=0` → ~6 s back to fastboot)
 - `fastboot reboot` into stock Android `boot` after userdata is Ubuntu
 - Raise `vreg_l3a_0p9` to 1.104 V, bind Himax reset to GPIO100, or set `DAGU_PRIMARY_ENTRY_PROBE=1`
-- Put `rootfs.ext4` or passwords in a public release
+- Put your own passwords, SSH keys, or persist MACs in a public image

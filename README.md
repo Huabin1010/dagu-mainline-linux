@@ -23,6 +23,7 @@ Hardware notes and the full bring-up record live under [`linux-mainline/docs/`](
 An unfinished Windows-on-ARM / edk2-msm port lives under [`port/dagu/`](port/dagu/) and [`docs/uefi-port-dagu.md`](docs/uefi-port-dagu.md). That is **not** the daily system.
 
 **Flash tutorial:** [English](docs/flash-guide.md) · [简体中文](docs/zh-CN/flash-guide.md)
+**Rootfs / desktop image:** [English](docs/rootfs-guide.md) · [简体中文](docs/zh-CN/rootfs-guide.md)
 
 ## Quick start
 
@@ -47,9 +48,8 @@ cp linux-mainline/dts/local-addresses.dtsi.example \
 # 6. Pack boot.img
 ./linux-mainline/scripts/build-bootimg.sh
 
-# 7. Ubuntu rootfs (set a password; it is not stored in git)
-ROOT_PASSWORD=... ./linux-mainline/scripts/build-rootfs.sh
-./linux-mainline/scripts/build-rootfs-image.sh
+# 7. Ubuntu desktop on userdata (or download rootfs-desktop.ext4.zst)
+ROOT_PASSWORD=... ./linux-mainline/scripts/build-rootfs-desktop.sh
 
 # 8. Flash (device in fastboot). Use the in-tree USB tool, not Google fastboot 37.
 ./linux-mainline/scripts/flash-rootfs.sh          # userdata — wipes Android /data
@@ -66,7 +66,7 @@ Kernel sources (`linux-mainline/linux/`) and build outputs (`linux-mainline/out/
 - After userdata is Ubuntu, **do not** `fastboot reboot` into the stock Android `boot` of the current slot. Use the in-tree boot/flash scripts.
 - Brick recovery: volume-down + power → fastboot, or EDL 9008 with the official `flash_all` (**do not relock**). See [EDL playbook](docs/dagu-edl-recovery-full-playbook.md).
 
-Login: USB ACM `ttyACM0`, or SSH over USB RNDIS (`root@192.168.7.2`) / the tablet's Wi-Fi address. The root password is **not** in this repo. Export `ROOT_PASSWORD` or write `linux-mainline/out/root-password` (gitignored).
+Login: USB ACM `ttyACM0`, or SSH over USB RNDIS (`root@192.168.7.2`) / the tablet's Wi-Fi address. The **prebuilt** desktop uses `dagu` / `dagu`. Local builds: export `ROOT_PASSWORD` or write `linux-mainline/out/root-password` (gitignored).
 
 ## Layout
 

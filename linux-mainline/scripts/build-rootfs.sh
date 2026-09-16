@@ -161,7 +161,7 @@ sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$ROOTFS/etc
 mkdir -p "$ROOTFS/root/.ssh" "$ROOTFS/usr/local/sbin" "$ROOTFS/etc/systemd/system" \
 	"$ROOTFS/etc/systemd/system/multi-user.target.wants"
 chmod 700 "$ROOTFS/root/.ssh"
-if [[ -f "$ROOT/out/id_dagu.pub" ]]; then
+if [[ -f "$ROOT/out/id_dagu.pub" && "${SKIP_HOST_SSH_KEY:-0}" != 1 ]]; then
 	install -m 600 "$ROOT/out/id_dagu.pub" "$ROOTFS/root/.ssh/authorized_keys"
 fi
 

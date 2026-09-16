@@ -2,6 +2,7 @@
 # Speaker / mic / cameras on a running dagu. Use Wi-Fi SSH, not ttyGS0.
 # Stock Android speaker: TERT_TDM_RX_0, 2ch S24_LE 48 kHz, all CS35L41 slot 0/1.
 # Stock speaker-mic: TX DEC0=SWR_MIC, SMIC MUX0=ADC3, ADC4 MIXER, ADC4 MUX=INP5.
+# Capture PCM is MultiMedia2 (hw:0,1) so it does not steal speaker MM1.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="${DAGU_SSH_HOST:-192.168.7.2}"
@@ -43,16 +44,37 @@ cat /tmp/spk.log || true
 echo ===cs35l41===
 dmesg | grep -iE "cs35l41|PUP|AFE enable|fail to start AFE|tdm_cfg|dagu TDM|0x100ef|cmd 0x" | tail -40 || true
 echo ===mic-route===
-amixer -c 0 cset name="MultiMedia1 Mixer TX_CODEC_DMA_TX_3" 1 || true
-amixer -c 0 cset name="TX DEC0 MUX" "SWR_MIC" || true
-amixer -c 0 cset name="TX SMIC MUX0" "ADC3" || true
-amixer -c 0 cset name="TX_AIF1_CAP Mixer DEC0" 1 || true
-amixer -c 0 cset name="ADC4_MIXER Switch" 1 || true
-amixer -c 0 cset name="ADC4 MUX" "INP5" || true
+if [ -x /usr/local/sbin/dagu-mic-route.sh ]; then
+  /usr/local/sbin/dagu-mic-route.sh || true
+else
+  amixer -c 0 cset name="MultiMedia2 Mixer TX_CODEC_DMA_TX_3" 1 || true
+  amixer -c 0 cset name="TX DEC0 MUX" "SWR_MIC" || true
+  amixer -c 0 cset name="TX SMIC MUX0" "ADC3" || true
+  amixer -c 0 cset name="TX_AIF1_CAP Mixer DEC0" 1 || true
+  amixer -c 0 cset name="ADC4_MIXER Switch" 1 || true
+  amixer -c 0 cset name="ADC4 MUX" "INP5" || true
+  amixer -c 0 cset name="ADC4 Switch" 1 || true
+  amixer -c 0 cset name="TX3 MODE" "ADC_NORMAL" || true
+  amixer -c 0 cset name="ADC4 Volume" 12 || true
+fi
 echo ===arecord===
-arecord -D hw:0,0 -c 1 -r 48000 -f S16_LE -d 2 /tmp/mic.wav || \
-  arecord -D plughw:0,0 -c 1 -r 48000 -f S16_LE -d 2 /tmp/mic.wav || true
+arecord -D hw:0,1 -c 1 -r 48000 -f S16_LE -d 2 /tmp/mic.wav || \
+  arecord -D plughw:0,1 -c 1 -r 48000 -f S16_LE -d 2 /tmp/mic.wav || true
 ls -l /tmp/mic.wav 2>/dev/null || true
+python3 - <<'PY' || true
+import struct, math, wave
+try:
+    w = wave.open("/tmp/mic.wav", "rb")
+    n = w.getnframes()
+    data = w.readframes(n)
+    s = struct.unpack("<%dh" % (len(data)//2), data)
+    buf = s[len(s)//2:] if s else []
+    rms = math.sqrt(sum(x*x for x in buf)/len(buf)) if buf else 0
+    peak = max(abs(x) for x in buf) if buf else 0
+    print("mic rms=%.1f peak=%d frames=%d" % (rms, peak, n))
+except Exception as e:
+    print("mic analyze:", e)
+PY
 echo ===pipeline-links===
 MC=/dev/media0
 media-ctl -d $MC -p 2>/dev/null | head -5 || true

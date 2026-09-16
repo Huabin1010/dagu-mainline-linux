@@ -64,5 +64,20 @@ if [ -n "${id:-}" ]; then
 	wpctl set-volume "$id" 1.0 >/dev/null 2>&1 || true
 fi
 
+src=$(wpctl status 2>/dev/null | awk '
+	$0 ~ /Sources:/{s=1}
+	s && /Filters:/{exit}
+	s && /Streams:/{exit}
+	s && /Video/{exit}
+	s && /Microphone|Mic/ {
+		for (i=1;i<=NF;i++)
+			if ($i ~ /^[0-9]+\.?$/) { gsub(/\./,"",$i); print $i; exit }
+	}
+')
+if [ -n "${src:-}" ]; then
+	wpctl set-default "$src" >/dev/null 2>&1 || true
+	wpctl set-mute "$src" 0 >/dev/null 2>&1 || true
+fi
+
 wpctl status 2>/dev/null | sed -n '/Audio/,/Video/p' || true
 exit 0

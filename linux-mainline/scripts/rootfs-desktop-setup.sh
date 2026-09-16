@@ -1789,7 +1789,7 @@ mkdir -p /usr/share/alsa/ucm2/Xiaomi-dagu \
 cat >/usr/share/alsa/ucm2/conf.d/sm8250/Xiaomi-dagu-CS35L41-WCD9385.conf <<'EOF'
 Syntax 7
 
-Comment "Xiaomi Pad 5 Pro 12.4 speakers"
+Comment "Xiaomi Pad 5 Pro 12.4 speakers and built-in mic"
 
 SectionUseCase."HiFi" {
 	File "/Xiaomi-dagu/HiFi.conf"
@@ -1852,6 +1852,36 @@ SectionDevice."Speaker" {
 		# No PlaybackMixerElem: GNOME must not move Digital PCM.
 	}
 }
+
+SectionDevice."Mic" {
+	Comment "Built-in microphone (WCD9385 AMIC5)"
+	EnableSequence [
+		cset "name='MultiMedia2 Mixer TX_CODEC_DMA_TX_3' on"
+		cset "name='TX DEC0 MUX' SWR_MIC"
+		cset "name='TX SMIC MUX0' ADC3"
+		cset "name='TX_AIF1_CAP Mixer DEC0' 1"
+		cset "name='ADC4_MIXER Switch' on"
+		cset "name='ADC4 MUX' INP5"
+		cset "name='ADC4 Switch' on"
+		cset "name='TX3 MODE' ADC_NORMAL"
+		cset "name='ADC4 Volume' 12"
+	]
+	DisableSequence [
+		cset "name='ADC4 Switch' off"
+		cset "name='ADC4_MIXER Switch' off"
+		cset "name='TX SMIC MUX0' ZERO"
+		cset "name='TX_AIF1_CAP Mixer DEC0' 0"
+		cset "name='TX3 MODE' ADC_INVALID"
+		cset "name='MultiMedia2 Mixer TX_CODEC_DMA_TX_3' off"
+	]
+	Value {
+		CapturePriority 200
+		CapturePCM "hw:${CardId},1"
+		CaptureChannels 1
+		CaptureRate 48000
+		# No CaptureMixerElem: GNOME must not slam ADC4 Volume.
+	}
+}
 EOF
 cat >/usr/local/sbin/dagu-speaker-route.sh <<'EOF'
 #!/bin/sh
@@ -1903,9 +1933,33 @@ if [ ! -f "$WP_STAMP" ]; then
 	fi
 	date -u +%s >"$WP_STAMP"
 fi
+if [ -x /usr/local/sbin/dagu-mic-route.sh ]; then
+	/usr/local/sbin/dagu-mic-route.sh || true
+fi
 exit 0
 EOF
 chmod 755 /usr/local/sbin/dagu-speaker-route.sh
+cat >/usr/local/sbin/dagu-mic-route.sh <<'EOF'
+#!/bin/sh
+# Android overlay_static speaker-mic: AMIC5 / ADC4 INP5 / TX SMIC ADC3.
+set -eu
+CARD="${DAGU_ALSA_CARD:-0}"
+cset() {
+	amixer -c "$CARD" cset "name=$1" "$2" >/dev/null 2>&1 || true
+}
+cset "MultiMedia2 Mixer TX_CODEC_DMA_TX_3" on
+cset "TX DEC0 MUX" SWR_MIC
+cset "TX SMIC MUX0" ADC3
+cset "TX_AIF1_CAP Mixer DEC0" 1
+cset "ADC4_MIXER Switch" 1
+cset "ADC4 MUX" INP5
+cset "ADC4 Switch" 1
+cset "TX3 MODE" ADC_NORMAL
+cset "ADC4 Volume" 12
+cset "TX_DEC0 Volume" 84
+exit 0
+EOF
+chmod 755 /usr/local/sbin/dagu-mic-route.sh
 cat >/etc/systemd/system/dagu-speaker-route.service <<'EOF'
 [Unit]
 Description=dagu CS35L41 TDM mixer route
@@ -1956,6 +2010,21 @@ monitor.alsa.rules = [
         api.alsa.soft-mixer = true
         audio.position = [ FL FR ]
         node.nick = "Speakers"
+        priority.session = 2000
+      }
+    }
+  }
+  {
+    matches = [
+      { node.name = "~alsa_input.platform-sound.*" }
+    ]
+    actions = {
+      update-props = {
+        audio.channels = 1
+        audio.rate = 48000
+        api.alsa.soft-mixer = true
+        node.nick = "Microphone"
+        node.description = "Built-in Microphone"
         priority.session = 2000
       }
     }
@@ -2419,6 +2488,20 @@ if [ -n "${id:-}" ]; then
 	wpctl set-default "$id" >/dev/null 2>&1 || true
 	wpctl set-mute "$id" 0 >/dev/null 2>&1 || true
 	wpctl set-volume "$id" 1.0 >/dev/null 2>&1 || true
+fi
+src=$(wpctl status 2>/dev/null | awk '
+	$0 ~ /Sources:/{s=1}
+	s && /Filters:/{exit}
+	s && /Streams:/{exit}
+	s && /Video/{exit}
+	s && /Microphone|Mic/ {
+		for (i=1;i<=NF;i++)
+			if ($i ~ /^[0-9]+\.?$/) { gsub(/\./,"",$i); print $i; exit }
+	}
+')
+if [ -n "${src:-}" ]; then
+	wpctl set-default "$src" >/dev/null 2>&1 || true
+	wpctl set-mute "$src" 0 >/dev/null 2>&1 || true
 fi
 exit 0
 EOF

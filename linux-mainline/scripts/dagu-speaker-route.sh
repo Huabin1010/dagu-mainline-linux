@@ -86,4 +86,7 @@ if [ ! -f "$WP_STAMP" ]; then
 	fi
 	date -u +%s >"$WP_STAMP"
 fi
+if [ -x /usr/local/sbin/dagu-mic-route.sh ]; then
+	/usr/local/sbin/dagu-mic-route.sh || true
+fi
 exit 0

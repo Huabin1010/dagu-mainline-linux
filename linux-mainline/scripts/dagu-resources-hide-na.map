@@ -4,8 +4,3 @@ LIBADWAITA_1_0 {
 	local:
 		*;
 };
-
-GTK_4.0 {
-	global:
-		gtk_label_set_label;
-};

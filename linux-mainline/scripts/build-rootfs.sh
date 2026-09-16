@@ -261,6 +261,6 @@ if [[ -d "$FW" ]]; then
 	echo "==> staged firmware into rootfs"
 fi
 echo "==> $ROOTFS"
-du -sh "$ROOTFS"
+du -x -sh "$ROOTFS" || true
 echo "Pack:  ./scripts/build-rootfs-image.sh"
 echo "Flash: ./scripts/flash-rootfs.sh   # fastboot flash userdata (wipes Android)"

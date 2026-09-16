@@ -27,9 +27,10 @@ cp -f "$SRC" "$DTS_DIR/sm8250-xiaomi-dagu.dts"
 cp -f "$STOCK_RM" "$DTS_DIR/dagu-reserved-memory-stock.dtsi"
 cp -f "$LOCAL_ADDR" "$DTS_DIR/local-addresses.dtsi"
 
-# Product DTS includes these names. CS35L41 on GENI I2C SE1/SE3 and Himax
-# on GENI SPI SE4: per-SE IRAM + skip-wrapper, never wrapper CSR / ICC / GPI.
-# Empty stubs stay in-tree for restore-a gpio fallback; they are not the build.
+# Product DTS includes these names. CS35L41 SE1/SE3, BQ27Z561 SE0/SE13,
+# KTZ8866 SE11/SE9, Nanosic SE2, BQ25970 SE15/SE16, Himax SPI SE4:
+# per-SE IRAM + skip-wrapper, never wrapper CSR / ICC / GPI. Empty stubs
+# stay in-tree for restore-a gpio fallback; they are not the build.
 copy_geni_on() {
 	local on="$1" dest="$2"
 	[[ -f "$on" ]] || { echo "missing $on" >&2; exit 1; }

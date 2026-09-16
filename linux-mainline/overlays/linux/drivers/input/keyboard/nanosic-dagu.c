@@ -2,8 +2,9 @@
 /*
  * Nanosic 803 keyboard MCU on Xiaomi dagu (I2C @ 0x4c).
  *
- * Hardware: QUP SE2 pads gpio115/116 (SDA/SCL). Do not enable GENI &i2c2 —
- * the same 0x988000 SE as uart2, and geni_se_init hangs this QHEE.
+ * Hardware: QUP0 SE2 pads gpio115/116 (SDA/SCL). Product I2C is GENI &i2c2
+ * (per-SE IRAM + skip-wrapper). uart2/spi2 stay disabled — same 0x988000
+ * SE MMIO. gpio kb_i2c_se2 is restore-a fallback.
  * Power/IRQ from live Android DT: vdd GPIO127, reset GPIO141, sleep GPIO155,
  * data IRQ GPIO83 falling, wakeup GPIO46 rising.
  *

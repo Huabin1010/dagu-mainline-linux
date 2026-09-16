@@ -49,11 +49,11 @@ Python / 软路径严重程度：
 | 2. 多媒体 | Venus + Spectra 480 + Hexagon | Venus 4K60 已通；**Spectra IFE 没接**；相机是 CPU SoftISP | 极高 | 视频正路。相机是最大的软路径洞 |
 | 3. 外设与感知 | 120 Hz + 双摄 + 四喇叭 + IMU | 显示/触控/麦/喇叭已通；IMU/ALS 关；DP 未接 | 极高 | 日常能用。传感器和 Type-C 异显缺 |
 | 4. 网络 | QCA6390 Wi‑Fi 6 + BT 5.x | ath11k ~600 Mbps；蓝牙 HID 已通；无蜂窝 | 高 | 够用。无以太网、无 5G（本 SKU 本就没有） |
-| 5. 总线扩展 | PCIe / USB3 / QUP GENI | PCIe0 只给 Wi‑Fi；**Himax SE4 + CS35L41 SE1/SE3 已走 GENI**；USB3 未训 | 中 | 平板够。工控总线本机没有 |
+| 5. 总线扩展 | PCIe / USB3 / QUP GENI | PCIe0 只给 Wi‑Fi；**Himax / CS35L41 / KTZ / FG / 键盘 / 充电泵 已走 GENI**；USB3 未训 | 中 | 平板够。工控总线本机没有 |
 | 6. 软件生态 | 原厂 4.19 BSP | 主线 7.0 + Ubuntu + 大量 overlay | 极高 | 主线是资产。QHEE 禁的是 **wrapper CSR / ICC / GPI**，不是 GENI SE |
 | 7. 功耗热可靠 | PM8150 / 双电芯 / 被动散热 | DVFS 已通；s2idle 电源键可醒；无 RTC | 高 | 能睡。充电/无线充 DT 已写，未专项烤机 |
 
-一句话：这不是「芯片算力不够」。**打回兔子的是 QUPV3 wrapper CSR 和 ICC BCM 投票，不是 GENI。** `#244` 上 uart6 / Himax / CS35L41 都是 per-SE IRAM + `skip-wrapper-fw-init`。主线仍没有 Spectra IFE / Hexagon CDSP，所以相机还是 CPU SoftISP。尚未迁走的只有 KTZ / 电量 / 磁吸键盘的 **i2c-gpio**。
+一句话：这不是「芯片算力不够」。**打回兔子的是 QUPV3 wrapper CSR 和 ICC BCM 投票，不是 GENI。** `#244` 上 uart6 / Himax / CS35L41 都是 per-SE IRAM + `skip-wrapper-fw-init`。KTZ SE11/SE9、电量 SE0/SE13、键盘 SE2、充电泵 SE15/SE16 同款（QUP1/QUP2 只 okay AHB，不加 wrapper 固件）。主线仍没有 Spectra IFE / Hexagon CDSP，所以相机还是 CPU SoftISP。尚未迁走的只有无线充 se8 的 **i2c-gpio**。
 
 ---
 
@@ -188,7 +188,7 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 | 考察点 | 硬件 | Linux |
 |--------|------|-------|
 | 面板 | L81A IPS，物理 **1600×2560 @ 120 Hz**，DSC dual-DPHY 8 bpc | **已通**。`get_modes()` 只登记 120 Hz，避免 GNOME 选同名 60 Hz |
-| 背光 | 双 KTZ8866 | `i2c-gpio`（禁止 GENI i2c9/11）。GNOME 一个 `l81a-wled`。**整次开机不要拉低 GPIO139 HWEN** |
+| 背光 | 双 KTZ8866 | GENI I2C SE11/SE9（per-SE IRAM + skip-wrapper）。GNOME 一个 `l81a-wled`。**整次开机不要拉低 GPIO139 HWEN** |
 | HDMI / DP / eDP | Type-C DP alt 经 PS5169 | **DT 已写，活树未挂**。无 HDMI 口 |
 | 异显 | 安卓可 DP | **未做**。单屏 |
 | 合成 | HWC DEVICE + SYNC_FD | Mutter UBWC 主 fb。SM8250 DPU 6.0 **无 inline rotation**；日常 270° 由 Chrome GPU 预旋 |
@@ -208,7 +208,7 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 | 霍尔 GPIO110/121 | gpio-keys | DT 已写 `SW_LID` / `SW_TABLET_MODE`。**已迁走**：不再装 `dagu-tablet-mode.py` |
 | 距离 / 地磁 | 未作为交付 | 未做 |
 | 触控 Himax HX83121 | GENI SPI | **已通** `#244`：`990000.spi` / `spi4.0`，`dagu SPI FIFO proto=1 depth=16 width=32 fifo_if_dis=0 skip_wrap=1`。gpio8–11 function qup4，IRQ gpio39 LEVEL_LOW。probe 读 event30 不是全 `0xff`。禁止 GPIO100、禁止 GPI/SE DMA |
-| 磁吸键盘 | QUP I2C | DT `i2c-gpio-se2`。未专项验收。禁止未测就开 GENI `&i2c2` |
+| 磁吸键盘 | QUP I2C | **DT 已写** GENI `&i2c2`（per-SE IRAM + skip-wrapper，uart2/spi2 关）。未专项验收。gpio `kb_i2c_se2` 保持 disabled |
 
 ---
 
@@ -235,11 +235,11 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 | USB | DWC3 HS + SS PHY | HS **gadget** `g_serial` `0525:a4a7` 已通（验收：>30 s 不回兔子）。OTG host / USB3 / DP **未训**。切 host 会掉串口 |
 | SATA | 无 | 无 |
 | CAN / RS-485 / RS-232 | 无 | 无 |
-| QUP GENI SPI/I2C | 原厂总线 | **产品路径已开。** `#244`：`990000.spi` Himax FIFO；`984000.i2c` / `98c000.i2c` 四颗 CS35L41；uart6 仍 SE6 IRAM。禁止 wrapper CSR、`CONFIG_QCOM_GPI_DMA`、ICC。背光 KTZ（se9/11）、电量/充电（se0/13/15/16）、键盘（se2）仍 **i2c-gpio** |
+| QUP GENI SPI/I2C | 原厂总线 | **产品路径已开。** `#244`：`990000.spi` Himax FIFO；`984000.i2c` / `98c000.i2c` 四颗 CS35L41；uart6 仍 SE6 IRAM。KTZ SE11/SE9 + FG SE0/SE13 + 键盘 SE2 + 充电泵 SE15/SE16 同款 per-SE IRAM（`&qupv3_id_1` / `&qupv3_id_2` 只 okay AHB）。禁止 wrapper CSR、`CONFIG_QCOM_GPI_DMA`、ICC。无线充 se8 仍 **i2c-gpio** |
 | UART | uart6 蓝牙 | 只把 `qupv3fw.elf` 写进 **SE6 IRAM**。禁止给 `&qupv3_id_0` 加 `firmware-name` |
 | GPIO / PWM / ADC | PMIC + TLMM | 音量键、电源键、闪光灯 DT 已写 |
 
-工控维度对本板不适用。扩展税已经不是「GENI 全关」，而是 **KTZ / FG / nanosic 还在 gpio 位bang**，以及 USB3/DP 未训。
+工控维度对本板不适用。扩展税已经不是「GENI 全关」，而是 **无线充 se8 还在 gpio 位bang**，以及 USB3/DP 未训。
 
 板上 `#244` 遥测（不是实验开关）：
 
@@ -340,7 +340,9 @@ g_serial 0525:a4a7 held >30s；A 槽未动
 |--------|----------------|----------|------|
 | `spi-gpio` 读 Himax | QUP SE4 GENI SPI | **已迁走** `#244`：per-SE IRAM + FIFO，`geni_can_dma` 强制 false（不开 GPI/SE DMA） | 触控走硬件 FIFO，不再 Gold 位bang |
 | `i2c-gpio` 喇叭 | QUP GENI I2C | **已迁走** `#242` 起：CS35L41 在 SE1/SE3；`#244` 同镜 | 喇叭 I2C 不再位bang |
-| `i2c-gpio` 背光 / 电量 / 键盘 | QUP GENI I2C | `#244` 仍有 `i2c-gpio-se{0,2,8,9,11,13,15,16}`。禁止未测就开 GENI i2c2/9/11 | 背光/键盘 I2C 仍慢 |
+| `i2c-gpio` 背光 / 电量 | QUP GENI I2C | **已迁** KTZ SE11/SE9 + FG SE0/SE13；`&qupv3_id_1` 只 okay AHB | 亮度/电量不再 gpio 位bang |
+| `i2c-gpio` 充电泵 / 键盘 | QUP GENI I2C | **已迁** 键盘 SE2 + 充电泵 SE15/SE16；`&qupv3_id_2` 只 okay AHB。不要 okay `uart2` | 键盘/泵不再 gpio 位bang |
+| `i2c-gpio` 无线充 | QUP GENI I2C | 仍 `i2c-gpio-se8`（P9418） | 无线充 I2C 仍慢 |
 | ICC stub（空投票） | `CONFIG_INTERCONNECT_QCOM_SM8250` | BCM `rpmh_write_batch` 超时拖死 USB/MDSS | 高带宽多客户时没有互连 QoS |
 | UFS CLK_SCALING off | ufshc devfreq | 与 QUERY_ATTR 死锁 panic | 固定时钟，功耗略差 |
 | 无 Fluence | ADSP 语音拓扑 | 主线 mixer 没接 | 免提回声 |
@@ -389,7 +391,7 @@ g_serial 0525:a4a7 held >30s；A 槽未动
 | 二级 | 指标 | dagu Linux |
 |------|------|------------|
 | PCIe/USB/SATA | Gen3、USB3 | PCIe0 **已通**。USB3/SATA **无/未训** |
-| 工控 | CAN/RS485/PWM | **无此硬件**。Himax/喇叭已走 GENI；其余仍 gpio |
+| 工控 | CAN/RS485/PWM | **无此硬件**。Himax/喇叭/KTZ/FG/键盘/充电泵 已走 GENI；无线充 se8 仍 gpio |
 
 ### 维度 6
 
@@ -458,9 +460,9 @@ NPU **没有**。相机是 CPU SoftISP。弱光/HDR 比不过安卓 IFE。要视
 | 4 | 霍尔走 gpio-keys | **已迁走** `dagu-tablet-mode.py` |
 | 5 | Himax GENI SPI FIFO + 内核 `freq_qos` | **已迁走** spi-gpio 与 Python 升频 |
 | 6 | CS35L41 GENI I2C SE1/SE3 | **已迁走** 功放 i2c-gpio |
-| 7 | KTZ / FG / nanosic 按 uart6 同款收 GENI | 仍 `i2c-gpio-se{0,2,8,9,11,13,15,16}`。一次只迁已测 SE |
+| 7 | KTZ / FG / 键盘 / 充电泵 按 uart6 同款收 GENI | **已迁** SE0/SE2/SE9/SE11/SE13/SE15/SE16。仍 `i2c-gpio-se8`（无线充） |
 | 8 | SLPI：PAS 验签 + 有客户端再 okay | 不要 AP 上猜 I2C。见 PIX 审计笔记 |
 | 9 | USB3 + DP | 现在只有 HS gadget |
 | 10 | Spectra IFE / CDSP | **PIX no-go**（`dagu-camss-pix-audit.md`）。CDSP 无工作负荷不开 |
 
-**Python 不是这台机器的架构。** `#244` 产品路径：loopback ELF、C 版电源键/触控升频、timesyncd、keyd、霍尔 gpio-keys、Himax GENI SPI FIFO、CS35L41 GENI I2C。仍软的是 **DebayerCpu** 和 KTZ/FG/nanosic 的 **i2c-gpio**。禁止 wrapper CSR / GPI DMA / ICC；失败 `restore-a`。
+**Python 不是这台机器的架构。** `#244` 产品路径：loopback ELF、C 版电源键/触控升频、timesyncd、keyd、霍尔 gpio-keys、Himax GENI SPI FIFO、CS35L41 GENI I2C。KTZ/FG/键盘/充电泵 同款 GENI。仍软的是 **DebayerCpu** 和无线充 se8 的 **i2c-gpio**。禁止 wrapper CSR / GPI DMA / ICC；失败 `restore-a`。

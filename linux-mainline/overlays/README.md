@@ -8,8 +8,8 @@
 | `drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c` | 在 DPU `card0/device` 上暴露 `gpu_busy_percent` / VRAM / hwmon，给 GNOME Resources 读 Adreno |
 | `drivers/input/touchscreen/himax-dagu.c` | HX83121 SPI；完整 CAF hxchipset 在 vendor，不入库 |
 | `drivers/usb/misc/ps5169-dagu.c` | PS5169 USB3/DP redriver，CAF 初始化序列 |
-| `drivers/input/keyboard/nanosic-dagu.c` | 磁吸键盘 MCU，QUP SE2 脚 gpio115/116 位bang（不要开 GENI i2c2 / uart2） |
-| `drivers/power/supply/bq2597x-dagu.c` | 双 BQ25970 充电泵，PPS 策略不抄 CAF usbpd-pm |
+| `drivers/input/keyboard/nanosic-dagu.c` | 磁吸键盘 MCU，QUP0 SE2 GENI I2C gpio115/116（uart2 保持关） |
+| `drivers/power/supply/bq2597x-dagu.c` | 双 BQ25970 充电泵，GENI I2C SE15/SE16（PPS 策略不抄 CAF usbpd-pm） |
 | `drivers/power/supply/pm8150b-charger-dagu.c` | PM8150B SMB5 5 V/9 V 充电；不抄 CAF qpnp-smb5，不写 Type-C |
 | `drivers/power/supply/p9418-dagu.c` | P9418 无线充探测 |
 | `drivers/power/supply/xiaomi-dual-fg.c` | 双 BQ27Z561 合成 `bms`（CAF 加权 SoC） |

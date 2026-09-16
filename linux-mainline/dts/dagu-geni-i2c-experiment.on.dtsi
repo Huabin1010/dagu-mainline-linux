@@ -1,7 +1,8 @@
 /*
- * Product: CS35L41 on GENI I2C SE1/SE3. Per-SE IRAM like uart6.
- * Do not put firmware-name on &qupv3_id_0. Do not enable GPI DMA.
- * Failure: flash-boot-legacy.sh restore-a.
+ * Product: CS35L41 SE1/SE3, BQ27Z561 SE0/SE13, KTZ8866 SE11/SE9,
+ * Nanosic SE2, BQ25970 SE15/SE16. Per-SE IRAM like uart6.
+ * Do not put firmware-name on &qupv3_id_0 / _1 / _2. Do not enable GPI DMA.
+ * uart2/spi2 stay off (same SE MMIO as i2c2). Failure: restore-a.
  */
 &amp_i2c_se1 { status = "disabled"; };
 &amp_i2c_se3 { status = "disabled"; };
@@ -128,4 +129,194 @@
 &tert_tdm_codec {
 	sound-dai = <&geni_cs35l41_tl 0>, <&geni_cs35l41_tr 0>,
 		    <&geni_cs35l41_bl 0>, <&geni_cs35l41_br 0>;
+};
+
+&fg_i2c_se0 { status = "disabled"; };
+&fg_i2c_se13 { status = "disabled"; };
+&ktz_i2c_se11 { status = "disabled"; };
+&ktz_i2c_se9 { status = "disabled"; };
+
+/*
+ * QUP1 AHB only. ABL already programmed the wrapper; never firmware-name here.
+ * gpi_dma1 stays off — I2C FIFO, same as CS35L41 on QUP0.
+ */
+&gpi_dma1 { status = "disabled"; };
+&qupv3_id_1 { status = "okay"; };
+
+&i2c0 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
+	pinctrl-names = "default";
+	pinctrl-0 = <&fg_i2c_se0_qup>;
+	clock-frequency = <100000>;
+	status = "okay";
+	/delete-node/ fuel-gauge@55;
+
+	geni_fg_slave: fuel-gauge-r@55 {
+		compatible = "ti,bq27z561";
+		reg = <0x55>;
+		monitored-battery = <&battery_r>;
+		xiaomi,pack-cell;
+	};
+};
+
+&i2c13 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
+	pinctrl-names = "default";
+	pinctrl-0 = <&fg_i2c_se13_qup>;
+	clock-frequency = <100000>;
+	status = "okay";
+	/delete-node/ fuel-gauge@55;
+
+	geni_fg_master: fuel-gauge-l@55 {
+		compatible = "ti,bq27z561";
+		reg = <0x55>;
+		monitored-battery = <&battery_l>;
+		xiaomi,pack-cell;
+	};
+};
+
+&i2c11 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
+	pinctrl-names = "default";
+	pinctrl-0 = <&ktz_i2c_se11_qup>;
+	clock-frequency = <400000>;
+	status = "okay";
+	/delete-node/ backlight@11;
+
+	geni_ktz8866_a: backlight@11 {
+		compatible = "kinetic,ktz8866";
+		reg = <0x11>;
+		vddpos-supply = <&bl_vddpos_5p5>;
+		vddneg-supply = <&bl_vddneg_5p5>;
+		current-num-sinks = <5>;
+		kinetic,internal;
+	};
+};
+
+&i2c9 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
+	pinctrl-names = "default";
+	pinctrl-0 = <&ktz_i2c_se9_qup>;
+	clock-frequency = <400000>;
+	status = "okay";
+
+	geni_ktz8866_b: backlight@11 {
+		compatible = "kinetic,ktz8866";
+		reg = <0x11>;
+		vddpos-supply = <&bl_vddpos_5p5>;
+		vddneg-supply = <&bl_vddneg_5p5>;
+		current-num-sinks = <5>;
+		kinetic,internal;
+	};
+};
+
+&dual_fg {
+	master-fg = <&geni_fg_master>;
+	slave-fg = <&geni_fg_slave>;
+};
+
+&display_panel {
+	backlight = <&geni_ktz8866_a>;
+	backlight-aux = <&geni_ktz8866_b>;
+};
+
+&kb_i2c_se2 { status = "disabled"; };
+&chg_i2c_se15 { status = "disabled"; };
+&chg_i2c_se16 { status = "disabled"; };
+
+/*
+ * QUP2 AHB only. Never firmware-name on the wrapper. gpi_dma2 off.
+ * SE2 is I2C only: uart2/spi2 share 0x988000 with &i2c2.
+ */
+&gpi_dma2 { status = "disabled"; };
+&uart2 { status = "disabled"; };
+&spi2 { status = "disabled"; };
+&qupv3_id_2 { status = "okay"; };
+
+&i2c2 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
+	pinctrl-names = "default";
+	pinctrl-0 = <&kb_i2c_se2_qup>;
+	clock-frequency = <400000>;
+	status = "okay";
+
+	geni_kb_mcu: keyboard@4c {
+		compatible = "nanosic,803";
+		reg = <0x4c>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&nanosic_gpio_default>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <83 IRQ_TYPE_EDGE_FALLING>;
+		reset-gpios = <&tlmm 141 GPIO_ACTIVE_HIGH>;
+		status-gpios = <&tlmm 46 GPIO_ACTIVE_HIGH>;
+		vdd-gpios = <&tlmm 127 GPIO_ACTIVE_HIGH>;
+		sleep-gpios = <&tlmm 155 GPIO_ACTIVE_HIGH>;
+		wakeup-source;
+	};
+};
+
+&i2c15 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
+	pinctrl-names = "default";
+	pinctrl-0 = <&chg_i2c_se15_qup>;
+	clock-frequency = <400000>;
+	status = "okay";
+
+	geni_chg_pump_master: charger-pump-master@66 {
+		compatible = "ti,bq25970";
+		reg = <0x66>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <68 IRQ_TYPE_EDGE_FALLING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&bq2597x_master_int_default>;
+		ti,bq2597x,master;
+	};
+};
+
+&i2c16 {
+	/delete-property/ interconnects;
+	/delete-property/ interconnect-names;
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	firmware-name = "qcom/sm8250/xiaomi/dagu/qupv3fw.elf";
+	qcom,skip-wrapper-fw-init;
+	pinctrl-names = "default";
+	pinctrl-0 = <&chg_i2c_se16_qup>;
+	clock-frequency = <400000>;
+	status = "okay";
+
+	geni_chg_pump_slave: charger-pump-slave@66 {
+		compatible = "ti,bq25970";
+		reg = <0x66>;
+	};
 };

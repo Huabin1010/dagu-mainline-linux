@@ -238,9 +238,9 @@
 	};
 
 	/*
-	 * Dual BQ27Z561 (CAF qupv3_se0 slave + se13 master). GENI I2C hangs
-	 * this QHEE — bit-bang the same pads as sm8250.dtsi qup_i2c0/13.
-	 * Dump charge-full-design = 5000000 uAh per cell.
+	 * Dual BQ27Z561 (CAF qupv3_se0 slave + se13 master). Product path is
+	 * GENI I2C in dagu-geni-i2c-experiment.on.dtsi (this gpio node is
+	 * the restore-a fallback). Dump charge-full-design = 5000000 uAh.
 	 */
 	fg_i2c_se0: i2c-gpio-se0 {
 		compatible = "i2c-gpio";
@@ -281,7 +281,9 @@
 		};
 	};
 
-	/* BQ25970 master CAF qupv3_se15 @66, IRQ GPIO68. */
+	/* BQ25970 master CAF qupv3_se15 @66, IRQ GPIO68.
+	 * Product path is GENI I2C in dagu-geni-i2c-experiment.on.dtsi.
+	 */
 	chg_i2c_se15: i2c-gpio-se15 {
 		compatible = "i2c-gpio";
 		#address-cells = <1>;
@@ -293,7 +295,7 @@
 		i2c-gpio,delay-us = <2>;
 		clock-frequency = <400000>;
 
-		charger-pump-master@66 {
+		chg_pump_master: charger-pump-master@66 {
 			compatible = "ti,bq25970";
 			reg = <0x66>;
 			interrupt-parent = <&tlmm>;
@@ -304,7 +306,9 @@
 		};
 	};
 
-	/* BQ25970 slave CAF qupv3_se16 @66. */
+	/* BQ25970 slave CAF qupv3_se16 @66.
+	 * Product path is GENI I2C in dagu-geni-i2c-experiment.on.dtsi.
+	 */
 	chg_i2c_se16: i2c-gpio-se16 {
 		compatible = "i2c-gpio";
 		#address-cells = <1>;
@@ -316,7 +320,7 @@
 		i2c-gpio,delay-us = <2>;
 		clock-frequency = <400000>;
 
-		charger-pump-slave@66 {
+		chg_pump_slave: charger-pump-slave@66 {
 			compatible = "ti,bq25970";
 			reg = <0x66>;
 		};
@@ -348,7 +352,7 @@
 
 	/*
 	 * Dual KTZ8866: CAF qupv3_se11 (gpio60/61) + se9 (gpio125/126).
-	 * GENI i2c9/i2c11 would geni_se_init-hang this QHEE. Bit-bang.
+	 * Product path is GENI I2C in dagu-geni-i2c-experiment.on.dtsi.
 	 * Do not bind enable-gpios (GPIO139): panel owns HWEN.
 	 */
 	ktz_i2c_se11: i2c-gpio-se11 {
@@ -395,10 +399,10 @@
 
 	/*
 	 * Nanosic 803 keyboard MCU. CAF qupv3_se2_i2c @ 0x988000 / 0x4c,
-	 * pins gpio115/116 function qup2. GENI i2c2 is the same SE as uart2
-	 * and geni_se_init hangs this QHEE — bit-bang the dump pads.
-	 * IRQ GPIO83 falling, wakeup GPIO46 rising, vdd 127, reset 141,
-	 * sleep 155. Hall GPIO110/121 stay on gpio_keys.
+	 * pins gpio115/116 function qup2. Product path is GENI &i2c2
+	 * (uart2/spi2 stay disabled — same SE MMIO). gpio node is restore-a
+	 * fallback. IRQ GPIO83 falling, wakeup GPIO46 rising, vdd 127,
+	 * reset 141, sleep 155. Hall GPIO110/121 stay on gpio_keys.
 	 */
 	kb_i2c_se2: i2c-gpio-se2 {
 		compatible = "i2c-gpio";
@@ -411,7 +415,7 @@
 		i2c-gpio,delay-us = <5>;
 		clock-frequency = <400000>;
 
-		keyboard@4c {
+		kb_mcu: keyboard@4c {
 			compatible = "nanosic,803";
 			reg = <0x4c>;
 			pinctrl-names = "default";
@@ -431,7 +435,7 @@
 	 * fg-*-disable is ACTIVE_HIGH isolate. Default both inactive so both
 	 * packs stay on the charge path (do not hog high — that drops a cell).
 	 */
-	dual-fuel-gauge {
+	dual_fg: dual-fuel-gauge {
 		compatible = "xiaomi,dual-fuel-gauge";
 		pinctrl-names = "default";
 		pinctrl-0 = <&fg_disable_default>;
@@ -662,10 +666,59 @@
 		bias-disable;
 	};
 
-	/* Dump qupv3_se2_i2c: gpio115/116 function qup2. Bit-bang as GPIO. */
+	fg_i2c_se0_qup: fg-i2c-se0-qup-state {
+		pins = "gpio28", "gpio29";
+		function = "qup0";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	fg_i2c_se13_qup: fg-i2c-se13-qup-state {
+		pins = "gpio36", "gpio37";
+		function = "qup13";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	ktz_i2c_se11_qup: ktz-i2c-se11-qup-state {
+		pins = "gpio60", "gpio61";
+		function = "qup11";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	ktz_i2c_se9_qup: ktz-i2c-se9-qup-state {
+		pins = "gpio125", "gpio126";
+		function = "qup9";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/* Dump qupv3_se2_i2c: gpio115/116 function qup2. gpio fallback. */
 	kb_i2c_se2_default: kb-i2c-se2-default-state {
 		pins = "gpio115", "gpio116";
 		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	kb_i2c_se2_qup: kb-i2c-se2-qup-state {
+		pins = "gpio115", "gpio116";
+		function = "qup2";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	chg_i2c_se15_qup: chg-i2c-se15-qup-state {
+		pins = "gpio44", "gpio45";
+		function = "qup15";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	chg_i2c_se16_qup: chg-i2c-se16-qup-state {
+		pins = "gpio48", "gpio49";
+		function = "qup16";
 		drive-strength = <2>;
 		bias-disable;
 	};

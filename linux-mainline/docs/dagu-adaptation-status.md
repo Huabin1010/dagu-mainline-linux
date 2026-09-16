@@ -37,7 +37,7 @@
 - 刷写用 `linux-mainline/scripts/fb-usb.py` / `flash-boot.sh flash-b`，不要 Google `fastboot reboot`
 - **禁止** `DAGU_PRIMARY_ENTRY_PROBE=1`，禁止在 `linux-mainline/linux/arch/arm64/kernel/head.S` 的 `primary_entry` 插 PSCI `SYSTEM_RESET`
 - 刷完 `g_serial` `0525:a4a7` 须保持 **>30s**，不能在约 25s 变回兔子 `18d1:d00d`
-- **禁止**给 `&qupv3_id_0` 加 `firmware-name`、写 QUPV3 wrapper CSR、`CONFIG_QCOM_GPI_DMA`、`CONFIG_INTERCONNECT_QCOM_SM8250`。uart6 / CS35L41 / Himax 只把 stock `qupv3fw.elf` 写进 **该 SE 的 IRAM**，并带 `qcom,skip-wrapper-fw-init`。
+- **禁止**给 `&qupv3_id_0` / `&qupv3_id_1` / `&qupv3_id_2` 加 `firmware-name`、写 QUPV3 wrapper CSR、`CONFIG_QCOM_GPI_DMA`、`CONFIG_INTERCONNECT_QCOM_SM8250`。uart6 / CS35L41 / Himax / KTZ / FG / 磁吸键盘 / 充电泵 只把 stock `qupv3fw.elf` 写进 **该 SE 的 IRAM**，并带 `qcom,skip-wrapper-fw-init`。
 - Himax 走 QUP0 SE4 **GENI SPI FIFO**（CAF gpio8–11 + IRQ39），不要绑 GPIO100（面板 `tp-reset`）
 - **禁止**把 `vreg_l3a_0p9` 改成 1.104V（CX 轨，会硬复位回兔子）
 - 控制台：`python3 linux-mainline/scripts/dagu-console.py`（`/dev/ttyACM0`）
@@ -64,13 +64,13 @@
 | CAMSS VFE/SMMU | **已通** | CSID TPG 出过完整 1 帧（约 15.6 MB） |
 | 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6；`hci0` `<bt-mac>` Powered: yes。DT 对照 elish/`qcom,qca6390-bt`：`max-speed` 3 Mbps + PMU LDO，BT_EN 走 pmu pwrseq。BLE 鼠标走 HOG（`CONFIG_UHID` + `CONFIG_BT_LE`）。经典 HID：`ClassicBondedOnly=false` + `UserspaceHID=persist`。寻呼带 clock offset，HID 主机 Central + FastConnectable，sniff 6–18。Page Timeout 拆 unset-handle ACL。GNOME Settings 是配对 UI：6390 去掉 `HCI_QUIRK_SIMULTANEOUS_DISCOVERY`，type 7 由内核分时 LE/Inquiry；`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。`TemporaryTimeout=180`。保留 sniff / UART RPM / IBS / WakeAllowed |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
-| 双电芯电量 | **DT 已写** | 双 BQ27Z561 + `xiaomi-dual-fg`，脚本可查 `power_supply` |
+| 双电芯电量 | **DT 已写** | 双 BQ27Z561 走 GENI I2C SE0/SE13 + `xiaomi-dual-fg`，脚本可查 `power_supply`。gpio `fg_i2c_se0` / `fg_i2c_se13` 保持 disabled |
 | 充电（SMB5） | **DT+驱动已写** | PM8150B `@1000` overlay；GPIO74 拉低放行 VBUS。未刷核验收 |
-| 充电泵 / 无线充 | **DT 已写** | BQ25970 ×2 只做 PPS 快充，P9418 探测；5 V 不靠泵 |
+| 充电泵 / 无线充 | **DT 已写** | BQ25970 ×2 走 GENI I2C SE15/SE16（PPS，不是 5 V 主路径）；P9418 无线充仍 i2c-gpio se8 |
 | 霍尔 / 音量键 | **DT 已写** | gpio-keys；未专项验收 |
 | 马达 | **DT 已写** | PMI632 LRA；未专项验收 |
 | 闪光灯 | **DT 已写** | pm8150l flash；脚本可点 torch |
-| 磁吸键盘 | **未做** | overlay 有，活 DT 没接（QUP I2C 不能开） |
+| 磁吸键盘 | **DT 已写** | Nanosic 走 GENI `&i2c2`（uart2 关）。gpio `kb_i2c_se2` 保持 disabled |
 | IMU / 光线传感器 | **有意关闭** | `&slpi` disabled，不在 AP I2C 上猜 |
 | 视频编解码 Venus | **软件已通（4K60 HEVC dmabuf）** | `#169`：1080p H.264 + **4K60 HEVC** `DMA_DRM`/`NV12` 上 Mutter，无 SMMU/SSR。日常播放器：`gst-play-1.0 --videosink=waylandsink`。mpv 仍是 `v4l2m2m-copy`。**禁止**开 SM8250 ICC。见 `linux-mainline/docs/dagu-venus.md` |
 | CDSP | **有意关闭** | `status = disabled` |
@@ -101,7 +101,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 面板：L81A dual-DPHY，**不是** elish NT36523 C-PHY
 - 驱动：`linux-mainline/overlays/linux/drivers/gpu/drm/panel/panel-xiaomi-dagu-l81a.c`
 - `prepare()` 发 CAF `E2=0x00`（120Hz）；`get_modes()` 只登记 120Hz，避免 GNOME 选同名 60Hz
-- 背光：双 KTZ8866。ABL 编程后靠 GPIO139 HWEN 维持，**整次开机不要拉低 HWEN**。GENI `i2c9`/`i2c11` 会 `geni_se_init` 挂死，走 `i2c-gpio`（CAF 焊盘 gpio60/61 + gpio125/126）。GNOME 只看到 `l81a-wled`（两颗 `kinetic,internal` 不进 sysfs，避免只暗一半）；滑条二次方映射后再写 0x04/0x05，**滑条 0 仍保持 11-bit 下限 32 且不清 BL_EN**（否则看不见）。`l81a_disable()`/`l81a_unprepare()` 仍空操作。短按只切 Mutter `PowerSaveMode` 0/3。长按关机。禁止 suspend。
+- 背光：双 KTZ8866。ABL 编程后靠 GPIO139 HWEN 维持，**整次开机不要拉低 HWEN**。产品路径 QUP1 SE11/SE9 **GENI I2C**（per-SE IRAM + skip-wrapper，焊盘 gpio60/61 + gpio125/126）。gpio 节点 `ktz_i2c_se11` / `ktz_i2c_se9` 保持 disabled。**禁止**绑 `enable-gpios` GPIO139（elish 那么写；面板拥有 HWEN）。GNOME 只看到 `l81a-wled`（两颗 `kinetic,internal` 不进 sysfs，避免只暗一半）；滑条二次方映射后再写 0x04/0x05，**滑条 0 仍保持 11-bit 下限 32 且不清 BL_EN**（否则看不见）。`l81a_disable()`/`l81a_unprepare()` 仍空操作。短按只切 Mutter `PowerSaveMode` 0/3。长按关机。禁止 suspend。失败 `restore-a`。
 - 分辨率：1600×2560 扫描（竖屏 framebuffer）
 - 压测脚本：`linux-mainline/scripts/dagu-display-stress.sh`、`linux-mainline/scripts/dagu-refresh-test.py`
 - 滑动窗口花屏 / GNOME 断触：fb0 Himax 测试丝滑。GNOME 主 fb 曾是 **XR30 10bpc**（L81A DSC 是 8bpc），再加 `CLUTTER_PAINT` 全屏重绘会拖死输入。内核 #149 已去掉 plane 10bpc（`linux-mainline/scripts/apply-overlays.sh`），实机主 fb 现为 `format=XR24` `modifier=0x050000000000001`（`QCOM_COMPRESSED`，`MUTTER_DEBUG_USE_KMS_MODIFIERS=1`）；用户态去掉 `CLUTTER_PAINT`、`GSK_RENDERER=ngl`、关掉 onboard / linger（`linux-mainline/scripts/rootfs-desktop-setup.sh`）
@@ -177,7 +177,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 
 ### 扬声器（CS35L41 ×4）
 
-- 总线：QUP0 SE1/SE3 **GENI I2C**（per-SE IRAM + skip-wrapper）。gpio 位bang 节点 `amp_i2c_se1` / `amp_i2c_se3` 保持 disabled。KTZ / 电量 / 键盘仍 `i2c-gpio`
+- 总线：QUP0 SE1/SE3 **GENI I2C**（per-SE IRAM + skip-wrapper）。gpio 位bang 节点 `amp_i2c_se1` / `amp_i2c_se3` 保持 disabled。KTZ SE11/SE9、电量 SE0/SE13、键盘 SE2、充电泵 SE15/SE16 同款 GENI；无线充 se8 仍 `i2c-gpio`
 - 播放：ADSP Q6 + `TERT_TDM_RX_0`，2ch S24_LE 48 kHz，CAF `TDM_MAX_SLOTS=4`
 - DAPM：四颗 `TL/TR/BL/BR Main AMP: On`；`speaker-test -l 3` 完整 3 轮 440 Hz
 - overlay：`linux-mainline/scripts/apply-overlays.sh` 里 TDM `bit_width` 保持 16/24（slot_width=32）；强行 32 会让 AFE `0x100ef` 返回 `ADSP_EBADPARAM`
@@ -258,9 +258,9 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 
 | 外设 | 硬件 | 说明 |
 |------|------|------|
-| 双电芯 | BQ27Z561 ×2 + `xiaomi,dual-fuel-gauge` | overlay `linux-mainline/overlays/linux/drivers/power/supply/xiaomi-dual-fg.c`；设计 5000 mAh ×2 |
+| 双电芯 | BQ27Z561 ×2 + `xiaomi,dual-fuel-gauge` | GENI I2C `&i2c0` / `&i2c13`（per-SE IRAM + skip-wrapper）。overlay `linux-mainline/overlays/linux/drivers/power/supply/xiaomi-dual-fg.c`；设计 5000 mAh ×2 |
 | 充电（SMB5） | PM8150B `@1000` | overlay `linux-mainline/overlays/linux/drivers/power/supply/pm8150b-charger-dagu.c`；关 charger wdog、清 USBIN suspend。5 V 路径 ICL **2 A**（墙充常被 APSD 成 SDP，不要 USB51 500 mA）。AICL 仍可折叠。GPIO74 低电平放行 VBUS |
-| 充电泵 | BQ25970 ×2 | `bq2597x-dagu.c`，i2c-gpio；67W PPS，不是 5 V 主路径 |
+| 充电泵 | BQ25970 ×2 | GENI I2C `&i2c15` / `&i2c16`（per-SE IRAM + skip-wrapper，`&qupv3_id_2` 只 okay AHB）。`bq2597x-dagu.c`；67W PPS，不是 5 V 主路径 |
 | 无线充探测 | P9418 | `p9418-dagu.c` |
 | 霍尔 | GPIO110 lid、GPIO121 tablet | `SW_LID` / `SW_TABLET_MODE`；folio 磁铁拉低 121，空闲应为平板。活 DT 用 `GPIO_ACTIVE_HIGH`。不再注入 `dagu-tablet-mode.py` |
 | 音量上 | pm8150 gpio6（elish-common） | |
@@ -268,7 +268,7 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 | 闪光灯 | pm8150l `@d300` | `echo 64 > /sys/class/leds/white:flash/brightness` |
 | USB OTG | `dr_mode=otg`，默认 peripheral | 切 host 会掉 g_serial，只能走 Wi‑Fi SSH；`usb_1_qmpphy` **disabled**。`pm8150b_typec` **okay**（充电 / PD），USB 图仍切断 |
 | USB3 / DP redriver | PS5169 overlay | 活 DT 未挂节点；`i2c17` 仍 disabled |
-| 磁吸键盘 MCU | nanosic overlay | 活 DT `i2c-gpio-se2` gpio115/116 @0x4c；IRQ 83 / wakeup 46 / vdd 127 / reset 141 / sleep 155。虚拟 HID 15d9:a3/a2/a1/a4（触控板 2560×1600 来自安卓 dump）。禁止开 GENI `&i2c2` |
+| 磁吸键盘 MCU | nanosic overlay | 产品路径 GENI `&i2c2` gpio115/116 @0x4c（uart2/spi2 disabled）。IRQ 83 / wakeup 46 / vdd 127 / reset 141 / sleep 155。虚拟 HID 15d9:a3/a2/a1/a4。gpio `kb_i2c_se2` 保持 disabled |
 
 ---
 
@@ -277,7 +277,7 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 | 项 | 原因 |
 |----|------|
 | `CONFIG_QCOM_GPI_DMA` / SPI SE DMA | Himax 走 FIFO watermark；GPI/SE DMA 是另一块这套 QHEE 上的 MMIO |
-| 给 `&qupv3_id_0` 加 `firmware-name` / 写 wrapper CSR | 会打回兔子。GENI 产品路径只装 **该 SE IRAM** + `qcom,skip-wrapper-fw-init`（uart6 / CS35L41 / Himax） |
+| 给 `&qupv3_id_0` / `&qupv3_id_1` / `&qupv3_id_2` 加 `firmware-name` / 写 wrapper CSR | 会打回兔子。GENI 产品路径只装 **该 SE IRAM** + `qcom,skip-wrapper-fw-init`（uart6 / CS35L41 / Himax / KTZ / FG / 键盘 / 充电泵）。`&qupv3_id_1` / `&qupv3_id_2` 只 okay AHB，不加 firmware-name |
 | `CONFIG_INTERCONNECT_QCOM_SM8250` | BCM `rpmh_write_batch` 超时，拖死 USB/MDSS/CPU OPP。Venus 用 ICC stub + 删 DT interconnects，不要靠开 provider |
 | `&usb_1_qmpphy` | P0 只要 HS gadget；SS 未训 |
 | Type-C → DWC3 graph | 等 TCPM 曾让 DWC3 停在 otg、无 UDC；节点本身已 okay 做充电 |
@@ -301,7 +301,7 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 7. 蓝牙音频（A2DP / 耳机）专项听感；控制器本身已通
 8. SLPI：固件签名确认后再开 IMU/ALS
 9. USB3 + DP + PS5169：先保证 HS gadget 不回退
-10. 磁吸键盘：活 DT 已挂 i2c-gpio-se2。刷核后查 `Xiaomi Keyboard` / `Xiaomi Touch`，`nanosic-803` irq 上升。不要开 GENI i2c2
+10. 磁吸键盘：活 DT 已挂 GENI `&i2c2`（skip-wrapper）。刷核后查 `Xiaomi Keyboard` / `Xiaomi Touch`，`nanosic-803` irq 上升。不要 okay `uart2`（会和键盘抢 SE2 MMIO）
 11. **S2Idle**：电源键唤醒已通一轮（65 min）。没有 RTC 时不要再远程 `echo mem`。日常桌面仍 mask systemd sleep（背光 HWEN）。底稿 `linux-mainline/docs/dagu-audio-s2idle.md`
 12. **Venus**：4K60 HEVC dmabuf + Overview 已通（`dagu-venus-4k-ecosystem`）。日常用 `gst-play-1.0 --videosink=waylandsink` / Totem。下一步若要烤电影级高码率 4K 或让 mpv 也零拷贝，再谈 FFmpeg `drm_prime`；不要开 ICC，不要 VA-API，不要 v4l2 request。底稿 `linux-mainline/docs/dagu-venus.md`
 13. Win11 ARM：独立于本表

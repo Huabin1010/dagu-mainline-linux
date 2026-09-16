@@ -56,7 +56,7 @@
 | 触控 Himax | **已通** | `spi-gpio`，不要 GENI SPI |
 | Wi‑Fi QCA6390 | **已通** | ath11k，iperf 约 600–665 Mbps |
 | 扬声器 CS35L41 | **软件已通** | ADSP `running`（`adsp.mbn`）。SoundWire 扫到 WCD9385 RX/TX，**没有** WSA88xx（外放是 CS35L41×4）。`aplay -l` card 0 `Xiaomi-dagu-CS35L41-WCD9385`。PW 默认 Speakers。见 `linux-mainline/docs/dagu-audio-s2idle.md` |
-| 麦克风 | **已通** | `/tmp/mic.wav` 非空（约 192 KB / 2s） |
+| 麦克风 | **已通** | 安卓 speaker-mic：AMIC5 / ADC4 INP5。UCM HiFi Mic，`hw:0,1`。喇叭 440 Hz 回录 |
 | 后摄 s5kjn1 | **已通（预览）** | live D-PHY 4-lane RAW10 `pGAA` 4080×3060，SoftISP skip 4×4 → 1020×764 @~30fps |
 | 前摄 imx596 | **已通（预览）** | D-PHY 4-lane RAW10 `pBAA` 2592×1952，SoftISP skip 2×2 → 1296×976 @~30fps |
 | CAMSS VFE/SMMU | **已通** | CSID TPG 出过完整 1 帧（约 15.6 MB） |
@@ -157,9 +157,11 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 
 ### 麦克风
 
-- 路由：TX DEC0=`SWR_MIC`，SMIC MUX0=`ADC3`，ADC4 MIXER，ADC4 MUX=`INP5`
-- `arecord` 2s → `/tmp/mic.wav` **192044 字节**（非空）
-- 脚本：`linux-mainline/scripts/dagu-av-test.sh`
+- 安卓 `mixer_paths_overlay_static.xml` speaker-mic：TX DEC0=`SWR_MIC`，SMIC MUX0=`ADC3`，ADC4 MIXER，ADC4 MUX=`INP5`（WCD9385 AMIC5 / MIC BIAS3）
+- 主线还要 `ADC4 Switch` + `TX3 MODE=ADC_NORMAL` 才能打开 SoundWire ADC 口。无 Fluence，模拟增益 12（18 dB）
+- 采集 FE 是 MultiMedia2（`hw:0,1`），不跟喇叭 MM1 抢 PCM。UCM `HiFi` → `Built-in Microphone`
+- 喇叭 440 Hz → 麦克风 Goertzel 检出。推送：`linux-mainline/scripts/dagu-mic-deploy.sh`
+- 脚本：`linux-mainline/scripts/dagu-mic-route.sh`、`linux-mainline/scripts/dagu-av-test.sh`
 
 ### CAMSS 后端（不含传感器 MIPI）
 

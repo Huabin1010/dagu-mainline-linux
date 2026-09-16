@@ -15,12 +15,14 @@
 | P4 | Himax SPI 触控 | 已完成 |
 | P5 | QCA6390 Wi-Fi（ath11k） | 已完成 |
 | P6 | Adreno 650 / Turnip + GNOME | 已完成 |
-| P7 | CS35L41 扬声器 + WCD9385 麦克风 | 软件已通 |
+| P7 | CS35L41 扬声器 + WCD9385 麦克风 | 已通 |
 | P8 | Venus 4K60 + 前后摄预览 | 已完成（预览路径） |
 
 硬件说明和 bring-up 记录在 [`linux-mainline/docs/`](linux-mainline/docs/dagu-adaptation-status.md)。外设总表：[`linux-mainline/docs/dagu-adaptation-status.md`](linux-mainline/docs/dagu-adaptation-status.md)。
 
 Windows on ARM / edk2-msm 移植在 [`port/dagu/`](port/dagu/) 和 [`docs/uefi-port-dagu.md`](docs/uefi-port-dagu.md)，**不是**现在每天在跑的系统。
+
+**刷机指南：** [简体中文](docs/zh-CN/flash-guide.md) · [English](docs/flash-guide.md)
 
 ## 快速开始
 

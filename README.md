@@ -15,12 +15,14 @@ This tree builds Linux 7.0 + an Ubuntu arm64 desktop, then flashes them onto the
 | P4 | Himax SPI touch | Done |
 | P5 | QCA6390 Wi-Fi (ath11k) | Done |
 | P6 | Adreno 650 / Turnip + GNOME | Done |
-| P7 | CS35L41 speakers + WCD9385 mics | Software done |
+| P7 | CS35L41 speakers + WCD9385 mics | Done |
 | P8 | Venus 4K60 + front/rear cameras | Done (preview path) |
 
 Hardware notes and the full bring-up record live under [`linux-mainline/docs/`](linux-mainline/docs/dagu-adaptation-status.md). The board status table is [`linux-mainline/docs/dagu-adaptation-status.md`](linux-mainline/docs/dagu-adaptation-status.md).
 
 An unfinished Windows-on-ARM / edk2-msm port lives under [`port/dagu/`](port/dagu/) and [`docs/uefi-port-dagu.md`](docs/uefi-port-dagu.md). That is **not** the daily system.
+
+**Flash tutorial:** [English](docs/flash-guide.md) · [简体中文](docs/zh-CN/flash-guide.md)
 
 ## Quick start
 

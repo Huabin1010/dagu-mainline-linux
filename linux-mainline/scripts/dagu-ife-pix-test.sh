@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # STREAMON Titan 480 PIX: CSID IPP → CAMIF → CLC → DISP linear NV12.
-# Rear HyperOS path is CSID1 + IFE1 (IFE0 idle). Do not dual STREAMON
-# with DebayerCpu / loopback.
-# D-PHY 0x0114=0x0300 and CSID SOT mask must stay. Timeout STREAMON.
+# Rear HyperOS path is CSID1 + IFE1 (IFE0 idle). Front Camera ID 1 is
+# the same IFE1/CSID1, CSIPHY4, 2592×1952 → Display 1920×1080. Do not
+# dual STREAMON with DebayerCpu / loopback. Do not copy rear Crop last
+# 0xfef0bf3 onto imx596.
+# DAGU_IFE_PIX=front for imx596. Default rear s5kjn1.
+# D-PHY 0x0114=0x0300 (rear) / 3 (front) and CSID SOT mask must stay.
 # media-ctl entity names MUST be quoted; PIX sink is CSID pad 4, not pad 1.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,7 +20,8 @@ remote() { "${SSH[@]}" "$@"; }
 remote 'systemctl stop dagu-camera-loopback-watch.service dagu-camera-loopback.service || true
 pkill -9 -x dagu-camera-loopback || true
 pkill -9 -x dagu-camera-preview || true'
-remote python3 - <<'PY'
+PIX_CAM="${DAGU_IFE_PIX:-rear}"
+remote env DAGU_IFE_PIX="$PIX_CAM" python3 - <<'PY'
 import os, re, subprocess, sys, time
 
 def run(args, check=False):
@@ -31,8 +35,10 @@ def run(args, check=False):
         raise SystemExit(f'cmd failed rc={r.returncode}: {args}')
     return r
 
+FRONT = os.environ.get('DAGU_IFE_PIX', 'rear') == 'front'
 print('===uname===')
 run(['uname', '-r'])
+print(f'===pix-cam {"front imx596" if FRONT else "rear s5kjn1"}===')
 print('===kill-loopback===')
 run(['pkill', '-9', '-f', 'dagu-camera-loopback'], check=False)
 run(['pkill', '-9', '-f', 'dagu-camera-preview'], check=False)
@@ -42,31 +48,38 @@ MC = '/dev/media0'
 print('===pix-entities===')
 p = run(['media-ctl', '-d', MC, '-p'])
 sensor = None
+want = 'imx596' if FRONT else 's5kjn1'
 for line in p.stdout.splitlines():
     if any(s in line for s in ('msm_vfe1_pix', 'msm_vfe1_video3', 'msm_csid1',
-                               'msm_vfe0_pix', 's5kjn1')):
+                               'msm_vfe0_pix', 's5kjn1', 'imx596', 'msm_csiphy4')):
         print(line)
-    m = re.search(r's5kjn1 \d+-0010', line)
+    m = re.search(rf'{want} \d+-0010', line)
     if m:
         sensor = m.group(0)
 if not sensor:
-    raise SystemExit('s5kjn1 entity missing')
+    raise SystemExit(f'{want} entity missing')
 print(f'===sensor {sensor}===')
 
-# HyperOS rear preview is CSID1 IPP + IFE1 DISP WM4/5 (IFE0 idle).
-# CSID pad 1 is RDI0. PIX is pad 4. Drop IFE0 leftovers so this VC feeds IPP.
+# HyperOS: Camera ID 0 and 1 both use CSID1 + IFE1 (IFE0 idle).
+# Rear CSIPHY1, front CSIPHY4. CSID pad 1 is RDI0. PIX is pad 4.
 run(['media-ctl', '-d', MC, '-l', '"msm_csid0":4 -> "msm_vfe0_pix":0[0]'])
 run(['media-ctl', '-d', MC, '-l', '"msm_csiphy1":1 -> "msm_csid0":0[0]'])
 run(['media-ctl', '-d', MC, '-l', '"msm_csid0":1 -> "msm_vfe0_rdi0":0[0]'])
 run(['media-ctl', '-d', MC, '-l', '"msm_csid1":1 -> "msm_vfe1_rdi0":0[0]'])
-run(['media-ctl', '-d', MC, '-l', '"msm_csiphy1":1 -> "msm_csid1":0[1]'], check=True)
+run(['media-ctl', '-d', MC, '-l', '"msm_csiphy1":1 -> "msm_csid1":0[0]'])
+run(['media-ctl', '-d', MC, '-l', '"msm_csiphy4":1 -> "msm_csid1":0[0]'])
+phy = 'msm_csiphy4' if FRONT else 'msm_csiphy1'
+run(['media-ctl', '-d', MC, '-l', f'"{phy}":1 -> "msm_csid1":0[1]'], check=True)
 run(['media-ctl', '-d', MC, '-l', '"msm_csid1":4 -> "msm_vfe1_pix":0[1]'], check=True)
 
-fmt = 'fmt:SGBRG10_1X10/4080x3060 field:none'
+if FRONT:
+    fmt = 'fmt:SBGGR10_1X10/2592x1952 field:none'
+else:
+    fmt = 'fmt:SGBRG10_1X10/4080x3060 field:none'
 for spec in (
     f'"{sensor}":0[' + fmt + ']',
-    '"msm_csiphy1":0[' + fmt + ']',
-    '"msm_csiphy1":1[' + fmt + ']',
+    f'"{phy}":0[' + fmt + ']',
+    f'"{phy}":1[' + fmt + ']',
     '"msm_csid1":0[' + fmt + ']',
     '"msm_csid1":4[' + fmt + ']',
     '"msm_vfe1_pix":0[' + fmt + ' compose:(0,0)/1920x1080]',
@@ -108,7 +121,7 @@ run(['ls', '-l', '/tmp/pix.nv12'], check=False)
 PY
 
 echo '===dmesg-pix==='
-remote 'dmesg | grep -iE "dagu ife|dagu csid ipp|dagu csid phy|dagu vfe|dagu camnoc|raise |Failed to power|CAMNOC|r0114|s5kjn1|clock enable failed" | tail -80 || true'
+remote 'dmesg | grep -iE "dagu ife|dagu csid ipp|dagu csid phy|dagu vfe|dagu camnoc|raise |Failed to power|CAMNOC|r0114|s5kjn1|imx596|clock enable failed" | tail -80 || true'
 echo '===ipp-cfg0-hbin==='
 remote python3 - <<'PY'
 import re, subprocess
@@ -212,15 +225,22 @@ fi
 echo '===restore-rdi0==='
 remote python3 - <<'PY'
 import subprocess
-subprocess.run(['media-ctl', '-d', '/dev/media0', '-l',
-                '"msm_csid1":4 -> "msm_vfe1_pix":0[0]'])
-subprocess.run(['media-ctl', '-d', '/dev/media0', '-l',
-                '"msm_csiphy1":1 -> "msm_csid1":0[0]'])
-subprocess.run(['media-ctl', '-d', '/dev/media0', '-l',
-                '"msm_csiphy1":1 -> "msm_csid0":0[1]'])
-subprocess.run(['media-ctl', '-d', '/dev/media0', '-l',
-                '"msm_csid0":1 -> "msm_vfe0_rdi0":0[1]'])
-print('ife1 pix dropped, rdi0 re-enabled')
+def run(args):
+    subprocess.run(args)
+# Drop PIX. SoftISP: rear csiphy1→csid0→vfe0_rdi0, front csiphy4→csid1→vfe1_rdi0.
+run(['media-ctl', '-d', '/dev/media0', '-l',
+     '"msm_csid1":4 -> "msm_vfe1_pix":0[0]'])
+run(['media-ctl', '-d', '/dev/media0', '-l',
+     '"msm_csiphy1":1 -> "msm_csid1":0[0]'])
+run(['media-ctl', '-d', '/dev/media0', '-l',
+     '"msm_csiphy1":1 -> "msm_csid0":0[1]'])
+run(['media-ctl', '-d', '/dev/media0', '-l',
+     '"msm_csid0":1 -> "msm_vfe0_rdi0":0[1]'])
+run(['media-ctl', '-d', '/dev/media0', '-l',
+     '"msm_csiphy4":1 -> "msm_csid1":0[1]'])
+run(['media-ctl', '-d', '/dev/media0', '-l',
+     '"msm_csid1":1 -> "msm_vfe1_rdi0":0[1]'])
+print('ife1 pix dropped, rdi0 re-enabled (rear csid0 / front csid1)')
 PY
 remote 'systemctl start dagu-camera-loopback-watch.service || true'
 

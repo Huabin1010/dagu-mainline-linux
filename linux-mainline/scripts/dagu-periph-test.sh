@@ -54,7 +54,16 @@ ls /sys/class/typec 2>/dev/null || echo "no typec class"
 echo ===iio-sensors===
 ls /sys/bus/iio/devices 2>/dev/null || echo none
 echo ===slpi===
-dmesg | grep -i slpi | tail -5 || true
+for d in /sys/class/remoteproc/remoteproc*; do
+  printf "%s name=%s state=%s\n" "$(basename "$d")" \
+    "$(cat $d/name 2>/dev/null)" "$(cat $d/state 2>/dev/null)"
+done
+dmesg | grep -iE "slpi|cdsp|fastrpc|qcom_q6v5_pas" | tail -20 || true
+ls -l /dev/fastrpc-* 2>/dev/null || echo "no fastrpc"
+ls /dev/input/by-path 2>/dev/null | head || true
+grep -A8 "dagu-lsm6dso-accel" /proc/bus/input/devices || true
+cat /run/dagu-ssc/lux 2>/dev/null || true
+systemctl is-active dagu-ssc.service dagu-cdsp-rpc.service iio-sensor-proxy.service 2>/dev/null || true
 '
 echo "==> done"
 echo "OTG VBUS (Wi-Fi SSH only):"

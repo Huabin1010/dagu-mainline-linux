@@ -34,20 +34,9 @@ Do **not** okay `&cdsp` to “fix” this. Hexagon cannot replace IFE. Keep rear
 
 Gate: STREAMON ≥3 non-zero NV12 frames, `r0114=0x300`, `g_serial` `0525:a4a7` >30s. Until then do not switch Viewfinder off SoftISP.
 
-## SLPI (before CDSP)
+## SLPI + CDSP
 
-`stage-firmware.sh` already stages `slpi.mbn`. `&slpi` stays `status = "disabled"` until:
-
-1. `qcom_scm_pas_auth_and_reset` succeeds on this QHEE
-2. `remoteproc` is `running` with no SSR
-3. `g_serial` `0525:a4a7` still up >30s
-4. A mainline SSC/QMI / IIO client exists
-
-No client → do not leave the DSP okay “because it is running”. Do not guess LSM6DSO on AP I2C. Hall already is gpio-keys (`SW_LID` / `SW_TABLET_MODE`).
-
-## CDSP
-
-Default remains `status = "disabled"`. Open only when PAS auth works **and** there is a userspace workload that is not an empty remoteproc. Do not enable it as a side effect of Venus or ICC. WebNN / TFLite Hexagon is not a tablet deliverable.
+`stage-firmware.sh` stages dagu-signed `slpi.mbn` and `cdsp.mbn`. Product DT okays both. Clients: `dagu-ssc` (SEE QMI) and `dagu-cdsp-rpc` (FastRPC). Do not guess LSM6DSO on AP I2C. Do not okay CDSP to “fix” IFE. WebNN stays off.
 
 ## Revisit trigger
 

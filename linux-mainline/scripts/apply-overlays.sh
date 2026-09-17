@@ -3115,7 +3115,178 @@ else:
 path = root / "sound/soc/qcom/qdsp6/q6afe.c"
 text = path.read_text()
 if "q6afe_tdm_group_enable" not in text:
-    raise SystemExit(f"{path}: TDM GROUP helper missing; do not re-extract linux/ without GROUP/V3")
+    old = """#define AFE_MODULE_AUDIO_DEV_INTERFACE	0x0001020C
+#define AFE_MODULE_TDM			0x0001028A
+"""
+    new = """#define AFE_MODULE_AUDIO_DEV_INTERFACE	0x0001020C
+#define AFE_MODULE_TDM			0x0001028A
+#define AFE_MODULE_GROUP_DEVICE		0x00010254
+#define AFE_PARAM_ID_GROUP_DEVICE_ENABLE	0x00010256
+#define AFE_PARAM_ID_GROUP_DEVICE_TDM_CONFIG	0x0001029E
+#define AFE_API_VERSION_GROUP_DEVICE_TDM_CONFIG	1
+#define AFE_GROUP_DEVICE_NUM_PORTS	8
+#define AFE_PORT_INVALID		0xFFFF
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: TDM GROUP defines needle missing")
+    text = text.replace(old, new, 1)
+    old = """/**
+ * q6afe_port_stop() - Stop a afe port
+ *
+ * @port: Instance of port to stop
+ *
+ * Return: Will be an negative on packet size on success.
+ */
+int q6afe_port_stop(struct q6afe_port *port)
+"""
+    new = """struct afe_param_id_group_device_tdm_cfg {
+	u32	group_device_cfg_minor_version;
+	u16	group_id;
+	u16	reserved;
+	u16	port_id[AFE_GROUP_DEVICE_NUM_PORTS];
+	u32	num_channels;
+	u32	sample_rate;
+	u32	bit_width;
+	u16	nslots_per_frame;
+	u16	slot_width;
+	u32	slot_mask;
+} __packed;
+
+struct afe_group_device_enable {
+	u16	group_id;
+	u16	enable;
+} __packed;
+
+/* CAF kona LPASS tert RX is a 2-port group (RX_0 + RX_1). Configure the
+ * group before TDM_CONFIG; otherwise ADSP returns EBADPARAM (0x2).
+ */
+static int q6afe_tdm_group_enable(struct q6afe_port *port, bool enable)
+{
+	struct afe_param_id_tdm_cfg *tdm = &port->port_cfg.tdm_cfg;
+	struct afe_param_id_group_device_tdm_cfg gcfg = { };
+	struct afe_group_device_enable gen = { };
+	u16 group_id = port->id + 0x100;
+	int i, ret;
+
+	if (port->cfg_type != AFE_PARAM_ID_TDM_CONFIG)
+		return 0;
+
+	if (enable) {
+		gcfg.group_device_cfg_minor_version =
+			AFE_API_VERSION_GROUP_DEVICE_TDM_CONFIG;
+		gcfg.group_id = group_id;
+		gcfg.port_id[0] = port->id;
+		gcfg.port_id[1] = port->id + 0x02;
+		for (i = 2; i < AFE_GROUP_DEVICE_NUM_PORTS; i++)
+			gcfg.port_id[i] = AFE_PORT_INVALID;
+		gcfg.num_channels = tdm->nslots_per_frame ?: 4;
+		gcfg.sample_rate = tdm->sample_rate;
+		gcfg.bit_width = tdm->slot_width ?: 32;
+		gcfg.nslots_per_frame = tdm->nslots_per_frame ?: 4;
+		gcfg.slot_width = tdm->slot_width ?: 32;
+		gcfg.slot_mask = (1u << gcfg.nslots_per_frame) - 1;
+		pr_info("dagu TDM GROUP id=0x%x ports=0x%x,0x%x ch=%u rate=%u bw=%u slots=%u sw=%u mask=0x%x\\n",
+			gcfg.group_id, gcfg.port_id[0], gcfg.port_id[1],
+			gcfg.num_channels, gcfg.sample_rate, gcfg.bit_width,
+			gcfg.nslots_per_frame, gcfg.slot_width, gcfg.slot_mask);
+		ret = q6afe_set_param(port->afe, port, &gcfg,
+				      AFE_PARAM_ID_GROUP_DEVICE_TDM_CONFIG,
+				      AFE_MODULE_GROUP_DEVICE, sizeof(gcfg),
+				      port->token);
+		if (ret) {
+			dev_err(port->afe->dev,
+				"TDM group cfg 0x%x failed %d\\n", group_id, ret);
+			return ret;
+		}
+	}
+
+	gen.group_id = group_id;
+	gen.enable = enable;
+	ret = q6afe_set_param(port->afe, port, &gen,
+			      AFE_PARAM_ID_GROUP_DEVICE_ENABLE,
+			      AFE_MODULE_GROUP_DEVICE, sizeof(gen),
+			      port->token);
+	if (ret)
+		dev_err(port->afe->dev, "TDM group enable 0x%x en=%d failed %d\\n",
+			group_id, enable, ret);
+	return ret;
+}
+
+/**
+ * q6afe_port_stop() - Stop a afe port
+ *
+ * @port: Instance of port to stop
+ *
+ * Return: Will be an negative on packet size on success.
+ */
+int q6afe_port_stop(struct q6afe_port *port)
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: TDM GROUP helper needle missing")
+    text = text.replace(old, new, 1)
+    old = """	ret = afe_apr_send_pkt(afe, pkt, port, AFE_PORT_CMD_DEVICE_STOP);
+	if (ret)
+		dev_err(afe->dev, "AFE close failed %d\\n", ret);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q6afe_port_stop);
+"""
+    new = """	ret = afe_apr_send_pkt(afe, pkt, port, AFE_PORT_CMD_DEVICE_STOP);
+	if (ret)
+		dev_err(afe->dev, "AFE close failed %d\\n", ret);
+
+	/* dagu: TDM GROUP before port start */
+	q6afe_tdm_group_enable(port, false);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q6afe_port_stop);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: TDM GROUP stop needle missing")
+    text = text.replace(old, new, 1)
+    old = """		/* dagu: TDM SET_PARAM size is tdm_cfg */
+		if (param_id == AFE_PARAM_ID_TDM_CONFIG)
+			cfg_size = sizeof(port->port_cfg.tdm_cfg);
+		ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
+					       AFE_MODULE_AUDIO_DEV_INTERFACE,
+					       cfg_size);
+	}
+	if (ret) {
+		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\\n",
+			port_id, ret);
+		return ret;
+	}
+"""
+    new = """		/* dagu: TDM SET_PARAM size is tdm_cfg */
+		if (param_id == AFE_PARAM_ID_TDM_CONFIG) {
+			cfg_size = sizeof(port->port_cfg.tdm_cfg);
+			ret = q6afe_tdm_group_enable(port, true);
+			if (ret)
+				return ret;
+		}
+		ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
+					       AFE_MODULE_AUDIO_DEV_INTERFACE,
+					       cfg_size);
+	}
+	if (ret) {
+		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\\n",
+			port_id, ret);
+		if (param_id == AFE_PARAM_ID_TDM_CONFIG)
+			q6afe_tdm_group_enable(port, false);
+		return ret;
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: TDM GROUP start needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: q6afe_tdm_group_enable")
+
+path = root / "sound/soc/qcom/qdsp6/q6afe.c"
+text = path.read_text()
+if "q6afe_tdm_group_enable" not in text:
+    raise SystemExit(f"{path}: TDM GROUP helper missing after insert")
 if "gcfg.slot_mask = 0xFF" in text:
     text = text.replace("gcfg.slot_mask = 0xFF;",
                         "gcfg.slot_mask = (1u << gcfg.nslots_per_frame) - 1;", 1)
@@ -4931,8 +5102,10 @@ if "DEMUX_COMPACT_EVEN		0xac" not in vfe480 or "DEMUX_COMPACT_ODD		0xc9" not in 
     raise SystemExit("camss-vfe-480.c: compact Demux live even/odd 0xac/0xc9 missing")
 if "vfe_480_demux(vfe, in_w - 1, pipe_h - 1)" in vfe480:
     raise SystemExit("camss-vfe-480.c: compact Demux is 0x3090 x7; do not pack FULL 0x3068 last/first")
-if "static void vfe_480_demux(struct vfe_device *vfe)\n" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: compact Demux CreateCmdList is 0x3090 x7 only")
+if "static void vfe_480_demux(struct vfe_device *vfe, u32 in_w, u32 in_h)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Demux must take in_w/in_h to gate rear 0x0bf40ff0")
+if "vfe_480_demux(vfe, in_w, in_h)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: pix pipeline must pass sensor size into Demux")
 if "0x000003c0" not in vfe480 or "0x0bf40ff0" not in vfe480:
     raise SystemExit("camss-vfe-480.c: live CDM Demux 0x3068 x10 missing")
 if "0x0000443c" not in vfe480:
@@ -5085,6 +5258,38 @@ if "vfe_480_live_display_cdm" not in vfe480:
     raise SystemExit("camss-vfe-480.c: live CDM Display Crop/MNDS/TAP pack missing")
 if "0x0fef0bf3" not in vfe480 or "0xc043dbcf" not in vfe480:
     raise SystemExit("camss-vfe-480.c: live CDM MNDS/Crop 0x0fef0bf3 missing")
+if "0x0bf40ff0" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: rear Demux 0x3068 last 0x0bf40ff0 missing")
+if "in_w == 4080 && in_h == 3060" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: rear Demux 0x0bf40ff0 must stay behind 4080x3060 gate")
+if "0x0a1f079f" not in vfe480 or "0xc081999a" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: front live Crop/MNDS 0xa1f079f missing")
+if "0x07a00a20" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: front Demux 0x3068 last 0x07a00a20 missing")
+if "0x08c908c9" not in vfe480 or "0x000000ca" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: front Demux 0x3090 even 0xca/odd 0x9c missing")
+if "0x05fa0400" not in vfe480 or "0x0000082c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: front Demosaic WB 0x3868 0x05fa0400 missing")
+if "0x077f0437" not in vfe480 or "0x00000101, 0x00000600, 0x077f0437" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: front Display Crop Y last 0x077f0437 missing")
+if "0x00000101, 0x00000600, 0x03bf021b, 0xc0200000" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #376 Crop C chroma dest 0x03bf021b missing")
+if "0x00000001, 0x00000600, 0x03bf021b" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #378 MNDS_C dest last 0x03bf021b excluded (#377 still viol 19)")
+if "0x00000001, 0x00000600, 0x077f0437, 0xc0400000,\n\t\t0x00000000, 0xc0400000, 0x00000000, 0x00000437" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #378 MNDS_C must not stuff Crop unpacked last into V_STRIPE")
+if "0x00000001, 0x00000600, 0x077f0437, 0xc0400000,\n\t\t0x00000000, 0xc0400000, 0x00000000, 0x00000000" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #378 MNDS_C Display last + 2x phase + trailing zeros missing")
+if "0x0a1f0000, 0x03cf0000" in vfe480:
+    raise SystemExit("camss-vfe-480.c: MID 0xa1f0000/0x3cf0000 is Linux keep-all; #350 overflow")
+if "0x003c01a3, 0x0000027f" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live MID Y 0x4868 0x3c01a3 missing")
+if "0x00000437, 0x0000077f" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: front Display MID/POST 0x437/0x77f missing")
+if "0x000003cf, 0x00000a1f" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: front PRE RoundClamp 0x3cf/0xa1f missing")
+if "in_w == 2592 && in_h == 1952" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: front 2592x1952 live Crop gate missing")
 if "0x09016c7d" not in vfe480:
     raise SystemExit("camss-vfe-480.c: live CDM TAP filter 0x9016c7d missing")
 if "CLC_RNDCLAMP_POST_C + 0x70" not in vfe480:
@@ -7184,3 +7389,6 @@ if marker not in text:
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: {marker}")
 PY
+
+# Fluence AEC/NS COPP + SLIMBUS_7 A2DP virtual port. Idempotent.
+python3 "$ROOT/scripts/dagu-overlay-adsp-voice.py" "$KERNEL_SRC"

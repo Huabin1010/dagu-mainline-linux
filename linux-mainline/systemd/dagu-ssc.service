@@ -1,0 +1,13 @@
+[Unit]
+Description=dagu SLPI SEE sensors (LSM6DSO / tcs3701)
+After=local-fs.target hexagonrpcd-sdsp.service
+Wants=hexagonrpcd-sdsp.service iio-sensor-proxy.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-ssc
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

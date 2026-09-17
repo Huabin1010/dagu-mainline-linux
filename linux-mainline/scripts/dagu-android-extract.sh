@@ -32,5 +32,12 @@ for f in \
 	adb -s "$SERIAL" exec-out su -c "cat /vendor/firmware/$f" >"$OUT/fw/vendor/$f"
 done
 adb -s "$SERIAL" exec-out su -c "cat /vendor/etc/cirrus.cfg" >"$OUT/fw/vendor/cirrus.cfg"
+mkdir -p "$OUT/fw/dsp"
+# DSP blobs are on firmware_mnt (vfat). dd via Magisk, then tar.
+adb -s "$SERIAL" shell "su -c 'mkdir -p /data/local/tmp/dagu-dsp
+for f in cdsp.mdt cdsp.b00 cdsp.b01 cdsp.b02 cdsp.b03 cdsp.b04 cdsp.b05 cdsp.b06 cdsp.b08 cdsp.b09 cdsp.b11 cdspr.jsn slpi.mdt slpi.b00 slpi.b01 slpi.b02 slpi.b03 slpi.b04 slpi.b05 slpi.b06 slpi.b07 slpi.b08 slpi.b09 slpi.b10 slpi.b11 slpi.b12 slpi.b13 slpi.b14 slpi.b15 slpi.b16 slpi.b17 slpi.b18 slpi.b19 slpi.b20 slpir.jsn slpius.jsn; do
+  dd if=/vendor/firmware_mnt/image/\$f of=/data/local/tmp/dagu-dsp/\$f bs=1M 2>/dev/null
+done
+tar -C /data/local/tmp/dagu-dsp -cf - .'" | tar --no-same-permissions --no-same-owner -xf - -C "$OUT/fw/dsp"
 (cd "$OUT/fw/vendor" && md5sum ./* >"$OUT/fw/android.md5")
 echo "wrote $OUT (no flash)"

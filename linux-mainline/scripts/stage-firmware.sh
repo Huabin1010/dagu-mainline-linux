@@ -10,6 +10,7 @@ EXTRACT="$DEST/.extract"
 DUMP_WL="$REPO/dumps/dagu-20260826-linux-bringup/wireless/blobs"
 DUMP_FW="$REPO/dumps/dagu-20260826-linux-bringup/firmware"
 GOLDEN_FW="$REPO/dumps/dagu-20260826-210700-root/firmware"
+ANDROID_DSP="$REPO/dumps/dagu-android-live/firmware/dsp"
 DSP="$LIB/qcom/sm8250/xiaomi/dagu"
 
 mkdir -p "$LIB" "$EXTRACT" "$DSP"
@@ -98,14 +99,14 @@ if [[ "$WIFI_STAGED" -eq 0 ]]; then
 	copy_one "$DEST/wlan_mac.bin" -path '*/persist/wlan/wlan_mac.bin' || true
 fi
 
-# Remoteproc: on-device /vendor/firmware_mnt/image/{adsp,slpi,venus}.mdt
-# DTS stays disabled until these blobs exist (missing firmware-name stalls ~60s).
+# Remoteproc: on-device /vendor/firmware_mnt/image/{adsp,cdsp,slpi,venus}.mdt
+# plus {adspr,cdspr,slpir,slpius}.jsn for pd-mapper. Must be dagu-signed.
 stage_dsp() {
 	local name=$1
 	local dest_mbn="$DSP/${name}.mbn"
 	[[ -f "$dest_mbn" ]] && { echo "  ${name} already staged"; return 0; }
 	local found
-	found=$(find "$EXTRACT" "$GOLDEN_FW" "$DUMP_FW" -type f \( -name "${name}.mdt" -o -name "${name}.mbn" \) 2>/dev/null | head -1 || true)
+	found=$(find "$EXTRACT" "$GOLDEN_FW" "$DUMP_FW" "$ANDROID_DSP" -type f \( -name "${name}.mdt" -o -name "${name}.mbn" \) 2>/dev/null | head -1 || true)
 	if [[ -z "$found" ]]; then
 		echo "  skip ${name}: no mdt/mbn in dumps (adb pull /vendor/firmware_mnt/image/${name}.mdt + .b*)"
 		return 1
@@ -124,8 +125,19 @@ stage_dsp() {
 }
 
 stage_dsp adsp || true
+stage_dsp cdsp || true
 stage_dsp slpi || true
 stage_dsp venus || true
+
+# pd-mapper SERVREG JSON (same directory as the .mbn).
+for jsn in adspr adspua cdspr slpir slpius; do
+	[[ -f "$DSP/${jsn}.jsn" ]] && continue
+	found=$(find "$EXTRACT" "$GOLDEN_FW" "$DUMP_FW" "$ANDROID_DSP" -type f -name "${jsn}.jsn" 2>/dev/null | head -1 || true)
+	if [[ -n "$found" ]]; then
+		cp -f "$found" "$DSP/${jsn}.jsn"
+		echo "  ${jsn}.jsn <- $found"
+	fi
+done
 
 # GENI SPI (Himax) needs QUPv3 SE firmware. Stock partition is already ELF.
 QUPFW_SRC="$REPO/dumps/dagu-20260826-210700-root/images/qupfw_a.img"

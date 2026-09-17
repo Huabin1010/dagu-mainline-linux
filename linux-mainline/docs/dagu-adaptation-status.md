@@ -20,6 +20,10 @@
 - ARM Linux 七维评估（含 Python / CPU 软路径）：`linux-mainline/docs/dagu-arm-linux-eval.md`
 - CAMSS VFE PIX 审计：`linux-mainline/docs/dagu-camss-pix-audit.md`
 - IFE PIX 线性 NV12 尝试与证伪（#333 仍 0 帧）：`linux-mainline/docs/dagu-ife-pix-nv12-attempts.md`
+- ADSP 语音 / A2DP：`linux-mainline/docs/dagu-adsp-voice.md`
+- ADSP 语音流水线卡死点（mermaid）：`linux-mainline/docs/dagu-adsp-voice-pipeline-status.md`
+- 前置 imx596 IFE PIX 卡死点（mermaid）：`linux-mainline/docs/dagu-ife-front-pipeline-status.md`
+- CDSP / SLPI 流水线卡死点（mermaid）：`linux-mainline/docs/dagu-dsp-pipeline-status.md`
 
 ## 怎么读状态
 
@@ -63,8 +67,8 @@
 | 后摄 s5kjn1 | **已通（预览）** | live D-PHY 4-lane RAW10 4080×3060，SoftISP skip 4×4 → 1020×764 @~30fps。桌面 `/dev/video21` |
 | 前摄 imx596 | **已通（预览）** | D-PHY 4-lane RAW10 2592×1952，SoftISP skip 2×2 → 1296×976 @~30fps。桌面 `/dev/video20` |
 | CAMSS RDI / SMMU | **已通** | CSIPHY→CSID→VFE RDI 出 RAW。CSID TPG 也曾出完整 1 帧（约 15.6 MB） |
-| CAMSS IFE PIX | **部分** | `#365` IFE1 线性 NV12 ≥3 帧非零，UV 原点 ~133。饱和度仍窄。产品预览继续 SoftISP。见 `dagu-ife-pipeline-status.md` |
-| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6。`#333` `hci0` UP RUNNING PSCAN，HCI 5.2。BLE HOG + 经典 HID（`ClassicBondedOnly=false`）。`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。A2DP 未测 |
+| CAMSS IFE PIX | **部分** | `#365` IFE1 线性 NV12 ≥3 帧非零，UV 原点 ~133。饱和度仍窄。产品预览继续 SoftISP。后置图 `dagu-ife-pipeline-status.md`；前置图 `dagu-ife-front-pipeline-status.md` |
+| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6。`#333` `hci0` UP RUNNING PSCAN，HCI 5.2。BLE HOG + 经典 HID（`ClassicBondedOnly=false`）。`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。A2DP 走 Q6 `SLIMBUS_7_RX`（`hw:0,3`），见 `dagu-adsp-voice.md` |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
 | 双电芯电量 | **已通** | 双 BQ27Z561 走 GENI I2C SE0/SE13 + `xiaomi-dual-fg`。`#333` `bms` Battery SoC（桌面跟 bms）。gpio `fg_i2c_se0` / `fg_i2c_se13` 保持 disabled |
 | 充电（SMB5 5 V） | **已通** | `#333` `pm8150b-charger` `online=1` `status=Charging`，APSD=SDP，ICL **2 A**，`bms` 同步 Charging |
@@ -75,10 +79,10 @@
 | 马达 | **DT 已写** | `#333` `pm8xxx_vib_ffmemless` 已 probe；未专项震感 |
 | 闪光灯 | **DT 已写** | `white:flash` max=255；脚本可点 torch |
 | 磁吸键盘 | **已通** | Nanosic GENI `&i2c2` `2-004c`。`#335` `Xiaomi Keyboard` `0018:15D9:00A3` `ID_BUS=i2c`，MCU `XM2022-152-0721B`。点 Shift → `dagu-fcitx5-shift-tap`（禁止 keyd grab 15d9:00a3）。`0x22` 保活后 400ms 内的空 `0x05` 不注入（GENI 残渣假 KEY_UP） |
-| IMU / 光线传感器 | **有意关闭** | `&slpi` disabled，不在 AP I2C 上猜 |
+| IMU / 光线传感器 | **已通** | `&slpi` PAS + hexagonrpcd persist 转换过门。SEE `accel suid` 25 Hz 非零，`event11` 有字节，lux 非空。禁止 AP I2C 猜 IMU。见 `dagu-dsp-pipeline-status.md` |
 | 视频编解码 Venus | **已通** | `/dev/video14` 解码 + `/dev/video15` 编码。1080p + **4K60 HEVC** `DMA_DRM`/`NV12` 上 Mutter。日常 `gst-play-1.0 --videosink=waylandsink`。mpv 仍 `v4l2m2m-copy`。**禁止**开 SM8250 ICC |
-| CDSP | **有意关闭** | `status = disabled`。`#333` 只有 ADSP `remoteproc0` |
-| 蓝牙音频 / 耳机口 | **未做** | 板子无 3.5mm；控制器已通，A2DP / 耳机听感未测 |
+| CDSP | **已通** | `&cdsp` PAS running，`/dev/fastrpc-cdsp`，`dagu-cdsp-rpc` GET_DSP_INFO + INIT_ATTACH。禁止 WebNN |
+| 蓝牙音频 / 耳机口 | **软件已通** | 板子无 3.5mm。A2DP 拓扑 `SLIMBUS_7_RX` 已接 Q6。听感要配对耳机。禁止 HCI SBC 软编 |
 | S2Idle | **电源键可唤醒** | `mem_sleep=[s2idle]`，`echo mem` 睡约 65 min，`success=1`。DPU UBWC、Venus 节点、ADSP 都在，无 hangcheck/SSR。远程无 RTC/USB 唤不醒。见 `linux-mainline/docs/dagu-audio-s2idle.md` |
 | RTC | **没有设备** | 无 `/dev/rtc*`，`rtcwake` 不可用。用户态时钟靠 NTP |
 | Win11 ARM 日常 | **未做** | 仍是调研 / UEFI 移植，不是当前运行目标 |
@@ -165,7 +169,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 ### 麦克风
 
 - 安卓 `mixer_paths_overlay_static.xml` speaker-mic：TX DEC0=`SWR_MIC`，SMIC MUX0=`ADC3`，ADC4 MIXER，ADC4 MUX=`INP5`（WCD9385 AMIC5 / MIC BIAS3）
-- 主线还要 `ADC4 Switch` + `TX3 MODE=ADC_NORMAL` 才能打开 SoundWire ADC 口。无 Fluence，模拟增益 12（18 dB）
+- 主线还要 `ADC4 Switch` + `TX3 MODE=ADC_NORMAL` 才能打开 SoundWire ADC 口。Fluence 走 ADSP `OPEN_V8` `0x10F71` COPP（`#380` 已开）；`AEC_NS` 下 `arecord` 仍 EIO。模拟增益 12（18 dB）
 - 采集 FE 是 MultiMedia2（`hw:0,1`），不跟喇叭 MM1 抢 PCM。UCM `HiFi` → `Built-in Microphone`
 - 喇叭 440 Hz → 麦克风 Goertzel 检出。推送：`linux-mainline/scripts/dagu-mic-deploy.sh`
 - 脚本：`linux-mainline/scripts/dagu-mic-route.sh`、`linux-mainline/scripts/dagu-av-test.sh`
@@ -285,9 +289,15 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 
 细账：`linux-mainline/docs/dagu-camss-pix-audit.md`、`linux-mainline/docs/dagu-ife-pix-nv12-attempts.md`。禁止改后置 `0x0114`、禁止解 CSID SOT mask、禁止开 CDSP 来「补」IFE。
 
-### SLPI
+### SLPI（Sensor Low Power Island，传感器低功耗岛）
 
-`&slpi` **disabled**。overlay README：传感器走 SLPI，`stage-firmware.sh` 找到 `slpi.mbn` 后再把 `&slpi` 设 okay。不要在 AP I2C 上猜 IMU/ALS。
+`&slpi` **okay**，固件 `qcom/sm8250/xiaomi/dagu/slpi.mbn`（本机签名，禁止 elish）。PAS id 12 已在板上 `remote processor slpi is now up`。`hexagonrpcd -s` 做 `INIT_ATTACH_SNS` + persist fwrite/rename，USER-PD DOG 已消失。SEE 服务 400 给出 `accel suid`，`dagu-ssc` 25 Hz 非零 uinput，lux 非空。
+
+LSM6DSO 在 SLPI `bus_instance 3`，tcs3701 在 `bus_instance 4`。禁止在 AP I2C 上猜。细账：`linux-mainline/docs/dagu-dsp-pipeline-status.md`。
+
+### CDSP（Compute DSP，计算数字信号处理器 / Hexagon 698）
+
+`&cdsp` **okay**，固件 `qcom/sm8250/xiaomi/dagu/cdsp.mbn`。板上 `remoteproc cdsp state=running`，`/dev/fastrpc-cdsp`，`dagu-cdsp-rpc` `GET_DSP_INFO` 读到 HVX 属性后 `INIT_ATTACH` 钉住 PD。刷 B 后 `0525:a4a7` 保持 ≥32s。禁止 WebNN / TFLite CPU。不要用 CDSP「补」IFE。细账：`linux-mainline/docs/dagu-dsp-pipeline-status.md`。
 
 ---
 
@@ -316,8 +326,6 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 | `CONFIG_INTERCONNECT_QCOM_SM8250` | BCM `rpmh_write_batch` 超时，拖死 USB/MDSS/CPU OPP。Venus 用 ICC stub + 删 DT interconnects，不要靠开 provider |
 | `&usb_1_qmpphy` | P0 只要 HS gadget；SS 未训 |
 | Type-C → DWC3 graph | 等 TCPM 曾让 DWC3 停在 otg、无 UDC；节点本身已 okay 做充电 |
-| `&cdsp` | 继续 disabled；不要顺手跟 Venus 一起开 |
-| `&slpi` | 未验签名固件前不开 |
 
 ---
 
@@ -330,13 +338,12 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 3. **67W PPS 充电泵**：`bq25970-*` `#333` 仍 `online=0`。PD 砖看 TCPM log
 4. **OTG host**：Wi‑Fi SSH 下切 role，插 U 盘 / HID（会掉 g_serial）
 5. **音量上 / 马达 / torch**：`dagu-periph-test.sh` 点一次手感
-6. **蓝牙音频（A2DP）**：控制器已通，听感未测
-7. **SLPI**：PAS 验签 + 有 IIO 客户端再 okay IMU/ALS。不要在 AP I2C 上猜
-8. **USB3 + DP + PS5169**：先保证 HS gadget 不回退
-9. **S2Idle**：电源键唤醒已通（65 min）。没有 RTC 时不要再远程 `echo mem`。日常桌面仍 mask systemd sleep
-10. **Venus**：4K60 已通。下一步若要电影级高码率 4K 或 mpv 零拷贝，再谈 FFmpeg `drm_prime`；不要开 ICC
-11. **GPU hangcheck `00800005`** / 静置抽帧：能 recover，不是交付终点
-12. Win11 ARM：独立于本表
+6. **蓝牙音频（A2DP）**：Q6 `SLIMBUS_7_RX` 已接。听感配对耳机。`dagu-adsp-voice.md`
+7. **USB3 + DP + PS5169**：先保证 HS gadget 不回退
+8. **S2Idle**：电源键唤醒已通（65 min）。没有 RTC 时不要再远程 `echo mem`。日常桌面仍 mask systemd sleep
+9. **Venus**：4K60 已通。下一步若要电影级高码率 4K 或 mpv 零拷贝，再谈 FFmpeg `drm_prime`；不要开 ICC
+10. **GPU hangcheck `00800005`** / 静置抽帧：能 recover，不是交付终点
+11. Win11 ARM：独立于本表
 
 验收命令备忘：
 

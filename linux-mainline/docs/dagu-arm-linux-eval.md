@@ -89,7 +89,7 @@ Chrome：一线是 `use_v4l2_codec=true` 的 Chromium（`dagu-chromium-native.sh
 
 | 考察点 | 原厂 / 硅 | Linux 实机 |
 |--------|-----------|------------|
-| 算力 | Hexagon 698（CDSP / HVX），账面约 15 TOPS INT8。SM8250 **没有**独立 NPU 砖（那是 8xx 以后的 Hexagon Direct/HTP） | **`&cdsp` disabled**。SNPE / QNN / TFLite Hexagon 委托 **未做** |
+| 算力 | Hexagon 698（CDSP / HVX），账面约 15 TOPS INT8。SM8250 **没有**独立 NPU 砖（那是 8xx 以后的 Hexagon Direct/HTP） | **`&cdsp` okay**。FastRPC `/dev/fastrpc-cdsp` + `dagu-cdsp-rpc`。禁止 WebNN / TFLite CPU |
 | 框架 | 安卓 NNAPI + Hexagon | 无。WebNN 禁止（会掉 TFLite/CPU） |
 | 相机 3A / 降噪 | IPE / BPS / IFE 在 Spectra | Linux **没有** Titan ISP 用户态。预览是 libcamera **DebayerCpu** |
 
@@ -153,10 +153,9 @@ Linux 只打通了 **CAMSS RDI**（CSIPHY → CSID → VFE RDI → 内存 RAW10�
 |--------|------|-------|
 | ADSP | `adsp.mbn` running | **同**，`remoteproc0` `adsp` `running` |
 | 外放 | CS35L41 ×4，Halo DSP Protection + Music 调音 | **已通**（GENI I2C SE1/SE3）。TDM 32-bit slot + sample 24、`PCM Source=DSP`、prot.bin。`#244` 四颗都写上 `CAL_SET_STATUS=2`（TL 9524 / TR 9632 / BL 9497 / BR 9696）。Fast Use Case `*-music.txt` 已灌。禁止 softvol |
-| 麦 | WCD9385 AMIC5，Fluence AEC/NS | **无 Fluence**。模拟增益 18 dB，喇叭 440 Hz 回录能检出 |
-| AEC / ANC / KWS | ADSP Fluence / voice UI | **未做**。会议回声靠 CPU 或应用自己 |
-| 3.5 mm | 无 | 无 |
-| 蓝牙音频 | A2DP | 控制器已通，**A2DP 听感未测** |
+| 麦 | WCD9385 AMIC5，Fluence AEC/NS | **ADM OPEN_V8 `0x10F71` COPP 已开**（`#380` `copp=9`，echo 4ch）。`AEC_NS` 时 `arecord` 仍 EIO；Off 走 NULL_COPP 能录。见 `dagu-adsp-voice.md` |
+| AEC / ANC / KWS | ADSP Fluence / VA macro | AEC 图在 ADSP 上打开了，PCM 还没拉出来。无 3.5 mm，不做头戴 ANC。VA `hw:0,2` 有字节（KWS 前端，不是 CPU 唤醒词） |
+| 蓝牙音频 | A2DP | Q6 `SLIMBUS_7_RX` mixer + AFE `0x400e` 已到 ADSP。听感要配对耳机。禁止 PipeWire SBC 软编 |
 
 喇叭通路曾被 PipeWire 在 card 0 未就绪时 exit 234 整段会话无声——那是会话管理，不是 DSP 算力。禁止用 PipeWire softvol 把蚊子声拉大。
 
@@ -203,8 +202,8 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 
 | 传感器 | 安卓 | Linux |
 |--------|------|-------|
-| IMU LSM6DSO | SLPI | **`&slpi` disabled**。禁止在 AP I2C 上猜 |
-| ALS tcs3701 / rohm_bu27030 | SLPI | 同上 |
+| IMU LSM6DSO | SLPI | **`&slpi` okay**。`dagu-ssc` SEE QMI。禁止在 AP I2C 上猜 |
+| ALS tcs3701 / rohm_bu27030 | SLPI | 同上。照度 `/run/dagu-ssc/lux` |
 | 霍尔 GPIO110/121 | gpio-keys | DT 已写 `SW_LID` / `SW_TABLET_MODE`。**已迁走**：不再装 `dagu-tablet-mode.py` |
 | 距离 / 地磁 | 未作为交付 | 未做 |
 | 触控 Himax HX83121 | GENI SPI | **已通** `#244`：`990000.spi` / `spi4.0`，`dagu SPI FIFO proto=1 depth=16 width=32 fifo_if_dis=0 skip_wrap=1`。gpio8–11 function qup4，IRQ gpio39 LEVEL_LOW。probe 读 event30 不是全 `0xff`。禁止 GPIO100、禁止 GPI/SE DMA |
@@ -345,8 +344,8 @@ g_serial 0525:a4a7 held >30s；A 槽未动
 | `i2c-gpio` 笔充 | QUP GENI I2C | 仍 `i2c-gpio-se8`（P9418 Smart Pen TX，不是平板 Qi） | 没插笔时几乎不说话 |
 | ICC stub（空投票） | `CONFIG_INTERCONNECT_QCOM_SM8250` | BCM `rpmh_write_batch` 超时拖死 USB/MDSS | 高带宽多客户时没有互连 QoS |
 | UFS CLK_SCALING off | ufshc devfreq | 与 QUERY_ATTR 死锁 panic | 固定时钟，功耗略差 |
-| 无 Fluence | ADSP 语音拓扑 | 主线 mixer 没接 | 免提回声 |
-| `&cdsp` / `&slpi` disabled | Hexagon / 传感器枢纽 | 固件签名 / bring-up 未收口 | 无 NPU、无 IMU 自动旋转（旋转靠 Mutter 配置） |
+| 无 Fluence | ADSP 语音拓扑 | **OPEN_V8 `0x10F71` COPP 已开**；`arecord` 在 AEC_NS 下仍 EIO。Off 才是 NULL_COPP 能录 |
+| `&cdsp` / `&slpi` | Hexagon / 传感器枢纽 | PAS + FastRPC / SEE 客户端 | CDSP FastRPC；IMU 自动旋转走 `dagu-ssc` |
 
 ---
 
@@ -367,7 +366,7 @@ g_serial 0525:a4a7 held >30s；A 槽未动
 |------|------|------------|
 | VPU | H.264/HEVC/AV1、4K、多路 | H.264/HEVC/VP8/VP9 **已通**，4K60 HEVC 一条。无 AV1。多路未烤 |
 | ISP | 吞吐、多摄、3A/3DNR | RDI **已通**。IFE/IPE **未接**。预览靠 SoftISP skip |
-| 音频 DSP | AEC/ANC/KWS | ADSP 播放 **已通**。语音增强 **未做** |
+| 音频 DSP | AEC/ANC/KWS | ADSP 播放 **已通**。Fluence AEC/NS COPP **已接**。VA 前端 **已接**。头戴 ANC 无硬件 |
 
 ### 维度 3
 

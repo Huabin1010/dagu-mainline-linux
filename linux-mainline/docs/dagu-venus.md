@@ -233,7 +233,7 @@ sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 HOME=/
 
 4K HEVC、Overview、日常播放器见 **§9 `dagu-venus-4k-ecosystem`**。  
 VP9 / 高码率电影级 4K、`ffmpeg -c:v h264_v4l2m2m` 对照仍未跑。  
-Mesa 没有 Freedreno VA-API。`&cdsp` / `&slpi` 继续 disabled。
+Mesa 没有 Freedreno VA-API。CDSP / SLPI 走 PAS + FastRPC / SEE，不是 Venus 的依赖。
 
 ---
 

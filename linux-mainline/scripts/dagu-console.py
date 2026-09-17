@@ -11,12 +11,19 @@ from __future__ import annotations
 import argparse
 import base64
 import errno
+import fcntl
 import os
 import select
+import struct
 import sys
 import termios
 import time
 from pathlib import Path
+
+# CDC ACM: agetty waits for DCD until the host asserts DTR.
+TIOCMBIS = 0x5416
+TIOCM_DTR = 0x002
+TIOCM_RTS = 0x004
 
 PROMPT = "###DAGU### "
 PORT_DEFAULT = "/dev/ttyACM0"
@@ -24,7 +31,7 @@ PASS_FILE = Path(__file__).resolve().parent.parent / "out" / "root-password"
 
 
 def open_tty(port: str) -> int:
-    fd = os.open(port, os.O_RDWR | os.O_NOCTTY)
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     attrs = termios.tcgetattr(fd)
     iflag, oflag, cflag, lflag, ispeed, ospeed, cc = attrs
     iflag = termios.IGNBRK | termios.IGNPAR
@@ -33,12 +40,20 @@ def open_tty(port: str) -> int:
     lflag = 0
     cc = list(cc)
     cc[termios.VMIN] = 0
-    cc[termios.VTIME] = 1
+    cc[termios.VTIME] = 0
     termios.tcsetattr(
         fd,
         termios.TCSANOW,
         [iflag, oflag, cflag, lflag, termios.B115200, termios.B115200, cc],
     )
+    try:
+        fcntl.ioctl(fd, TIOCMBIS, struct.pack("I", TIOCM_DTR | TIOCM_RTS))
+    except OSError:
+        pass
+    # Keep reads nonblocking via VMIN/VTIME; writes must block or
+    # login hits BlockingIOError EAGAIN on a full ACM IN endpoint.
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
     return fd
 
 
@@ -85,24 +100,41 @@ def load_password() -> str:
 
 
 def login(fd: int) -> None:
-    write_line(fd, "")
-    out = wait_for(fd, ("login:", "Password:", "# ", PROMPT), 2.0)
-    if PROMPT in out:
-        return
-    if "login:" in out:
-        write_line(fd, "root")
-        out = wait_for(fd, ("Password:", "# ", PROMPT), 3.0)
-    if "Password:" in out:
-        write_line(fd, load_password())
-        wait_for(fd, ("# ", PROMPT, "$ "), 5.0)
-    # Quiet the Ubuntu 26 OSC spam so we can find our prompt.
-    write_line(fd, "export TERM=dumb SYSTEMD_OSC_CONTEXT=0; unset PROMPT_COMMAND; PS1='" + PROMPT + "'")
-    got = wait_for(fd, (PROMPT,), 4.0)
-    if PROMPT not in got:
+    # DTR already raised. Drain issue/login — do not send CR first or
+    # agetty treats it as an empty username ("登录不正确").
+    out = wait_for(
+        fd,
+        ("login:", "login：", "登录：", "Password:", "密码：", "# ", PROMPT),
+        3.0,
+    )
+    if not any(
+        s in out
+        for s in ("login:", "login：", "登录：", "Password:", "密码：", "# ", PROMPT)
+    ):
         write_line(fd, "")
-        got = wait_for(fd, (PROMPT,), 2.0)
-    if PROMPT not in got:
+        out = wait_for(
+            fd,
+            ("login:", "login：", "登录：", "Password:", "密码：", "# ", PROMPT),
+            2.0,
+        )
+    if any(s in out for s in ("login:", "login：", "登录：")):
+        write_line(fd, "root")
+        out = wait_for(fd, ("Password:", "密码：", "# ", PROMPT), 3.0)
+    if "Password:" in out or "密码：" in out:
+        write_line(fd, load_password())
+        out = wait_for(fd, ("# ", "$ ", "密码：", "登录：", PROMPT), 8.0)
+        if "密码：" in out or "登录：" in out:
+            raise SystemExit("serial login failed — bad password")
+    # Do not wait for PROMPT in the echoed PS1= line. Require a real command.
+    write_line(
+        fd,
+        "export TERM=dumb SYSTEMD_OSC_CONTEXT=0; unset PROMPT_COMMAND; "
+        "PS1='" + PROMPT + "'; printf '\\nDAGU_SERIAL_OK\\n'",
+    )
+    got = wait_for(fd, ("\nDAGU_SERIAL_OK", "\rDAGU_SERIAL_OK"), 6.0)
+    if "DAGU_SERIAL_OK" not in got:
         raise SystemExit("serial login failed — is 0525:a4a7 /dev/ttyACM0 a getty?")
+    wait_for(fd, (PROMPT,), 2.0)
 
 
 def run(fd: int, cmd: str, timeout: float = 30.0) -> str:

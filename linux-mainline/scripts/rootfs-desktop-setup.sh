@@ -41,6 +41,7 @@ apt-get install -y --no-install-recommends \
 	network-manager onboard \
 	ibus ibus-gtk3 ibus-gtk4 ibus-libpinyin \
 	bluez systemd-timesyncd pci.ids \
+	iio-sensor-proxy \
 	g++ make pkg-config rustc libcamera-dev
 
 apt-get clean
@@ -60,7 +61,7 @@ install_product_bins() {
 		make -C /tmp/dagu-camera-loopback PREFIX=/usr/local
 		make -C /tmp/dagu-camera-loopback PREFIX=/usr/local install
 	fi
-	for b in dagu-camera-loopback dagu-touch-boost dagu-power-button dagu-fcitx5-shift-tap; do
+	for b in dagu-camera-loopback dagu-touch-boost dagu-power-button dagu-fcitx5-shift-tap dagu-ssc dagu-cdsp-rpc; do
 		is_elf /usr/local/sbin/$b || {
 			echo "rootfs-desktop-setup: $b is not an ELF product binary" >&2
 			exit 1
@@ -1163,6 +1164,9 @@ font-antialiasing='grayscale'
 font-hinting='none'
 color-scheme='default'
 
+[org/gnome/settings-daemon/peripherals/touchscreen]
+orientation-lock=false
+
 [org/gnome/mutter]
 # Do NOT enable scale-monitor-framebuffer on dagu. 270° + 1.25 +
 # that feature empties Mutter unobscured_region, drops Chrome damage,
@@ -1318,6 +1322,18 @@ systemctl set-default graphical.target || true
 systemctl enable gdm3.service || true
 systemctl enable serial-getty@ttyGS0.service || true
 systemctl enable serial-getty@tty0.service || true
+# USB ACM has no UART CD until the host raises DTR. Without -L, agetty
+# clock_nanosleeps and the host sees a tty timeout / empty ACM reads.
+# TERM=dumb: systemd otherwise sends CSI 6n / 32766;32766H size probes and
+# waits for a cursor report that a dumb ACM never replies.
+mkdir -p /etc/systemd/system/serial-getty@ttyGS0.service.d
+cat >/etc/systemd/system/serial-getty@ttyGS0.service.d/local.conf <<'EOF'
+[Service]
+Environment=TERM=dumb
+Environment=SYSTEMD_OSC_CONTEXT=0
+ExecStart=
+ExecStart=-/usr/sbin/agetty -L --noreset --noclear --keep-baud 115200,57600,38400,9600 %I dumb
+EOF
 systemctl enable ssh.service || true
 systemctl enable NetworkManager.service || true
 
@@ -1506,6 +1522,7 @@ SectionDevice."Mic" {
 		cset "name='ADC4 Switch' on"
 		cset "name='TX3 MODE' ADC_NORMAL"
 		cset "name='ADC4 Volume' 12"
+		cset "name='Fluence AEC NS' AEC_NS"
 	]
 	DisableSequence [
 		cset "name='ADC4 Switch' off"
@@ -1514,6 +1531,7 @@ SectionDevice."Mic" {
 		cset "name='TX_AIF1_CAP Mixer DEC0' 0"
 		cset "name='TX3 MODE' ADC_INVALID"
 		cset "name='MultiMedia2 Mixer TX_CODEC_DMA_TX_3' off"
+		cset "name='Fluence AEC NS' Off"
 	]
 	Value {
 		CapturePriority 200
@@ -1521,6 +1539,39 @@ SectionDevice."Mic" {
 		CaptureChannels 1
 		CaptureRate 48000
 		# No CaptureMixerElem: GNOME must not slam ADC4 Volume.
+	}
+}
+
+SectionDevice."VoiceUI" {
+	Comment "ADSP VA macro capture (keyword-spotting frontend, not CPU KWS)"
+	EnableSequence [
+		cset "name='MultiMedia3 Mixer VA_CODEC_DMA_TX_0' on"
+	]
+	DisableSequence [
+		cset "name='MultiMedia3 Mixer VA_CODEC_DMA_TX_0' off"
+	]
+	Value {
+		CapturePriority 100
+		CapturePCM "hw:${CardId},2"
+		CaptureChannels 1
+		CaptureRate 48000
+	}
+}
+
+SectionDevice."Bluetooth" {
+	Comment "Q6 SLIMBUS_7_RX A2DP offload (not HCI SBC on the AP)"
+	EnableSequence [
+		cset "name='SLIMBUS_7_RX Audio Mixer MultiMedia4' on"
+	]
+	DisableSequence [
+		cset "name='SLIMBUS_7_RX Audio Mixer MultiMedia4' off"
+	]
+	Value {
+		PlaybackPriority 150
+		PlaybackPCM "hw:${CardId},3"
+		PlaybackChannels 2
+		PlaybackRate 48000
+		PlaybackFormat "S24_LE"
 	}
 }
 EOF
@@ -1598,9 +1649,53 @@ cset "ADC4 Switch" 1
 cset "TX3 MODE" ADC_NORMAL
 cset "ADC4 Volume" 12
 cset "TX_DEC0 Volume" 84
+cset "Fluence AEC NS" AEC_NS
 exit 0
 EOF
 chmod 755 /usr/local/sbin/dagu-mic-route.sh
+cat >/usr/local/sbin/dagu-va-route.sh <<'EOF'
+#!/bin/sh
+# VA_CODEC_DMA_TX_0 is the ADSP Voice Activation capture port (KWS frontend).
+set -eu
+CARD="${DAGU_ALSA_CARD:-0}"
+amixer -c "$CARD" cset "name=MultiMedia3 Mixer VA_CODEC_DMA_TX_0" on >/dev/null 2>&1 || true
+amixer -c "$CARD" cset "name=VA DEC0 MUX" VA_DMIC >/dev/null 2>&1 || true
+amixer -c "$CARD" cset "name=VA_AIF1_CAP Mixer DEC0" 1 >/dev/null 2>&1 || true
+echo "dagu-va-route: VA_CODEC_DMA_TX_0 -> MultiMedia3 (hw:${CARD},2)"
+exit 0
+EOF
+cat >/usr/local/sbin/dagu-bt-a2dp-route.sh <<'EOF'
+#!/bin/sh
+# Q6 SLIMBUS_7_RX A2DP playback backend. Encoding stays on ADSP.
+set -eu
+CARD="${DAGU_ALSA_CARD:-0}"
+amixer -c "$CARD" cset "name=SLIMBUS_7_RX Audio Mixer MultiMedia4" on >/dev/null 2>&1 || true
+echo "dagu-bt-a2dp-route: SLIMBUS_7_RX <- MultiMedia4 (hw:${CARD},3)"
+exit 0
+EOF
+chmod 755 /usr/local/sbin/dagu-va-route.sh /usr/local/sbin/dagu-bt-a2dp-route.sh
+mkdir -p /etc/wireplumber/wireplumber.conf.d
+cat >/etc/wireplumber/wireplumber.conf.d/50-dagu-bt-offload.conf <<'EOF'
+# QCA6390 A2DP must stay on Q6 SLIMBUS_7, not PipeWire SBC on the AP.
+monitor.bluez.properties = {
+  bluez5.hw-offload-sco = true
+  bluez5.enable-sbc-xq = false
+  bluez5.enable-msbc = false
+}
+monitor.bluez.rules = [
+  {
+    matches = [
+      { device.name = "~bluez_card.*" }
+    ]
+    actions = {
+      update-props = {
+        api.bluez5.hw-offload = true
+        bluez5.hw-offload-sco = true
+      }
+    }
+  }
+]
+EOF
 cat >/etc/systemd/system/dagu-speaker-route.service <<'EOF'
 [Unit]
 Description=dagu CS35L41 TDM mixer route
@@ -1774,6 +1869,78 @@ cat >/etc/udev/rules.d/90-dagu-backlight.rules <<'EOF'
 # Persist l81a-wled on every slider change (shutdown save misses reboot -f).
 ACTION=="change", SUBSYSTEM=="backlight", KERNEL=="l81a-wled", RUN+="/usr/lib/systemd/systemd-backlight save backlight:l81a-wled"
 EOF
+cat >/etc/udev/rules.d/90-dagu-dsp.rules <<'EOF'
+KERNEL=="fastrpc-*", MODE="0660", GROUP="video"
+KERNEL=="fastrpc-sdsp", TAG+="systemd", ENV{SYSTEMD_WANTS}="hexagonrpcd-sdsp.service"
+ACTION=="add", KERNEL=="event*", ATTRS{name}=="dagu-lsm6dso-accel", ENV{ID_INPUT_ACCELEROMETER}="1", ENV{ACCEL_MOUNT_MATRIX}="-1, 0, 0; 0, 1, 0; 0, 0, -1"
+EOF
+is_elf /usr/local/sbin/dagu-ssc || {
+	echo "rootfs-desktop-setup: missing dagu-ssc" >&2
+	exit 1
+}
+is_elf /usr/local/sbin/dagu-cdsp-rpc || {
+	echo "rootfs-desktop-setup: missing dagu-cdsp-rpc" >&2
+	exit 1
+}
+if is_elf /usr/local/bin/hexagonrpcd; then
+cat >/etc/systemd/system/hexagonrpcd-sdsp.service <<'EOF'
+[Unit]
+Description=dagu SLPI FastRPC reverse tunnel (sns registry fopen)
+ConditionPathExists=/dev/fastrpc-sdsp
+After=local-fs.target
+Before=dagu-ssc.service
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=/usr/local/lib
+StandardOutput=journal
+StandardError=journal
+ExecStart=/usr/bin/stdbuf -oL -eL /usr/local/bin/hexagonrpcd -f /dev/fastrpc-sdsp -d sdsp -s -R /usr/share/qcom/sm8250/Xiaomi/dagu
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/hexagonrpcd-sdsp.service \
+	/etc/systemd/system/multi-user.target.wants/hexagonrpcd-sdsp.service
+else
+	echo "rootfs-desktop-setup: hexagonrpcd not staged (run dagu-dsp-deploy on the board)" >&2
+fi
+cat >/etc/systemd/system/dagu-ssc.service <<'EOF'
+[Unit]
+Description=dagu SLPI SEE sensors (LSM6DSO / tcs3701)
+After=local-fs.target hexagonrpcd-sdsp.service
+Wants=hexagonrpcd-sdsp.service iio-sensor-proxy.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-ssc
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+cat >/etc/systemd/system/dagu-cdsp-rpc.service <<'EOF'
+[Unit]
+Description=dagu CDSP Hexagon 698 FastRPC session
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-cdsp-rpc
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/dagu-ssc.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-ssc.service
+ln -sf /etc/systemd/system/dagu-cdsp-rpc.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-cdsp-rpc.service
+systemctl enable iio-sensor-proxy.service >/dev/null 2>&1 || true
 mkdir -p /etc/dconf/db/local.d/locks
 cat >/etc/dconf/db/local.d/00-dagu-brightness <<'EOF'
 [org/gnome/settings-daemon/plugins/power]

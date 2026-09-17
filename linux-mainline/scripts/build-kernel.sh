@@ -24,6 +24,23 @@ if grep -q 'dagu bringup: SMC-first primary_entry probe' "$KERNEL_SRC/arch/arm64
 fi
 
 mkdir -p "$KBUILD_OUTPUT" "$OUT"
+LOCK_DIR="$ROOT/tmp/kernel-build"
+LOCK="$LOCK_DIR/lock"
+mkdir -p "$LOCK_DIR"
+while [[ -f "$LOCK" ]]; do
+	lock_pid=$(sed -n 's/^pid=//p' "$LOCK" | head -1)
+	if [[ -n "$lock_pid" && -d "/proc/$lock_pid" ]]; then
+		echo "==> kernel build lock held by pid $lock_pid; waiting"
+		sleep 15
+	else
+		rm -f "$LOCK"
+		break
+	fi
+done
+printf 'pid=%s\nwhat=DAGU_DISPLAY=%s DAGU_MINIMAL=%s %s\n' \
+	"$$" "${DAGU_DISPLAY:-0}" "${DAGU_MINIMAL:-}" "$0 $*" >"$LOCK"
+trap 'rm -f "$LOCK"' EXIT
+
 cd "$KERNEL_SRC"
 
 if [[ ! -f "$KBUILD_OUTPUT/.config" ]]; then
@@ -145,12 +162,15 @@ if [[ "${DAGU_DISPLAY:-0}" == 1 ]]; then
 	need_y CONFIG_HIDRAW
 	need_y CONFIG_I2C_GPIO
 	need_y CONFIG_SND_SOC_CS35L41_I2C
+	need_y CONFIG_SND_SOC_SPDIF
 	need_y CONFIG_SND_SOC_SM8250
 	need_y CONFIG_SND_SOC_WCD938X_SDW
 	need_y CONFIG_PINCTRL_SM8250_LPASS_LPI
 	need_y CONFIG_QCOM_Q6V5_PAS
 	need_y CONFIG_QCOM_PD_MAPPER
 	need_y CONFIG_QRTR_SMD
+	need_y CONFIG_QCOM_FASTRPC
+	need_y CONFIG_RPMSG
 	need_y CONFIG_I2C_QCOM_CCI
 	need_y CONFIG_VIDEO_QCOM_CAMSS
 	need_m CONFIG_VIDEO_QCOM_VENUS
@@ -244,6 +264,7 @@ if [[ "${DAGU_MINIMAL:-}" != 1 ]]; then
 	need_y CONFIG_ARM_QCOM_CPUFREQ_HW
 	need_y CONFIG_QCOM_TSENS
 	need_y CONFIG_SND_SOC_CS35L41_I2C
+	need_y CONFIG_SND_SOC_SPDIF
 fi
 
 echo "==> Image.gz + $DTB_NAME ($JOBS jobs)"

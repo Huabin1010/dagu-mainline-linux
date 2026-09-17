@@ -1,0 +1,18 @@
+[Unit]
+Description=dagu SLPI FastRPC reverse tunnel (sns registry fopen)
+Documentation=https://github.com/linux-msm/hexagonrpc
+ConditionPathExists=/dev/fastrpc-sdsp
+After=local-fs.target
+Before=dagu-ssc.service
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=/usr/local/lib
+StandardOutput=journal
+StandardError=journal
+ExecStart=/usr/bin/stdbuf -oL -eL /usr/local/bin/hexagonrpcd -f /dev/fastrpc-sdsp -d sdsp -s -R /usr/share/qcom/sm8250/Xiaomi/dagu
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# FastRPC compute PDs. video group already has GPU/DRM.
+KERNEL=="fastrpc-*", MODE="0660", GROUP="video"
+KERNEL=="fastrpc-sdsp", TAG+="systemd", ENV{SYSTEMD_WANTS}="hexagonrpcd-sdsp.service"
+# LSM6DSO via SLPI SEE → uinput. iio-sensor-proxy / gsd-orientation.
+ACTION=="add", KERNEL=="event*", ATTRS{name}=="dagu-lsm6dso-accel", ENV{ID_INPUT_ACCELEROMETER}="1", ENV{ACCEL_MOUNT_MATRIX}="-1, 0, 0; 0, 1, 0; 0, 0, -1"

@@ -29,7 +29,7 @@ PDR: Indication received from msm/adsp/audio_pd, state: 0x1fffffff
 ```
 
 APR 服务 4:3 / 4:4 / 4:7 / 4:8 已加。DT `&adsp` 为 `okay`，`linux-mainline/dts/sm8250-xiaomi-dagu.dts`。  
-`&cdsp` / `&slpi` **继续 disabled**。
+CDSP / SLPI 是独立 PAS 路径，不跟音频绑在一起关。
 
 ### 1.2 SoundWire
 
@@ -149,6 +149,6 @@ wlp1s0: deauthenticating ... Reason: 3=DEAUTH_LEAVING
 ### 2.4 下一步不要做的
 
 - 不要为了 S2Idle 去开 `CONFIG_INTERCONNECT_QCOM_SM8250`
-- 不要开 `&cdsp` / `&slpi`
+- 不要用 CDSP「补」IFE；WebNN 禁止
 - 不要在没 RTC / 没人按电源键时再远程 `echo mem`（会再次失联）
 - 不要拉低 GPIO139 HWEN

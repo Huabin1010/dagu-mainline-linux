@@ -238,6 +238,7 @@
 };
 
 &cdsp {
+	firmware-name = "qcom/sm8250/xiaomi/dagu/cdsp.mbn";
 	status = "disabled";
 };
 

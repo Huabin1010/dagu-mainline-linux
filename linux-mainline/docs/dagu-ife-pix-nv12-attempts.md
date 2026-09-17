@@ -78,7 +78,7 @@ s5kjn1 RAW10 4080×3060 GBRG，D-PHY `r0114=0x300`
 
 **阶段门没过，最终更没到。** `#336` 不刷机复测 `/tmp/pix.nv12` 仍是 **0 字节**，`streamon_rc=124`。桌面继续 SoftISP。
 
-卡在哪：总图见 [`dagu-ife-pipeline-status.md`](dagu-ife-pipeline-status.md)。
+卡在哪：后置总图 [`dagu-ife-pipeline-status.md`](dagu-ife-pipeline-status.md)；前置本刀 [`dagu-ife-front-pipeline-status.md`](dagu-ife-front-pipeline-status.md)。
 
 禁止当「先这样」：
 
@@ -398,7 +398,8 @@ CAMIF 在出 4080×1530。**不是卡死点。**
 | 文档 | 角色 |
 |------|------|
 | 本文 | PIX NV12 尝试与证伪 |
-| `dagu-ife-pipeline-status.md` | 两路分叉 + IFE 卡死点 mermaid |
+| `dagu-ife-pipeline-status.md` | 后置两路分叉 + IFE 卡死点 mermaid |
+| `dagu-ife-front-pipeline-status.md` | 前置 imx596 PIX 卡死点 mermaid（本刀） |
 | `dagu-camss-pix-audit.md` | 审计入口；飞行预览仍是 DebayerCpu |
 | `dagu-arm-linux-eval.md` | 七维评估：相机仍是最大软路径洞 |
 | `.cursor/rules/dagu-camera-rear.mdc` | 后置 D-PHY / skip 4×4 飞行合格，禁止捎带回 C-PHY |

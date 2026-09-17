@@ -1209,6 +1209,14 @@
 	dai@1 {
 		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
 	};
+
+	dai@2 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>;
+	};
+
+	dai@3 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA4>;
+	};
 };
 
 /*
@@ -1234,19 +1242,24 @@
 	dai@120 {
 		reg = <TX_CODEC_DMA_TX_3>;
 	};
+
+	dai@138 {
+		reg = <SLIMBUS_7_RX>;
+	};
+
+	dai@139 {
+		reg = <SLIMBUS_7_TX>;
+	};
 };
 
 &cdsp {
-	/* No product workload. PAS + a real client required before okay. */
-	status = "disabled";
+	firmware-name = "qcom/sm8250/xiaomi/dagu/cdsp.mbn";
+	status = "okay";
 };
 
 &slpi {
 	firmware-name = "qcom/sm8250/xiaomi/dagu/slpi.mbn";
-	/* Stay disabled until qcom_scm_pas_auth_and_reset succeeds and a
-	 * mainline SSC/QMI sensor client exists. Do not guess LSM6DSO on AP I2C.
-	 */
-	status = "disabled";
+	status = "okay";
 };
 
 &venus {
@@ -1535,6 +1548,20 @@
 		};
 	};
 
+	mm3-dai-link {
+		link-name = "MultiMedia3";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
+		};
+	};
+
+	mm4-dai-link {
+		link-name = "MultiMedia4";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA4>;
+		};
+	};
+
 	tert-tdm-dai-link {
 		link-name = "Tertiary TDM Playback";
 		cpu {
@@ -1573,6 +1600,31 @@
 		platform {
 			sound-dai = <&q6routing>;
 		};
+	};
+
+	/*
+	 * QCA6390 A2DP offload: AFE SLIMBUS_7_RX 0x400e is the virtual
+	 * BT port (CAF mixer_paths.xml bt-a2dp). Dummy DIT codec; ADSP
+	 * talks to the BT SoC over IPC, not uart6 HCI PCM.
+	 */
+	slim7-dai-link {
+		link-name = "Slimbus7 Playback";
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_7_RX>;
+		};
+		codec {
+			sound-dai = <&bt_a2dp_codec>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+	};
+};
+
+/ {
+	bt_a2dp_codec: bt-a2dp-codec {
+		compatible = "linux,spdif-dit";
+		#sound-dai-cells = <0>;
 	};
 };
 

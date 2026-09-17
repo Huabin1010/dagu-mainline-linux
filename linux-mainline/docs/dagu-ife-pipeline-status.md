@@ -1,6 +1,6 @@
 # dagu：相机两路与 IFE 卡死点
 
-对照 **`#365`**（2026-09-17 16:16 CST）。**CLC（Camera Logic Core，相机逻辑核）门已过。** `#365` 色度 WM5 packer `PLAIN_8=1` 后 UV mean≈133、120–136 仓约占满，**绿偏原点过门**。饱和度仍窄（UV 124–147）。桌面仍走 RDI（Raw Dump Interface，原始旁路出口）SoftISP。细账：`dagu-ife-pix-nv12-attempts.md`。
+对照 **`#390`**（2026-09-17 21:19 CST）。后置 **CLC（Camera Logic Core，相机逻辑核）门已过**（`#360` / `#365`）。本刀把前置 imx596 接到同一条 **IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）**：**CSIPHY4（CSI Physical Layer，CSI 物理层）→ CSID1（CSI Decoder，CSI 解码器）IPP → IFE1 CAMIF（Camera Interface，相机接口）→ CLC → WM4/5 线性 NV12**。桌面仍走 RDI（Raw Dump Interface，原始旁路出口）SoftISP。前置卡死点图：`dagu-ife-front-pipeline-status.md`。细账：`dagu-ife-pix-nv12-attempts.md`。
 
 图例：绿 = 板上已证明 · 蓝 = 正在飞的软预览 · 黄 = 寄存器粘住、像素没证明穿过 · 红 = 卡死 · 灰 = 本阶段不做。
 
@@ -18,17 +18,21 @@
 
 Viewfinder 仍 skip 4×4。门过了才**允许**离开 `DebayerCpu`，还没切：Demosaic/CC 已加回，`#365` UV 原点已过，饱和度仍窄。
 
-### 0.1 下一刀 `#366`
+### 0.1 下一刀 `#373`：前置 IFE PIX
 
-`#365` 已刷 B：CST 保持 `0x02000000`，WM5 packer `PLAIN_8=1` 粘住（dump `packer5=0x1`，`offu=0x2000000`）。3 帧非零：Y mean≈107，**UV mean 132.8**，around128≈1.03M/1.037M。绿偏原点过了（`out/camera/ife-pix-365.png`）。UV 只在 124–147，几乎是带 luma 的灰。
+后置 `#365` UV 原点已过。`#366` 后置饱和度**不是本刀**。
 
-`#366`：在 packer 1 + live CST `0x02000000` 上把色度幅度拉回来（CST 矩阵 U/V 行，或 10-bit→8-bit 的取位），让室内实景可辨色，不只是可辨轮廓。**禁止** CST `[9:0]=0x200`、禁止 PDPC 零 DMI、不空 `0x5e00`。Y packer 保持 3。Viewfinder 仍 skip 4×4。
+HyperOS Camera ID 1：IFE1+CSID1，CSIPHY4。堆 IQ Crop/MNDS last **`0x0a1f079f`**；Display stripe **`0x077f0437`**（1920×1080）。Demux last **`0x07a00a20`**；**0x3090 even `0xca` odd `0x9c`**（BGGR，不是后置 `0xac/0xc9`）。**禁止**抄后置 `0xfef0bf3` / `0x0bf40ff0` / `0x3090 0xac`。
+
+`DAGU_IFE_PIX=front`：`csiphy4 → csid1 pad4 → vfe1_pix`，≥3 帧非零线性 NV12，UV ~128。PDPC30 MODULE=0，chroma packer 1，不空 `0x5e00`。
+
+已刷仍 overflow（pix=2592 line=976）：`#367`–`#377`。`#377` MNDS 末三字 0 粘住，**仍 viol 19**。`#378` MNDS_C last `0x077f0437` phase `0xc0400000`。前置图：`dagu-ife-front-pipeline-status.md`。禁止抄 `0xfef0bf3`。
 
 ```mermaid
 flowchart LR
-  NOW["现在 · UV 原点 ~128<br/>饱和度仍窄"]
-  CUT["#366 · 色度幅度 / CST 矩阵"]
-  GOAL["产品 · 可看的彩色 PIX NV12"]
+  NOW["现在 · 后置 PIX 已过门<br/>前置仍 SoftISP skip 2×2"]
+  CUT["#378 · MNDS_C 2× phase 末三字 0"]
+  GOAL["≥3 帧非零 NV12 · UV~128"]
   LATER["之后才允许<br/>Viewfinder 离开 DebayerCpu"]
   NOW --> CUT --> GOAL --> LATER
 
@@ -260,7 +264,15 @@ ION CDM：进程内 dump 48 个 <400KB dmabuf。LIN DMI n=36 在 **212992B** 缓
 
 `#364` 已刷 B：CST 原点 `[9:0]=0x200` 粘住（`offu=0x200 offv=0x200`）。3 帧 **Y mean≈0.1 UV=0**。低 10 位不是原点，会把矩阵乘成 0。已撤回 live `0x02000000`。
 
-`#365` 已刷 B：CST `0x02000000` + WM5 `packer5=0x1` 粘住。3 帧非零：Y 1–254 mean≈107，**UV mean 132.8**（U 133 / V 132），around128 满仓。绿偏原点过门。UV 只 124–147，几乎是灰。下一刀 `#366`：色度幅度，PDPC 保持旁路，Y packer 仍 3。
+`#365` 已刷 B：CST `0x02000000` + WM5 `packer5=0x1` 粘住。3 帧非零：Y 1–254 mean≈107，**UV mean 132.8**（U 133 / V 132），around128 满仓。绿偏原点过门。UV 只 124–147，几乎是灰。后置饱和度 `#366` 推迟。
+
+`#367` 前置：IFE1+CSID1、Crop last `0xa1f079f`、Demux last `0x07a00a20` 粘住。STREAMON 0 字节。MID 写成 Linux keep-all `0xa1f0000/0x3cf0000`（#350 同类）。
+
+`#368` 已刷 B：MID 改回 live CDM `0x3c01a3`/`0x27f`（CamX `@0x52b168` 14-bit `(first<<16)|last`，Display 1920 共用）。dump `mid_y=0x3c01a3/0x27f` 粘住。仍 overflow `as0=0` line=976。
+
+`#369` 已刷 B：前置 Demux `0x3090` 用堆 `0x08c908c9` + even `0xca` odd `0x9c`（BGGR）。dump `demux=0x3c003c01/0x8c908c9/0xca/0x9c` 粘住。仍 **0 字节**，`streamon_rc=124`，`viol_id=0` pix=2592 line=976，`as0=0`，clcstat 全 0。even/odd **不是**剩下的 AXI 卡死点。Crop last `0xa1f079f`、Demux last `0x07a00a20`、MID `0x3c01a3` 都粘着。
+
+`#373` 已刷 B（`#378`）：MNDS last `0x77f0437`、PRE `0x3cf/0xa1f`、MID/POST `0x437/0x77f` 粘住。**`viol_id=19` MNDS_C**，`clcstat mnds=1`，packer `0x22a`，仍 `as0=0` 0 帧。匿名 overflow 已走到具名 MNDS_C。MNDS_C 相位 `0xc0400000` 是 Crop C 的 2ppc，不是 dest-last 上的 identity。
 
 compact LIN **没有** packer `0x828548` 打 `0x2a60`（Dump 表 `0x2a60×6` 只给 DumpRegConfig）。FULL CalculateHWSetting 的 16 knee 不是那扇 6 字窗。
 

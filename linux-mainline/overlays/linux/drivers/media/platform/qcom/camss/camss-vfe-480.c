@@ -600,7 +600,7 @@ static void vfe_480_crop(struct vfe_device *vfe, u32 base, u32 last_x,
  * Demux — packer as0=0, viol_id=0, line=1530. Do not Crop11-guess
  * last/first onto 0x3068; these 10-word blobs are the CDM.
  */
-static void vfe_480_demux(struct vfe_device *vfe)
+static void vfe_480_demux(struct vfe_device *vfe, u32 in_w, u32 in_h)
 {
 	static const u32 live_3090[] = {
 		DEMUX_COMPACT_CFG, DEMUX_COMPACT_GAIN0, DEMUX_COMPACT_GAIN12,
@@ -621,10 +621,43 @@ static void vfe_480_demux(struct vfe_device *vfe)
 		0x00000060, 0x00000014,
 	};
 
-	vfe_480_pack(vfe, CLC_DEMUX, live_3090, ARRAY_SIZE(live_3090));
-	vfe_480_pack(vfe, 0x3058, live_3058, ARRAY_SIZE(live_3058));
-	vfe_480_pack(vfe, 0x3068, live_3068, ARRAY_SIZE(live_3068));
-	vfe_480_pack(vfe, 0x30ac, live_30ac, ARRAY_SIZE(live_30ac));
+	/*
+	 * live_3068 last word 0x0bf40ff0 is rear 4080×3060. Packing
+	 * that onto imx596 2592×1952 leaves Demux after CAMIF with
+	 * an empty window (#367 overflow line=976 as0=0). Camera ID 1
+	 * heap: last 0x07a00a20, 3058 third word 0xe24203.
+	 * 0x3090 even/odd 0xac/0xc9 is GBRG compact (rear). Front
+	 * BGGR heap 0x3090 is 0x08c908c9 ×4 + even 0xca odd 0x9c.
+	 */
+	if (in_w == 4080 && in_h == 3060) {
+		vfe_480_pack(vfe, CLC_DEMUX, live_3090, ARRAY_SIZE(live_3090));
+		vfe_480_pack(vfe, 0x3058, live_3058, ARRAY_SIZE(live_3058));
+		vfe_480_pack(vfe, 0x3068, live_3068, ARRAY_SIZE(live_3068));
+		vfe_480_pack(vfe, 0x30ac, live_30ac, ARRAY_SIZE(live_30ac));
+	} else if (in_w == 2592 && in_h == 1952) {
+		static const u32 front_3090[] = {
+			0x3c003c01, 0x08c908c9, 0x08c908c9, 0x08c908c9,
+			0x08c908c9, 0x000000ca, 0x0000009c,
+		};
+		static const u32 front_3058[] = {
+			0x00000001, 0x00000001, 0x00e24203,
+		};
+		static const u32 front_3068[] = {
+			0x000003c0, 0x01001000, 0x00004020, 0x00140014,
+			0x000022a8, 0x000015a8, 0x00000763, 0x00000bd2,
+			0x00000000, 0x07a00a20,
+		};
+		static const u32 front_30ac[] = {
+			0x0000443c, 0x000003ff, 0x00000000, 0x00200080,
+			0x00000020, 0x000a000a, 0x00000064, 0x00000040,
+			0x00000060, 0x00000014,
+		};
+
+		vfe_480_pack(vfe, CLC_DEMUX, front_3090, ARRAY_SIZE(front_3090));
+		vfe_480_pack(vfe, 0x3058, front_3058, ARRAY_SIZE(front_3058));
+		vfe_480_pack(vfe, 0x3068, front_3068, ARRAY_SIZE(front_3068));
+		vfe_480_pack(vfe, 0x30ac, front_30ac, ARRAY_SIZE(front_30ac));
+	}
 }
 
 /*
@@ -1086,59 +1119,167 @@ static void vfe_480_mnds(struct vfe_device *vfe, u32 base,
 }
 
 /*
- * Live IFE CDM packet 1 Display Full scaler + TAP. MODULE/H_SIZE
- * are not Linux keep-all 2ppc. TAP 0x5408×2 is AHB 0x307/0x9016c7d
+ * Live IFE CDM Display Full scaler + TAP. MODULE/H_SIZE are not
+ * Linux keep-all 2ppc. TAP 0x5408×2 is AHB 0x307/0x9016c7d
  * (DumpRegConfig lumaConfig/filter), not Crop11 and not DMI LUT.
  * #350 dropped RoundClamp overlay: PIXEL PIPE OVERFLOW, 0-byte
  * NV12, as0=0 as3 latched. Live 0x68 is not Linux keep-all, but
  * it is what lets DQBUF complete (#349). Restore it. Skip
  * 0x5608/0x5e08 MODULE — those EN DS4/DS16 without WM6/7.
+ *
+ * Rear 4080×3060 last 0xfef0bf3 is s5kjn1 pixel-domain 4079×3059.
+ * Front imx596 last 0xa1f079f is Camera ID 1 heap 2591×1951
+ * (2026-09-17). Do not copy 0xfef0bf3 onto 2592×1952. Display
+ * Full stripe on that heap is 1919×1079, not 1440×1080.
  */
-static void vfe_480_live_display_cdm(struct vfe_device *vfe)
+static void vfe_480_live_display_cdm(struct vfe_device *vfe,
+				     u32 in_w, u32 in_h)
 {
-	static const u32 live_crop_y[] = {
+	static const u32 rear_crop_y[] = {
 		0x00000001, 0x00000600, 0x0fef0bf3, 0xc0cc0000,
 		0x00000000, 0xc0cc0000, 0x00000000, 0x00000000,
 		0x00000000,
 	};
-	static const u32 live_crop_c[] = {
+	static const u32 rear_crop_c[] = {
 		0x00000001, 0x00000600, 0x0fef0bf3, 0xc1980000,
 		0x00000000, 0xc1980000, 0x00000000, 0x00000000,
 		0x00000000,
 	};
-	static const u32 live_mnds_y[] = {
+	static const u32 rear_mnds_y[] = {
 		0x00000001, 0x00000600, 0x0fef0bf3, 0xc043dbcf,
 		0x00000000, 0xc043e7db, 0x00000000, 0x00000000,
 		0x00000000,
 	};
-	static const u32 live_mnds_c[] = {
+	static const u32 rear_mnds_c[] = {
 		0x00000001, 0x00000600, 0x0fef0bf3, 0xc087b79e,
 		0x00000000, 0xc087cfb6, 0x00000000, 0x00000000,
+		0x00000000,
+	};
+	/*
+	 * Camera ID 1 heap Display Full (2026-09-17 19:37, provider
+	 * 77e906a000+e7b198): Crop Y/C last 0x077f0437 = 1919×1079,
+	 * MODULE 0x101, phase unity 0xc0200000, unpacked last 0x437/
+	 * 0x77f in words 7-8. 1MB CDM 640 list put 0xc081999a at
+	 * 0x4460 and unity at 0x4c60. Display analog: Crop is the
+	 * 1920 window. Historical MNDS last 0x0a1f079f + unity is
+	 * the 2592 sensor pair, not Display Full.
+	 * #370 invented MNDS Q21 0xc02b3333 (not in this heap) and
+	 * still overflowed. Do not put 4.05 at 0x4c60 while WM is
+	 * 1920×1080.
+	 * #372 Crop 0x077f0437 + MNDS still 0x0a1f079f: MNDS waited
+	 * on 2592 after Crop already windowed to 1920 (packer 0x2aa,
+	 * still overflow). Display Full heap uses 0x077f0437 on the
+	 * Crop pair; MNDS must see the same 1920 last. MID/POST
+	 * 0x1df/0x27f is the 640 CDM — Display uses unpacked
+	 * 0x437/0x77f.
+	 */
+	static const u32 front_crop_y[] = {
+		0x00000101, 0x00000600, 0x077f0437, 0xc0200000,
+		0x00000000, 0xc0200000, 0x00000000, 0x00000437,
+		0x0000077f,
+	};
+	static const u32 front_crop_c[] = {
+		0x00000101, 0x00000600, 0x03bf021b, 0xc0200000,
+		0x00000000, 0xc0200000, 0x00000000, 0x0000021b,
+		0x000003bf,
+	};
+	/*
+	 * MNDS MODULE stays 1 like rear live CDM / #376 dump cfg=0x1.
+	 * Crop 0x101 is interp on the window; do not copy that bit
+	 * onto MNDS. Last/stripe must be the 1920 Display pair so
+	 * MNDS does not wait on 2592 after Crop already windowed.
+	 * #373 copied Crop C phase 0xc0400000 onto MNDS_C: viol_id=19
+	 * MNDS_C (clcstat mnds=1, packer 0x22a). Rear C phase is 2×
+	 * only when last is INPUT. Dest last + identity is 0xc0200000
+	 * on Y.
+	 * #375 MNDS_C last 0x03bf021b stuck, still viol 19: Crop C
+	 * still luma 0x077f0437 so chroma entered MNDS at 1920.
+	 * #376 Crop C dest 960×540 identity, matching MID_C / MNDS_C.
+	 * Heap Display Crop C kept luma last — that packing overflowed
+	 * Linux MNDS_C. Do not copy 0xfef0bf3.
+	 * #387 STREAMON: crop_c last 0x03bf021b stuck, still viol 19
+	 * packer 0x22a as0=0. mnds_c vph=0x21b vst=0x3bf — Crop
+	 * unpacked last stuffed into MNDS V_PHASE/V_STRIPE.
+	 * Front 1MB CDM Camera ID 1 @0x4c60/@0x4e60 n=9 ends 0,0,0
+	 * (sensor last 0x0a1f079f, MNDS Y unity / C 0xc0400000).
+	 * Rear live MNDS same trailing zeros. #377 keep dest last,
+	 * zero V words: #390 vph=0 vst=0 stuck, still viol 19.
+	 * Front 1MB CDM @0x4e60 is last=Crop-domain + phase 0xc0400000
+	 * + trailing zeros, not dest last identity. #373 copied 2×
+	 * phase with Crop unpacked V_STRIPE. #378 MNDS_C last
+	 * 0x077f0437 (Display Crop Y) phase 0xc0400000 H_PAD same,
+	 * trailing zeros. Do not invent 0xc02b3333. Do not copy
+	 * 0xfef0bf3. Do not stuff unpacked last into V_STRIPE.
+	 */
+	static const u32 front_mnds_y[] = {
+		0x00000001, 0x00000600, 0x077f0437, 0xc0200000,
+		0x00000000, 0xc0200000, 0x00000000, 0x00000000,
+		0x00000000,
+	};
+	static const u32 front_mnds_c[] = {
+		0x00000001, 0x00000600, 0x077f0437, 0xc0400000,
+		0x00000000, 0xc0400000, 0x00000000, 0x00000000,
 		0x00000000,
 	};
 	static const u32 live_tap_ds4[] = { 0x00000307, 0x09016c7d };
 	static const u32 live_tap_ds4c[] = { 0x00b404eb, 0x00020781 };
 	static const u32 live_tap_ds16[] = { 0x00000f07, 0x09016c7d };
 	static const u32 live_tap_ds16c[] = { 0x0000010d, 0x000001df };
+	const u32 *crop_y, *crop_c, *mnds_y, *mnds_c;
 
-	vfe_480_pack(vfe, CLC_CROP + CLC_MODULE_CFG, live_crop_y,
-		     ARRAY_SIZE(live_crop_y));
-	vfe_480_pack(vfe, CLC_CROP_C + CLC_MODULE_CFG, live_crop_c,
-		     ARRAY_SIZE(live_crop_c));
-	vfe_480_pack(vfe, CLC_MNDS_Y + CLC_MODULE_CFG, live_mnds_y,
-		     ARRAY_SIZE(live_mnds_y));
-	vfe_480_pack(vfe, CLC_MNDS_C + CLC_MODULE_CFG, live_mnds_c,
-		     ARRAY_SIZE(live_mnds_c));
+	if (in_w == 4080 && in_h == 3060) {
+		crop_y = rear_crop_y;
+		crop_c = rear_crop_c;
+		mnds_y = rear_mnds_y;
+		mnds_c = rear_mnds_c;
+	} else if (in_w == 2592 && in_h == 1952) {
+		crop_y = front_crop_y;
+		crop_c = front_crop_c;
+		mnds_y = front_mnds_y;
+		mnds_c = front_mnds_c;
+	} else {
+		return;
+	}
 
-	vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_Y, 0x0e01);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x68,
-		     (const u32[]){ 0x003c01a3, 0x0000027f }, 2);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x70,
-		     (const u32[]){ 0x00ff0000, 0x16, 0x00ff0000, 0x16, 0, 0 },
-		     6);
-	vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_C, 0x3e01);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_MID_C + 0x68,
-		     (const u32[]){ 0x001e00d1, 0x0000013f }, 2);
+	vfe_480_pack(vfe, CLC_CROP + CLC_MODULE_CFG, crop_y, 9);
+	vfe_480_pack(vfe, CLC_CROP_C + CLC_MODULE_CFG, crop_c, 9);
+	vfe_480_pack(vfe, CLC_MNDS_Y + CLC_MODULE_CFG, mnds_y, 9);
+	vfe_480_pack(vfe, CLC_MNDS_C + CLC_MODULE_CFG, mnds_c, 9);
+
+	/*
+	 * CamX RoundClamp11 CalculateHWSetting @0x52b168 packs
+	 * 14-bit (first<<16)|last, not Linux keep-all (last<<16)|0.
+	 * Rear live CDM 0x4868=0x3c01a3. Front Display 1920 uses
+	 * unpacked last_y/last_x like Crop words 7-8: 0x437/0x77f.
+	 * 1MB CDM 0x1df/0x27f is 640. PRE stays CamX keep-all on
+	 * 2592×976 2ppc (0x3cf/0xa1f). Do not copy 0xfef0bf3.
+	 */
+	if (in_w == 2592 && in_h == 1952) {
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP, RNDCLAMP_MODULE_CFG);
+		vfe_480_pack(vfe, CLC_RNDCLAMP + 0x68,
+			     (const u32[]){ 0x000003cf, 0x00000a1f }, 2);
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_Y, 0x0e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x68,
+			     (const u32[]){ 0x00000437, 0x0000077f }, 2);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x70,
+			     (const u32[]){ 0x00ff0000, 0x16, 0x00ff0000, 0x16,
+					    0, 0 },
+			     6);
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_C, 0x3e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_C + 0x68,
+			     (const u32[]){ 0x0000021b, 0x000003bf }, 2);
+	} else {
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_Y, 0x0e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x68,
+			     (const u32[]){ 0x003c01a3, 0x0000027f }, 2);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x70,
+			     (const u32[]){ 0x00ff0000, 0x16, 0x00ff0000, 0x16,
+					    0, 0 },
+			     6);
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_C, 0x3e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_C + 0x68,
+			     (const u32[]){ 0x001e00d1, 0x0000013f }, 2);
+	}
 	/*
 	 * Live CDM chroma round is odd (0x17 / 7): keep 10-bit for
 	 * UBWC. Linear packer 3 takes LSB[7:0] of 10-bit 512 → UV≈0
@@ -1149,27 +1290,58 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe)
 		     (const u32[]){ 0x00ff0000, 0x16, 0x00ff0000, 0x16, 0, 0 },
 		     6);
 
-	vfe_480_clc_enable(vfe, CLC_RNDCLAMP_POST_Y, 0x0e01);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_POST_Y + 0x68,
-		     (const u32[]){ 0x00b404eb, 0x00020781 }, 2);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_POST_Y + 0x70,
-		     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 }, 6);
-	vfe_480_clc_enable(vfe, CLC_RNDCLAMP_POST_C, 0x3e01);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_POST_C + 0x68,
-		     (const u32[]){ 0x005a0275, 0x000103c0 }, 2);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_POST_C + 0x70,
-		     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 }, 6);
+	if (in_w == 2592 && in_h == 1952) {
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_POST_Y, 0x0e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_Y + 0x68,
+			     (const u32[]){ 0x00000437, 0x0000077f }, 2);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_Y + 0x70,
+			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
+			     6);
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_POST_C, 0x3e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_C + 0x68,
+			     (const u32[]){ 0x0000021b, 0x000003bf }, 2);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_C + 0x70,
+			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
+			     6);
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_OUT_Y, 0x0e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_Y + 0x68,
+			     (const u32[]){ 0x00000437, 0x0000077f }, 2);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_Y + 0x70,
+			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
+			     6);
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_OUT_C, 0x3e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_C + 0x68,
+			     (const u32[]){ 0x0000021b, 0x000003bf }, 2);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_C + 0x70,
+			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
+			     6);
+	} else {
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_POST_Y, 0x0e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_Y + 0x68,
+			     (const u32[]){ 0x00b404eb, 0x00020781 }, 2);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_Y + 0x70,
+			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
+			     6);
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_POST_C, 0x3e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_C + 0x68,
+			     (const u32[]){ 0x005a0275, 0x000103c0 }, 2);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_C + 0x70,
+			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
+			     6);
 
-	vfe_480_clc_enable(vfe, CLC_RNDCLAMP_OUT_Y, 0x0e01);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_Y + 0x68,
-		     (const u32[]){ 0x0000010d, 0x000001df }, 2);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_Y + 0x70,
-		     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 }, 6);
-	vfe_480_clc_enable(vfe, CLC_RNDCLAMP_OUT_C, 0x3e01);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_C + 0x68,
-		     (const u32[]){ 0x00000086, 0x000000ef }, 2);
-	vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_C + 0x70,
-		     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 }, 6);
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_OUT_Y, 0x0e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_Y + 0x68,
+			     (const u32[]){ 0x0000010d, 0x000001df }, 2);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_Y + 0x70,
+			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
+			     6);
+		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_OUT_C, 0x3e01);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_C + 0x68,
+			     (const u32[]){ 0x00000086, 0x000000ef }, 2);
+		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_C + 0x70,
+			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
+			     6);
+	}
 
 	vfe_480_pack(vfe, CLC_DS411_Y_CROP, live_tap_ds4,
 		     ARRAY_SIZE(live_tap_ds4));
@@ -1386,19 +1558,26 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 	 * Do not pack FULL 0x3458/0x3468.
 	 */
 	vfe_480_pdpc30(vfe);
-	vfe_480_demux(vfe);
+	vfe_480_demux(vfe, in_w, in_h);
 	vfe_480_abf_region(vfe, in_w - 1, pipe_h - 1);
 	vfe_480_abf_bank2(vfe);
 	/* Live CDM packet 2: 0x3868 x4 + 0x3860=0x4001 + 0x3878 x2.
 	 * #361: restore Demosaic EN; PDPC30 stays MODULE=0.
+	 * Rear 0x07540400/0x697. Front Camera ID 1 1MB CDM 0x3868
+	 * is 0x05fa0400/0x82c (later AWB 0x056a0400/0x8aa). Do not
+	 * pack rear WB onto 2592×1952.
 	 */
 	{
-		static const u32 live_3868[] = {
+		static const u32 rear_3868[] = {
 			0x07540400, 0x00000697, 0x00000000, 0x00000000,
 		};
+		static const u32 front_3868[] = {
+			0x05fa0400, 0x0000082c, 0x00000000, 0x00000000,
+		};
+		const u32 *wb13 = (in_w == 2592 && in_h == 1952) ?
+				  front_3868 : rear_3868;
 
-		vfe_480_pack(vfe, CLC_DEMOSAIC + DEMOSAIC_WB, live_3868,
-			     ARRAY_SIZE(live_3868));
+		vfe_480_pack(vfe, CLC_DEMOSAIC + DEMOSAIC_WB, wb13, 4);
 		vfe_480_clc_enable(vfe, CLC_DEMOSAIC, DEMOSAIC_COMPACT_CFG);
 		vfe_480_pack(vfe, 0x3878, (const u32[]){ 0x80, 0x00800066 }, 2);
 	}
@@ -1435,7 +1614,7 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 	 * keep-all 2ppc 1529 is a different map. CAMIF HEIGHT stays
 	 * pipe_h (in_h/2). Do not EN 0x5e00 / WM6/7.
 	 */
-	vfe_480_live_display_cdm(vfe);
+	vfe_480_live_display_cdm(vfe, in_w, in_h);
 
 	/* CAMIF window: last in [31:16], first in [15:0]. 0/0 is empty. */
 	/*

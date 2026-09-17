@@ -1,0 +1,12 @@
+[Unit]
+Description=dagu CDSP Hexagon 698 FastRPC session
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-cdsp-rpc
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

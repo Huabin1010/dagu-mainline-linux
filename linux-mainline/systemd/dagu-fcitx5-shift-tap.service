@@ -4,7 +4,15 @@ After=systemd-udevd.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/dagu-fcitx5-shift-tap.py
+User=dagu
+Group=dagu
+SupplementaryGroups=input
+Environment=HOME=/home/dagu
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+ExecStart=/usr/local/sbin/dagu-fcitx5-shift-tap
 Restart=always
 RestartSec=1
 

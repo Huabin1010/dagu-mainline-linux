@@ -10,12 +10,17 @@
  *
  * The MCU speaks a 68-byte I2C envelope (dummy write of the 7-bit address,
  * then payload starting 0x57). HID report IDs 0x05/0x02/0x19/0x06 are
- * injected into four virtual HID devices. Descriptors are the live Android
- * dump (VID 15d9), not the CAF 11" 2879×1799 touchpad map.
+ * injected into four HID devices. Descriptors are the live Android dump
+ * (VID 15d9), not the CAF 11" 2879×1799 touchpad map.
+ *
+ * CAF Nanosic_i2c_parse walks leftover until type 0; QUP zeros unused FIFO
+ * bytes so leftover is not a ghost empty 0x05. GENI does not. Trim 0x39
+ * after the first record, and do not parse a replayed MCU sequence byte.
  */
 
 #include <linux/bits.h>
 #include <linux/delay.h>
+#include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/hid.h>
 #include <linux/i2c.h>
@@ -24,9 +29,12 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/of_gpio.h>
 #include <linux/pm.h>
 #include <linux/pm_wakeup.h>
 #include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/workqueue.h>
 
 #define NANOSIC_WRITE_LEN	66
 #define NANOSIC_READ_LEN	68
@@ -51,6 +59,9 @@
 #define NANOSIC_HID_CONSUMER	3
 #define NANOSIC_HID_N		4
 
+/* CAF nano_workqueue: extra read 22ms later if work was already pending. */
+#define NANOSIC_RX_RETRY_MS	22
+
 struct nanosic_hid_desc {
 	const char *name;
 	u16 product;
@@ -68,6 +79,16 @@ struct nanosic_kb {
 	struct input_dev *wakeup;
 	struct hid_device *hdev[NANOSIC_HID_N];
 	int wakeup_irq;
+	/* GPIO83 data line; not requested — irqchip already owns it. */
+	struct gpio_desc *irq_gpio;
+	/* Last MCU sequence byte (buf[1]). GENI leftover replays an old seq. */
+	u8 last_seq;
+	bool have_seq;
+	/* Last boot-protocol keyboard report; identical leftover is not a new event. */
+	u8 last_kbd[9];
+	bool have_kbd;
+	struct mutex rx_lock;
+	struct delayed_work rx_work;
 	/* HID report ID 5 LED byte; bit 1 is Caps Lock (keyboard lamp). */
 	u8 led_state;
 };
@@ -245,11 +266,21 @@ static int nanosic_hid_register(struct nanosic_kb *kb, unsigned int idx)
 
 	strscpy(hdev->name, desc->name, sizeof(hdev->name));
 	hdev->ll_driver = &nanosic_hid_ll;
-	hdev->bus = BUS_VIRTUAL;
+	/* I2C MCU. BUS_VIRTUAL made mutter 50 drop compositor hold-repeat
+	 * (same class as uinput). Bluetooth HID is BUS_BLUETOOTH and repeats.
+	 */
+	hdev->bus = BUS_I2C;
 	hdev->vendor = 0x15d9;
 	hdev->product = desc->product;
 	hdev->driver_data = kb;
 	hdev->dev.parent = &kb->client->dev;
+	/*
+	 * CAF leaves phys empty. Four HID nodes with the same phys make
+	 * libinput one device-group; mutter 50 seat_key_count then drops
+	 * compositor repeats. Bluetooth HID has a unique phys.
+	 */
+	snprintf(hdev->phys, sizeof(hdev->phys), "%s/%04x",
+		 dev_name(&kb->client->dev), desc->product);
 
 	ret = hid_add_device(hdev);
 	if (ret) {
@@ -321,9 +352,125 @@ static int nanosic_write(struct nanosic_kb *kb, const u8 *buf, size_t len)
 
 static void nanosic_inject(struct nanosic_kb *kb, unsigned int idx, u8 *data, size_t len)
 {
+	unsigned int i;
+	int ret;
+
 	if (!kb->hdev[idx] || !data || !len)
 		return;
-	hid_input_report(kb->hdev[idx], HID_INPUT_REPORT, data, len, 1);
+	/*
+	 * GENI clocks 68 bytes. Padding after a real 0x05 is often a zero
+	 * 0x02/0x19/0x06. Mutter 50 cancels compositor key-repeat if a
+	 * pointer/consumer event arrives on the same seat.
+	 */
+	if (idx != NANOSIC_HID_KEYBOARD) {
+		for (i = 1; i < len; i++) {
+			if (data[i])
+				break;
+		}
+		if (i == len)
+			return;
+	}
+	/* Android CAF hid_input_report(..., 0). interrupt=1 is hidraw-only. */
+	ret = hid_input_report(kb->hdev[idx], HID_INPUT_REPORT, data, len, 0);
+	if (ret)
+		dev_warn_ratelimited(&kb->client->dev,
+				     "hid_input_report idx=%u ret=%d\n", idx, ret);
+}
+
+/* Boot-protocol array: 0x01 in every slot is ErrorRollOver — ignore, keep keys. */
+static bool nanosic_kbd_rollover(const u8 *p)
+{
+	unsigned int i;
+
+	for (i = 3; i < 9; i++) {
+		if (p[i] != 0x01)
+			return false;
+	}
+	return true;
+}
+
+static bool nanosic_kbd_empty(const u8 *p)
+{
+	unsigned int i;
+
+	for (i = 1; i < 9; i++) {
+		if (p[i])
+			return false;
+	}
+	return true;
+}
+
+static void nanosic_inject_keyboard(struct nanosic_kb *kb, u8 *p)
+{
+	/* CAF Nanosic_input_write(KEYBOARD, p, 9) — including empty KEY_UP. */
+	if (nanosic_kbd_rollover(p))
+		return;
+	if (kb->have_kbd && !memcmp(kb->last_kbd, p, 9))
+		return;
+	memcpy(kb->last_kbd, p, 9);
+	kb->have_kbd = true;
+	nanosic_inject(kb, NANOSIC_HID_KEYBOARD, p, 9);
+}
+
+/* CAF QUP zeros unused bytes of the 68-byte FIFO. GENI leaves the previous
+ * envelope. Nanosic_i2c_parse walks leftover until type==0; a leftover 0x05
+ * is a ghost KEY_UP. Zero the tail after the first 0x39 record.
+ */
+static size_t nanosic_rec_len(u8 type)
+{
+	switch (type) {
+	case NANOSIC_TYPE_KEYBOARD:
+		return 9;
+	case NANOSIC_TYPE_CONSUMER:
+		return 5;
+	case NANOSIC_TYPE_MOUSE:
+		return 8;
+	case NANOSIC_TYPE_TOUCH:
+		return 21;
+	case NANOSIC_TYPE_VENDOR16:
+		return 16;
+	case NANOSIC_TYPE_VENDOR32:
+		return 32;
+	default:
+		return 0;
+	}
+}
+
+static void nanosic_trim_geni(u8 *data, size_t len)
+{
+	size_t rec;
+
+	if (len < 4 || data[0] != NANOSIC_PKT_SYNC)
+		return;
+	if (data[2] != 0x39)
+		return;
+	rec = nanosic_rec_len(data[3]);
+	if (!rec || 3 + rec >= len)
+		return;
+	memset(data + 3 + rec, 0, len - 3 - rec);
+}
+
+static bool nanosic_seq_stale(struct nanosic_kb *kb, const u8 *data)
+{
+	if (data[0] != NANOSIC_PKT_SYNC || !kb->have_seq)
+		return false;
+	return (s8)(data[1] - kb->last_seq) <= 0;
+}
+
+static void nanosic_seq_commit(struct nanosic_kb *kb, const u8 *data)
+{
+	if (data[0] != NANOSIC_PKT_SYNC)
+		return;
+	kb->last_seq = data[1];
+	kb->have_seq = true;
+}
+
+static bool nanosic_data_pending(struct nanosic_kb *kb)
+{
+	if (!kb->irq_gpio)
+		return false;
+	/* Falling IRQ: physical low means the MCU still has a packet. */
+	return gpiod_get_raw_value_cansleep(kb->irq_gpio) == 0;
 }
 
 static void nanosic_parse_vendor(struct nanosic_kb *kb, u8 *p, size_t len)
@@ -348,6 +495,7 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 
 	if (left < 4)
 		return -EINVAL;
+	nanosic_trim_geni(data, len);
 
 	first = *p++;
 	left--;
@@ -363,6 +511,11 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 		return 0;
 	if (third != 0x39 && third != 0x4a && third != 0x5b && third != 0x6c)
 		return -EINVAL;
+	/* CAF Nanosic_i2c_parse: cap payload at third-3, walk until type 0. */
+	if (third >= 3 && left > third - 3)
+		left = third - 3;
+
+	nanosic_seq_commit(kb, data);
 
 	while (left) {
 		type = p[0];
@@ -370,7 +523,11 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 		case NANOSIC_TYPE_KEYBOARD:
 			if (left < 9)
 				return 0;
-			nanosic_inject(kb, NANOSIC_HID_KEYBOARD, p, 9);
+			dev_info(&kb->client->dev,
+				 "kbd seq=%02x empty=%d keys=%6phD gpio=%d\n",
+				 data[1], nanosic_kbd_empty(p), p + 3,
+				 nanosic_data_pending(kb));
+			nanosic_inject_keyboard(kb, p);
 			p += 9;
 			left -= 9;
 			break;
@@ -414,6 +571,7 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 			nanosic_parse_vendor(kb, p, left);
 			return 0;
 		default:
+			/* CAF: unknown type stops the walk (QUP/GENI tail). */
 			return 0;
 		}
 	}
@@ -564,18 +722,60 @@ static void nanosic_power_on(struct nanosic_kb *kb)
 	msleep(100);
 }
 
-static irqreturn_t nanosic_irq(int irq, void *data)
+static void nanosic_rx_once(struct nanosic_kb *kb)
 {
-	struct nanosic_kb *kb = data;
 	u8 buf[NANOSIC_READ_LEN] = { 0 };
 	int ret;
 
+	mutex_lock(&kb->rx_lock);
 	ret = nanosic_read(kb, buf, sizeof(buf));
 	if (ret) {
-		dev_err_ratelimited(&kb->client->dev, "i2c read failed: %d\n", ret);
-		return IRQ_HANDLED;
+		dev_err_ratelimited(&kb->client->dev, "i2c read failed: %d\n",
+				    ret);
+		goto out;
 	}
+	nanosic_trim_geni(buf, sizeof(buf));
+	if (nanosic_seq_stale(kb, buf)) {
+		dev_dbg(&kb->client->dev, "stale seq %02x last %02x\n",
+			buf[1], kb->last_seq);
+		goto more;
+	}
+	dev_dbg(&kb->client->dev, "rx %16phD\n", buf);
 	nanosic_parse(kb, buf, sizeof(buf));
+more:
+	/*
+	 * CAF does not GPIO-drain in the IRQ. Extra packets while GPIO83
+	 * stays low are read 22ms later. Immediate drain pulled GENI leftover
+	 * empty 0x05 as KEY_UP and mutter 50 cancelled compositor repeat
+	 * (one Backspace/D, second key then repeats).
+	 */
+	if (nanosic_data_pending(kb))
+		schedule_delayed_work(&kb->rx_work,
+				      msecs_to_jiffies(NANOSIC_RX_RETRY_MS));
+out:
+	mutex_unlock(&kb->rx_lock);
+}
+
+static void nanosic_rx_work(struct work_struct *work)
+{
+	struct nanosic_kb *kb = container_of(work, struct nanosic_kb, rx_work.work);
+
+	nanosic_rx_once(kb);
+}
+
+static void nanosic_cancel_rx(void *data)
+{
+	struct nanosic_kb *kb = data;
+
+	cancel_delayed_work_sync(&kb->rx_work);
+}
+
+static irqreturn_t nanosic_irq(int irq, void *data)
+{
+	struct nanosic_kb *kb = data;
+
+	cancel_delayed_work(&kb->rx_work);
+	nanosic_rx_once(kb);
 	return IRQ_HANDLED;
 }
 
@@ -641,7 +841,18 @@ static int nanosic_probe(struct i2c_client *client)
 
 	kb->client = client;
 	mutex_init(&kb->xfer_lock);
+	mutex_init(&kb->rx_lock);
+	INIT_DELAYED_WORK(&kb->rx_work, nanosic_rx_work);
 	i2c_set_clientdata(client, kb);
+	ret = devm_add_action_or_reset(&client->dev, nanosic_cancel_rx, kb);
+	if (ret)
+		return ret;
+	{
+		int irq_gpio = of_get_named_gpio(client->dev.of_node, "irq-gpios", 0);
+
+		if (gpio_is_valid(irq_gpio))
+			kb->irq_gpio = gpio_to_desc(irq_gpio);
+	}
 
 	kb->vdd_gpio = devm_gpiod_get_optional(&client->dev, "vdd", GPIOD_OUT_LOW);
 	if (IS_ERR(kb->vdd_gpio))

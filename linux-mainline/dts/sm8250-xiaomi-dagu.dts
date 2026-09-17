@@ -326,7 +326,9 @@
 		};
 	};
 
-	/* IDT P9418 wireless CAF qupv3_se8 @3b, IRQ GPIO113. */
+	/* IDT P9418 Smart Pen TX: CAF qupv3_se8 @3b, IRQ GPIO113.
+	 * Side-rail coil for Xiaomi Smart Pen, not Qi RX for the pack.
+	 */
 	wls_i2c_se8: i2c-gpio-se8 {
 		compatible = "i2c-gpio";
 		#address-cells = <1>;
@@ -338,7 +340,7 @@
 		i2c-gpio,delay-us = <2>;
 		clock-frequency = <400000>;
 
-		wireless-charger@3b {
+		pen-charger@3b {
 			compatible = "idt,p9418";
 			reg = <0x3b>;
 			interrupt-parent = <&tlmm>;
@@ -422,6 +424,7 @@
 			pinctrl-0 = <&nanosic_gpio_default>;
 			interrupt-parent = <&tlmm>;
 			interrupts = <83 IRQ_TYPE_EDGE_FALLING>;
+			irq-gpios = <&tlmm 83 GPIO_ACTIVE_LOW>;
 			reset-gpios = <&tlmm 141 GPIO_ACTIVE_HIGH>;
 			status-gpios = <&tlmm 46 GPIO_ACTIVE_HIGH>;
 			vdd-gpios = <&tlmm 127 GPIO_ACTIVE_HIGH>;

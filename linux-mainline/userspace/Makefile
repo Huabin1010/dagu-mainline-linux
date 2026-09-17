@@ -4,7 +4,7 @@ PREFIX ?= /usr/local
 
 .PHONY: all install clean
 
-all: dagu-touch-boost dagu-power-button
+all: dagu-touch-boost dagu-power-button dagu-fcitx5-shift-tap
 
 dagu-touch-boost: dagu-touch-boost.c
 	$(CC) $(CFLAGS) -o $@ $<
@@ -12,9 +12,13 @@ dagu-touch-boost: dagu-touch-boost.c
 dagu-power-button: dagu-power-button.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+dagu-fcitx5-shift-tap: dagu-fcitx5-shift-tap.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 install: all
 	install -d $(DESTDIR)$(PREFIX)/sbin
-	install -m755 dagu-touch-boost dagu-power-button $(DESTDIR)$(PREFIX)/sbin/
+	install -m755 dagu-touch-boost dagu-power-button dagu-fcitx5-shift-tap \
+		$(DESTDIR)$(PREFIX)/sbin/
 
 clean:
-	rm -f dagu-touch-boost dagu-power-button
+	rm -f dagu-touch-boost dagu-power-button dagu-fcitx5-shift-tap

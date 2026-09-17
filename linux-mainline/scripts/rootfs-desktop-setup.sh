@@ -38,7 +38,7 @@ apt-get install -y --no-install-recommends \
 	libgl1-mesa-dri libgbm1 mesa-vulkan-drivers \
 	libinput-bin xserver-xorg-input-libinput python3-evdev \
 	fonts-noto-core fonts-noto-cjk \
-	network-manager onboard keyd \
+	network-manager onboard \
 	ibus ibus-gtk3 ibus-gtk4 ibus-libpinyin \
 	bluez systemd-timesyncd pci.ids \
 	g++ make pkg-config rustc libcamera-dev
@@ -60,7 +60,7 @@ install_product_bins() {
 		make -C /tmp/dagu-camera-loopback PREFIX=/usr/local
 		make -C /tmp/dagu-camera-loopback PREFIX=/usr/local install
 	fi
-	for b in dagu-camera-loopback dagu-touch-boost dagu-power-button; do
+	for b in dagu-camera-loopback dagu-touch-boost dagu-power-button dagu-fcitx5-shift-tap; do
 		is_elf /usr/local/sbin/$b || {
 			echo "rootfs-desktop-setup: $b is not an ELF product binary" >&2
 			exit 1
@@ -472,21 +472,41 @@ PY
 	fi
 fi
 
-# Folio keyboard: tap Shift → fcitx5/ibus toggle via keyd + uinput.
-# Display fragment has CONFIG_INPUT_UINPUT=y. Do not install a Python watcher.
-mkdir -p /etc/keyd
-cat >/etc/keyd/dagu.conf <<'EOF'
-[ids]
-15d9:00a3
+# Folio letters stay on hid-generic (same path as Bluetooth). keyd EVIOCGRAB
+# on 15d9:00a3 made Wayland skip hold-repeat until a second key-down.
+# Tap Shift → fcitx5: C watcher, no grab. Do not re-enable keyd on this HID.
+is_elf /usr/local/sbin/dagu-fcitx5-shift-tap || {
+	echo "rootfs-desktop-setup: missing dagu-fcitx5-shift-tap" >&2
+	exit 1
+}
+systemctl disable --now keyd.service >/dev/null 2>&1 || true
+rm -f /etc/keyd/dagu.conf \
+	/usr/local/bin/dagu-fcitx5-shift-tap.py
+cat >/etc/systemd/system/dagu-fcitx5-shift-tap.service <<'EOF'
+[Unit]
+Description=dagu folio Shift tap toggles fcitx5
+After=systemd-udevd.service
 
-[main]
-leftshift = overloadt(shift, hangul, 400)
-rightshift = overloadt(shift, hangul, 400)
+[Service]
+Type=simple
+User=dagu
+Group=dagu
+SupplementaryGroups=input
+Environment=HOME=/home/dagu
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+ExecStart=/usr/local/sbin/dagu-fcitx5-shift-tap
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
 EOF
-if [ -f /usr/lib/systemd/system/keyd.service ]; then
-	systemctl enable keyd.service >/dev/null 2>&1 || true
-fi
-rm -f /usr/local/bin/dagu-fcitx5-shift-tap.py 	/etc/systemd/system/dagu-fcitx5-shift-tap.service 	/etc/systemd/system/multi-user.target.wants/dagu-fcitx5-shift-tap.service
+ln -sf /etc/systemd/system/dagu-fcitx5-shift-tap.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-fcitx5-shift-tap.service
+systemctl enable dagu-fcitx5-shift-tap.service >/dev/null 2>&1 || true
 
 # Mineradio is Electron + Three.js WebGL + CSS backdrop-filter. Same Ozone
 # / LINEAR / grayscale-DPR contract as Chrome. Never notile (WebGL hang).
@@ -1394,6 +1414,10 @@ systemctl enable systemd-timesyncd.service 2>/dev/null || true
 mkdir -p /etc/udev/rules.d
 cat >/etc/udev/rules.d/99-dagu-hide-internal-ufs.rules <<'EOF'
 ACTION=="add|change", SUBSYSTEM=="block", DEVPATH=="*/1d84000.ufshc/*", ENV{UDISKS_IGNORE}="1"
+EOF
+cat >/etc/udev/rules.d/90-dagu-nanosic-keyboard.rules <<'EOF'
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{id/bustype}=="0018", ATTRS{id/vendor}=="15d9", ENV{ID_BUS}="i2c"
 EOF
 
 # Speakers: ACP has no analog-stereo path for Q6 TDM, so PipeWire stayed

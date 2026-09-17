@@ -1,0 +1,6 @@
+# Nanosic 803 folio HID is BUS_I2C (bustype 0018). This image's systemd
+# input_id does not emit ID_BUS for I2C, so udev leaves the node bus-less
+# like uinput. Mutter 50 compositor hold-repeat follows a real bus (the
+# Bluetooth HID keyboard has ID_BUS=bluetooth and repeats).
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{id/bustype}=="0018", ATTRS{id/vendor}=="15d9", ENV{ID_BUS}="i2c"

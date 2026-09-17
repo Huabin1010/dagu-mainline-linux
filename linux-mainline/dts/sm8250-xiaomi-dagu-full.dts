@@ -6,7 +6,7 @@
  * 5000 mAh, QCA6390, CS35L41 from live FDT + CAF dagu-sm8250.dtsi.
  *
  * Dagu deltas vs elish: dual KTZ8866, L7A panel vddio, USB3+DP, PS5169,
- * nanosic keyboard, BQ2597x / P9418. Do not enable uart2: QUP SE2 is i2c2.
+ * nanosic keyboard, BQ2597x, P9418 Smart Pen TX. Do not enable uart2: QUP SE2 is i2c2.
  */
 
 /dts-v1/;
@@ -294,6 +294,7 @@
 		reg = <0x4c>;
 		interrupt-parent = <&tlmm>;
 		interrupts = <83 IRQ_TYPE_EDGE_FALLING>;
+		irq-gpios = <&tlmm 83 GPIO_ACTIVE_LOW>;
 		reset-gpios = <&tlmm 141 GPIO_ACTIVE_HIGH>;
 		status-gpios = <&tlmm 46 GPIO_ACTIVE_HIGH>;
 		vdd-gpios = <&tlmm 127 GPIO_ACTIVE_HIGH>;
@@ -384,12 +385,12 @@
 	};
 };
 
-/* IDT P9418 wireless charger: CAF qupv3_se8 @3b */
+/* IDT P9418 Smart Pen TX: CAF qupv3_se8 @3b. Not tablet Qi. */
 &i2c8 {
 	clock-frequency = <400000>;
 	status = "okay";
 
-	wireless-charger@3b {
+	pen-charger@3b {
 		compatible = "idt,p9418";
 		reg = <0x3b>;
 		interrupt-parent = <&tlmm>;

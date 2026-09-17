@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * IDT P9418 wireless charger (dagu). CAF compatible = "idt,p9418".
- * Probe + GPIOs + a wireless power_supply; RX firmware stays in Android.
+ * IDT P9418 Smart Pen TX (dagu). CAF compatible = "idt,p9418".
+ * Side-rail coil charges the stylus, not the 10000 mAh pack. No Qi RX.
+ * Probe + GPIOs + a power_supply; TX policy stays in Android.
  */
 
 #include <linux/gpio/consumer.h>
@@ -39,7 +40,7 @@ static int p9418_get_property(struct power_supply *psy,
 			val->intval = 0;
 		return 0;
 	case POWER_SUPPLY_PROP_MODEL_NAME:
-		val->strval = "p9418";
+		val->strval = "p9418-pen-tx";
 		return 0;
 	default:
 		return -EINVAL;
@@ -52,7 +53,7 @@ static const enum power_supply_property p9418_props[] = {
 };
 
 static const struct power_supply_desc p9418_desc = {
-	.name = "p9418-wireless",
+	.name = "p9418-pen",
 	.type = POWER_SUPPLY_TYPE_WIRELESS,
 	.properties = p9418_props,
 	.num_properties = ARRAY_SIZE(p9418_props),
@@ -105,7 +106,7 @@ static int p9418_probe(struct i2c_client *client)
 	}
 
 	i2c_set_clientdata(client, chip);
-	dev_info(&client->dev, "P9418 wireless charger\n");
+	dev_info(&client->dev, "P9418 Smart Pen TX (not tablet Qi)\n");
 	return 0;
 }
 
@@ -124,5 +125,5 @@ static struct i2c_driver p9418_driver = {
 };
 module_i2c_driver(p9418_driver);
 
-MODULE_DESCRIPTION("IDT P9418 wireless charger (dagu)");
+MODULE_DESCRIPTION("IDT P9418 Smart Pen TX (dagu)");
 MODULE_LICENSE("GPL");

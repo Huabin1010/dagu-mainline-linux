@@ -83,7 +83,7 @@ copy_ssh() {
 			/usr/local/sbin/dagu-camera-pw-source.py \
 			/usr/local/sbin/dagu-camera-preview.py
 		systemctl disable --now dagu-tablet-mode.service dagu-time-sync.service \
-			dagu-time-sync.timer dagu-fcitx5-shift-tap.service \
+			dagu-time-sync.timer \
 			dagu-camera-loopback.service 2>/dev/null || true
 		rm -f /etc/systemd/system/multi-user.target.wants/dagu-camera-loopback.service \
 			/etc/systemd/system/multi-user.target.wants/dagu-tablet-mode.service \

@@ -10,8 +10,8 @@ Himax is spi-gpio bitbang (IRQF_ONESHOT thread). SoftISP on 5MP/12MP RAW
 saturates the cluster and mutter's libinput loop starves — taps still
 wake the backlight via logind, but folders/close-window do not respond.
 Do not pin SoftISP to the big cluster: pin it to silver CPU0-3 and keep
-Himax/mutter on Gold. Signal is any userspace fd on `/dev/video0` or
-`/dev/video3` (plus gst-launch holding the loopback nodes).
+Himax/mutter on Gold. Signal is any userspace fd on rear/front RDI
+(`msm_vfe0_video0` / `msm_vfe1_video0`) plus gst-launch holding loopback.
 """
 from __future__ import annotations
 
@@ -78,7 +78,20 @@ BROWSER_MARKERS = (
     b"/usr/lib/chromium/chromium",
     b"/usr/bin/chromium",
 )
-CAM_NODES = ("/dev/video0", "/dev/video3")
+def cam_nodes() -> tuple[str, ...]:
+    names = {"msm_vfe0_video0", "msm_vfe1_video0"}
+    found = []
+    for path in sorted(glob.glob("/sys/class/video4linux/video*")):
+        try:
+            name = open(path + "/name", encoding="utf-8").read().strip()
+        except OSError:
+            continue
+        if name in names:
+            found.append("/dev/" + path.rsplit("/", 1)[-1])
+    return tuple(found) or ("/dev/video0", "/dev/video3")
+
+
+CAM_NODES = cam_nodes()
 LOOP_NODES = ("/dev/video20", "/dev/video21")
 CAM_COMMS = {
     "snapshot",

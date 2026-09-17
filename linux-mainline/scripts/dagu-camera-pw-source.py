@@ -51,6 +51,22 @@ def media_link(a, ap, b, bp):
     run(["media-ctl", "-d", MC, "-l", f'"{a}":{ap} -> "{b}":{bp}[1]'])
 
 
+def v4l_by_name(name):
+    root = "/sys/class/video4linux"
+    try:
+        nodes = os.listdir(root)
+    except OSError:
+        return None
+    for node in nodes:
+        try:
+            with open(os.path.join(root, node, "name"), encoding="utf-8") as f:
+                if f.read().strip() == name:
+                    return f"/dev/{node}"
+        except OSError:
+            continue
+    return None
+
+
 def setup_rear():
     run(["media-ctl", "-d", MC, "-r"])
     s5k = entity("s5kjn1")
@@ -70,7 +86,7 @@ def setup_rear():
     ):
         media_fmt(*spec, fmt)
     return {
-        "dev": "/dev/video0",
+        "dev": v4l_by_name("msm_vfe0_video0") or "/dev/video0",
         "fourcc": "pGAA",
         "w": 4080,
         "h": 3060,

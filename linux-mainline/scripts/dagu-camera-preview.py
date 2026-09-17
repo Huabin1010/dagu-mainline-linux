@@ -54,6 +54,22 @@ def media_link(a, ap, b, bp):
     run(["media-ctl", "-d", MC, "-l", f'"{a}":{ap} -> "{b}":{bp}[1]'])
 
 
+def v4l_by_name(name):
+    root = "/sys/class/video4linux"
+    try:
+        nodes = os.listdir(root)
+    except OSError:
+        return None
+    for node in nodes:
+        try:
+            with open(os.path.join(root, node, "name"), encoding="utf-8") as f:
+                if f.read().strip() == name:
+                    return f"/dev/{node}"
+        except OSError:
+            continue
+    return None
+
+
 def setup_cam(which):
     run(["media-ctl", "-d", MC, "-r"])
     s5k = entity("s5kjn1")
@@ -76,7 +92,7 @@ def setup_cam(which):
             media_fmt(*spec, fmt)
         return {
             "label": f"后置 {s5k}",
-            "dev": "/dev/video0",
+            "dev": v4l_by_name("msm_vfe0_video0") or "/dev/video0",
             "fourcc": "pGAA",
             "w": 4080,
             "h": 3060,
@@ -101,7 +117,7 @@ def setup_cam(which):
         media_fmt(*spec, fmt)
     return {
         "label": f"前置 {imx}",
-        "dev": "/dev/video3",
+        "dev": v4l_by_name("msm_vfe1_video0") or "/dev/video3",
         "fourcc": "pBAA",
         "w": 2592,
         "h": 1952,
@@ -214,14 +230,14 @@ class Preview(Gtk.ApplicationWindow):
     def on_rear(self, btn):
         if self._busy or not btn.get_active():
             return
-        if self.cam and self.cam["dev"] == "/dev/video0":
+        if self.cam and self.cam["dev"] == (v4l_by_name("msm_vfe0_video0") or "/dev/video0"):
             return
         self.start_cam("rear")
 
     def on_front(self, btn):
         if self._busy or not btn.get_active():
             return
-        if self.cam and self.cam["dev"] == "/dev/video3":
+        if self.cam and self.cam["dev"] == (v4l_by_name("msm_vfe1_video0") or "/dev/video3"):
             return
         self.start_cam("front")
 

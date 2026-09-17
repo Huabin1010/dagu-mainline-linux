@@ -111,8 +111,10 @@ for s in /dev/v4l-subdev*; do
   echo "$s $info"
 done
 echo ===rear-stream===
-# msm_vfe0_video0 = /dev/video0. 10-bit GBRG packed fourcc is pGAA.
-rear=/dev/video0
+# msm_vfe0_video0 = rear RDI. 10-bit GBRG packed fourcc is pGAA.
+v4l_by_name() { local n; for n in /sys/class/video4linux/video*; do
+  [ "$(cat "$n/name" 2>/dev/null)" = "$1" ] && echo "/dev/$(basename "$n")" && return; done; return 1; }
+rear=$(v4l_by_name msm_vfe0_video0 || echo /dev/video0)
 echo using $rear pgAA 4080x3060
 rm -f /tmp/rear.raw
 timeout 20 v4l2-ctl -d "$rear" --set-fmt-video=width=4080,height=3060,pixelformat=pgAA \
@@ -127,8 +129,8 @@ ls -l /tmp/rear.raw 2>/dev/null || true
 echo ===front-stream===
 media-ctl -d $MC -l "\"msm_csiphy4\":1 -> \"msm_csid1\":0[1]" || true
 media-ctl -d $MC -l "\"msm_csid1\":1 -> \"msm_vfe1_rdi0\":0[1]" || true
-# msm_vfe1_video0 = /dev/video3. 10-bit BGGR packed fourcc is pBAA.
-front=/dev/video3
+# msm_vfe1_video0 = front RDI. 10-bit BGGR packed fourcc is pBAA.
+front=$(v4l_by_name msm_vfe1_video0 || echo /dev/video3)
 echo using $front pBAA 2592x1952
 rm -f /tmp/front.raw
 timeout 12 v4l2-ctl -d "$front" --set-fmt-video=width=2592,height=1952,pixelformat=pBAA \

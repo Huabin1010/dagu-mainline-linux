@@ -30,7 +30,7 @@
 | P7 | CS35L41 节点 + ADSP 路径 | 能 probe；`speaker-test` 后置 |
 | P8 | 本机 a650 zap + Turnip；Ubuntu 在 userdata | `fastboot flash userdata out/rootfs.ext4` |
 
-上表是早期里程碑。2026-09-11 起以 [docs/dagu-adaptation-status.md](docs/dagu-adaptation-status.md) 为准（P2–P5、P8 已通；P7 软件已通；相机仍部分）。
+上表是早期里程碑。2026-09-17 起以 [docs/dagu-adaptation-status.md](docs/dagu-adaptation-status.md) 为准（预览 / 喇叭 / 5 V 充电 / 磁吸键盘 HID 已通；IFE1 PIX 已出线性 NV12，Viewfinder 仍 SoftISP）。
 
 ## 主机 USB（AMD 这台）
 

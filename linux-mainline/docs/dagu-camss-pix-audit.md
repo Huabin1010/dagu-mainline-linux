@@ -1,51 +1,29 @@
 # SM8250 CAMSS VFE PIX audit (dagu)
 
-Date: 2026-09-16.  
-Tree: `linux-mainline/linux/drivers/media/platform/qcom/camss/` (live compile tree, not committed).  
+Date: 2026-09-17.  
+Tree: `linux-mainline/overlays/linux/drivers/media/platform/qcom/camss/camss-vfe-480.c` (applied onto the live compile tree).  
 Question: can Viewfinder leave `DebayerCpu` and take IFE PIX NV12 on this SoC?
 
-## Verdict: Linux no-go (Android PIX is proven)
+## Verdict: PIX writes linear NV12; Viewfinder still SoftISP
 
-Mainline `qcom-camss` on SM8250 is still **CSIPHY + CSID + VFE RDI** only. That is a Linux gap, not a hardware gap.
+Overlay `vfe_ops_480` programs CSID IPP, CAMIF, CLC, and BUS DISP WM4/5 linear NV12 on **IFE1**. B-slot `#365` STREAMON yields **≥3 nonzero** `/tmp/pix.nv12` frames, UV origin ~133, chroma packer `PLAIN_8`. Saturation is still narrow. Product preview stays RDI + `DebayerCpu` until Viewfinder switches.
 
-HyperOS rear preview on 53dcc70 (Magisk, 2026-09-16) runs **Titan 480 IFE PIX**, not CPU SoftISP:
+Live status: `linux-mainline/docs/dagu-ife-pipeline-status.md`.  
+Attempt log: `linux-mainline/docs/dagu-ife-pix-nv12-attempts.md`.
+
+HyperOS rear preview on 53dcc70 (Magisk, 2026-09-16) already runs **Titan 480 IFE PIX**, not CPU SoftISP:
 
 - VFE1 CAMIF ver3 SOF/EOF/EPOCH (`reg_update` `0x41` @ `0x34`)
-- BUS WM4/WM5 **DISP Y/C** `en_cfg=0x1` (`MODE_QCOM_PLAIN`) **1920×1080 / 1920×540 UBWC**
-- WM23 RDI0 stays on for ZSL RAW (`en_cfg=0x10001` `MODE_MIPI_RAW`)
+- BUS WM4/WM5 **DISP Y/C** `en_cfg=0x1` **1920×1080 UBWC NV12** (Linux product path is linear packer 3, not UBWC `0xB`)
+- WM23 RDI0 stays on for ZSL RAW
 - CSID1 + IFE1 IRQs live; IFE0 idle
-- CamX graph name `RealTimeFeatureZSLPreviewRaw` (IFE + IPE). `com.qti.feature2.softispprocess.so` is on the filesystem and is not this path
+- CamX graph `RealTimeFeatureZSLPreviewRaw` (IFE + IPE)
 
-Dump: `dumps/dagu-android-live/camera-ife-20260916/INDEX.txt`. `/dev/mem` MMIO is `STRICT_DEVMEM` ENODEV; CLC (demux/demosaic/MNDS21) is still CamX CDM, not a kernel table.
+Dump: `dumps/dagu-android-live/camera-ife-20260916/INDEX.txt`. HyperOS `/dev/mem` is `STRICT_DEVMEM`; CLC offsets come from `camera.qcom.so` PackIQ / CreateCmdList, not from an IFE MMIO dump.
 
 Do **not** okay `&cdsp` to “fix” this. Hexagon cannot replace IFE. Keep rear D-PHY `0x0114=0x0300` skip 4×4 and front skip 2×2 until Linux PIX NV12 is proven. Do **not** `STREAMON` PIX with BUS DISP alone — missing CLC hangs CAMNOC.
 
-## Evidence in the live tree
-
-`camss-vfe-480.c` is the SM8250 VFE ops (`vfe_ops_480`). Write-master start programs **MIPI RAW only**:
-
-```c
-writel_relaxed(1 << WM_CFG_EN | MODE_MIPI_RAW << WM_CFG_MODE,
-               vfe->base + VFE_BUS_WM_CFG(wm));
-```
-
-WM index is `RDI_WM(wm)`. IRQ enable is `BUS_IRQ_MASK_0_RDI_RUP`. There is no PIX WM, no YUV packer, no IFE 3A stats node.
-
-`enum vfe_line_id` has `VFE_LINE_PIX = 3`. SM8250 VFE0/VFE1 set `line_num = 3` in `vfe_res_8250`, so the init loop
-
-```c
-for (i = VFE_LINE_RDI0; i < vfe->res->line_num; i++)
-```
-
-creates **RDI0–RDI2 only**. PIX is never instantiated on the full IFEs.
-
-`formats_pix = &vfe_formats_pix_845` is copied in the resource table. That is a leftover from the SM845 table, not a working ISP pipeline. `vfe_ops_480` never programs those formats onto a PIX master.
-
-VFE lite uses `line_num = 4` (would allocate a PIX subdev) but still the same `vfe_ops_480` RAW WM programming. Not a YUV product path.
-
-Overlay CAMSS in this repo does not add PIX.
-
-## What this means for SoftISP
+## Flight preview until the gate
 
 | Path | Status |
 |------|--------|
@@ -53,6 +31,8 @@ Overlay CAMSS in this repo does not add PIX.
 | libcamera GPU EGL SoftISP | **Forbidden** — `configuration.yaml` notes EGL ignores skip |
 | CamX blob / `-Dipmbs` | **Forbidden** as a deliverable |
 | `&cdsp` for “AI denoise” | **Forbidden** without PIX evidence and a real workload |
+
+Gate: STREAMON ≥3 non-zero NV12 frames, `r0114=0x300`, `g_serial` `0525:a4a7` >30s. Until then do not switch Viewfinder off SoftISP.
 
 ## SLPI (before CDSP)
 
@@ -71,11 +51,4 @@ Default remains `status = "disabled"`. Open only when PAS auth works **and** the
 
 ## Revisit trigger
 
-Linux `vfe_ops_480` must program, without CamX blobs:
-
-1. CSID1 IPP (`pxl_cfg0` `0x200`, D-PHY 4-lane, no C-PHY)
-2. CAMIF `0x2660` + `reg_update` `0x41`
-3. CLC demux13 + demosaic34 + MNDS21 to 1920×1080 (offsets still from dump/reverse, not guessed)
-4. BUS WM4/WM5 DISP Y/C **linear** NV12 (`en_cfg=0x1`, no UBWC)
-
-Proven on B slot: NV12 frames, skip-aligned full FOV, `g_serial` `0525:a4a7` >30s, CSID SOT still masked. Until then DebayerCpu remains the flight preview.
+Proven on B slot: NV12 frames, skip-aligned full FOV, `g_serial` `0525:a4a7` >30s, CSID SOT still masked. The overlay already programs IPP / CAMIF / CLC / WM4/5; the remaining stall is documented in the attempts log, not “PIX missing from `line_num`”.

@@ -31,6 +31,7 @@ install_src drivers/gpu/drm/msm/msm_fbdev.c
 install_src drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c
 install_src drivers/media/i2c/imx596-dagu.c
 install_src drivers/media/i2c/s5kjn1-dagu-regs.h
+install_src drivers/media/platform/qcom/camss/camss-vfe-480.c
 install_src drivers/media/v4l2loopback-dagu/v4l2loopback.c
 install_src drivers/media/v4l2loopback-dagu/v4l2loopback.h
 install_src drivers/media/v4l2loopback-dagu/v4l2loopback_formats.h
@@ -205,11 +206,12 @@ config CHARGER_PM8150B_DAGU
 	  copy CAF qpnp-smb5 or touch Type-C registers.
 
 config CHARGER_P9418_DAGU
-	tristate "IDT P9418 wireless charger (Xiaomi dagu)"
+	tristate "IDT P9418 Smart Pen TX (Xiaomi dagu)"
 	depends on I2C
 	select REGMAP_I2C
 	help
-	  P9418 wireless charger on Xiaomi Pad 5 Pro 12.4.
+	  P9418 on dagu is the stylus-side wireless TX (Smart Pen),
+	  not Qi charging of the tablet pack.
 
 config BATTERY_XIAOMI_DUAL_FG
 	tristate "Xiaomi dual BQ27Z561 combiner (dagu)"
@@ -3626,6 +3628,838 @@ if "if (phy->cphy)" not in text:
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: C-PHY PHY_TYPE_SEL")
 
+# Titan 480 PIX: CSID IPP + VFE0/1 line_num=4 + Bayer→NV12 + DISP WM4/5.
+# Overlay copies camss-vfe-480.c. Keep D-PHY 0x0114=0x0300 and CSID SOT mask.
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "dagu csid ipp vc=" not in text:
+    if '#include "camss-vfe.h"' not in text:
+        old = '''#include "camss-csid.h"
+#include "camss-csid-gen2.h"
+#include "camss.h"
+'''
+        new = '''#include "camss-csid.h"
+#include "camss-csid-gen2.h"
+#include "camss-vfe.h"
+#include "camss.h"
+'''
+        if old not in text:
+            raise SystemExit(f"{path}: csid-gen2 include needle missing")
+        text = text.replace(old, new, 1)
+    old = "static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8 vc)"
+    if old not in text:
+        raise SystemExit(f"{path}: rdi stream needle missing")
+    ipp = r'''#define CSID_IPP_CFG0			0x200
+#define CSID_IPP_CFG1			0x204
+#define CSID_IPP_CTRL			0x208
+#define CSID_IPP_FRM_DROP_PATTERN	0x20c
+#define CSID_IPP_FRM_DROP_PERIOD	0x210
+#define CSID_IPP_IRQ_SUBSAMPLE_PATTERN	0x214
+#define CSID_IPP_IRQ_SUBSAMPLE_PERIOD	0x218
+#define CSID_IPP_HCROP			0x21c
+#define CSID_IPP_VCROP			0x220
+#define CSID_IPP_PIX_DROP_PATTERN	0x224
+#define CSID_IPP_PIX_DROP_PERIOD	0x228
+#define CSID_IPP_LINE_DROP_PATTERN	0x22c
+#define CSID_IPP_LINE_DROP_PERIOD	0x230
+#define CSID_IPP_ERR_RECOVERY_CFG0	0x2d0
+#define     IPP_PIX_STORE_EN		7
+#define     IPP_OVERFLOW_CTRL_EN	1
+
+static bool csid_vc_feeds_pix(struct csid_device *csid, u8 vc)
+{
+	struct media_pad *remote;
+	struct v4l2_subdev *sd;
+	struct vfe_line *line;
+
+	if (csid_is_lite(csid))
+		return false;
+
+	remote = media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_FIRST_SRC + vc]);
+	if (!remote)
+		return false;
+
+	sd = media_entity_to_v4l2_subdev(remote->entity);
+	if (!sd)
+		return false;
+
+	line = v4l2_get_subdevdata(sd);
+	return line && line->id == VFE_LINE_PIX;
+}
+
+static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 vc)
+{
+	struct v4l2_mbus_framefmt *input_format = &csid->fmt[MSM_CSID_PAD_FIRST_SRC + vc];
+	const struct csid_format_info *format = csid_get_fmt_entry(csid->res->formats->formats,
+								   csid->res->formats->nformats,
+								   input_format->code);
+	u32 val;
+
+	/*
+	 * CAF cam_ife_csid_core.c IPP CFG0: (1<<1)|1, crop, decode, DT,
+	 * pix_store. Titan 480 IPP bit2 is horizontal_bin_en, not RDI
+	 * TIMESTAMP_EN. Setting it 2×-bins 4080→2040 and overflows
+	 * CAMIF/CLC programmed for full width (debug pixel stuck at 2040).
+	 */
+	val = 1 << RDI_CFG0_BYTE_CNTR_EN;
+	val |= 1 << RDI_CFG0_FORMAT_MEASURE_EN;
+	val |= 1 << RDI_CFG0_CROP_H_EN;
+	val |= 1 << RDI_CFG0_CROP_V_EN;
+	val |= format->decode_format << RDI_CFG0_DECODE_FORMAT;
+	val |= format->data_type << RDI_CFG0_DATA_TYPE;
+	/* CSID pad 4 is PIX, not CSI VC 3. Sensor packets are VC 0. */
+	val |= 1 << IPP_PIX_STORE_EN;
+	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
+
+	val = 2 << RDI_CFG1_TIMESTAMP_STB_SEL;
+	writel_relaxed(val, csid->base + CSID_IPP_CFG1);
+
+	val = ((input_format->width - 1) << 16) | 0;
+	writel_relaxed(val, csid->base + CSID_IPP_HCROP);
+	val = ((input_format->height - 1) << 16) | 0;
+	writel_relaxed(val, csid->base + CSID_IPP_VCROP);
+
+	writel_relaxed(1, csid->base + CSID_IPP_FRM_DROP_PERIOD);
+	writel_relaxed(0, csid->base + CSID_IPP_FRM_DROP_PATTERN);
+	writel_relaxed(1, csid->base + CSID_IPP_IRQ_SUBSAMPLE_PERIOD);
+	writel_relaxed(0, csid->base + CSID_IPP_IRQ_SUBSAMPLE_PATTERN);
+	writel_relaxed(1, csid->base + CSID_IPP_PIX_DROP_PERIOD);
+	writel_relaxed(0, csid->base + CSID_IPP_PIX_DROP_PATTERN);
+	writel_relaxed(1, csid->base + CSID_IPP_LINE_DROP_PERIOD);
+	writel_relaxed(0, csid->base + CSID_IPP_LINE_DROP_PATTERN);
+
+	writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
+		       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+
+	val = readl_relaxed(csid->base + CSID_IPP_CFG0);
+	if (enable)
+		val |= 1 << RDI_CFG0_ENABLE;
+	else
+		val &= ~BIT(RDI_CFG0_ENABLE);
+	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
+
+	if (enable)
+		val = HALT_CMD_RESUME_AT_FRAME_BOUNDARY << RDI_CTRL_HALT_CMD;
+	else
+		val = HALT_CMD_HALT_AT_FRAME_BOUNDARY << RDI_CTRL_HALT_CMD;
+	writel_relaxed(val, csid->base + CSID_IPP_CTRL);
+
+	if (enable)
+		dev_info(csid->camss->dev,
+			 "dagu csid ipp vc=%u decode=%u %ux%u cfg0=0x%x\n",
+			 vc, format->decode_format,
+			 input_format->width, input_format->height,
+			 readl_relaxed(csid->base + CSID_IPP_CFG0));
+}
+
+'''
+    text = text.replace(old, ipp + old, 1)
+    old = '''			__csid_configure_rdi_stream(csid, enable, i);
+			__csid_configure_rx(csid, &csid->phy, i);
+			__csid_ctrl_rdi(csid, enable, i);
+'''
+    new = '''			if (csid_vc_feeds_pix(csid, i)) {
+				__csid_configure_ipp_stream(csid, enable, i);
+				__csid_configure_rx(csid, &csid->phy, i);
+			} else {
+				__csid_configure_rdi_stream(csid, enable, i);
+				__csid_configure_rx(csid, &csid->phy, i);
+				__csid_ctrl_rdi(csid, enable, i);
+			}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: configure_stream rdi needle missing")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: dagu titan480 CSID IPP")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "not CSI VC 3" not in text:
+    old = '''	val |= format->data_type << RDI_CFG0_DATA_TYPE;
+	val |= vc << RDI_CFG0_VIRTUAL_CHANNEL;
+	val |= dt_id << RDI_CFG0_DT_ID;
+	val |= 1 << IPP_PIX_STORE_EN;
+'''
+    new = '''	val |= format->data_type << RDI_CFG0_DATA_TYPE;
+	/* CSID pad 4 is PIX, not CSI VC 3. Sensor packets are VC 0. */
+	val |= 1 << IPP_PIX_STORE_EN;
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: IPP CSI VC0 needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: IPP CSI VC0")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "CSI VC 0 feeds IPP when pad 4 is PIX" not in text:
+    old = '''static bool csid_vc_feeds_pix(struct csid_device *csid, u8 vc)
+{
+	struct media_pad *remote;
+	struct v4l2_subdev *sd;
+	struct vfe_line *line;
+
+	if (csid_is_lite(csid))
+		return false;
+
+	remote = media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_FIRST_SRC + vc]);
+	if (!remote)
+		return false;
+
+	sd = media_entity_to_v4l2_subdev(remote->entity);
+	if (!sd)
+		return false;
+
+	line = v4l2_get_subdevdata(sd);
+	return line && line->id == VFE_LINE_PIX;
+}
+'''
+    new = '''static bool csid_pad_is_pix(struct csid_device *csid, unsigned int pad)
+{
+	struct media_pad *remote;
+	struct v4l2_subdev *sd;
+	struct vfe_line *line;
+
+	if (pad >= MSM_CSID_PADS_NUM)
+		return false;
+
+	remote = media_pad_remote_pad_first(&csid->pads[pad]);
+	if (!remote)
+		return false;
+
+	sd = media_entity_to_v4l2_subdev(remote->entity);
+	if (!sd)
+		return false;
+
+	line = v4l2_get_subdevdata(sd);
+	return line && line->id == VFE_LINE_PIX;
+}
+
+static bool csid_vc_feeds_pix(struct csid_device *csid, u8 vc)
+{
+	unsigned int pix_pad = MSM_CSID_PADS_NUM - 1;
+
+	if (csid_is_lite(csid))
+		return false;
+
+	if (csid_pad_is_pix(csid, MSM_CSID_PAD_FIRST_SRC + vc))
+		return true;
+
+	/*
+	 * CSI VC 0 feeds IPP when pad 4 is PIX. en_vc is the CSI
+	 * virtual-channel mask (bit 0), not the media pad index.
+	 */
+	return vc == 0 && csid_pad_is_pix(csid, pix_pad);
+}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: csid_vc_feeds_pix needle missing")
+    text = text.replace(old, new, 1)
+    old = '''static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 vc)
+{
+	struct v4l2_mbus_framefmt *input_format = &csid->fmt[MSM_CSID_PAD_FIRST_SRC + vc];
+	const struct csid_format_info *format = csid_get_fmt_entry(csid->res->formats->formats,
+								   csid->res->formats->nformats,
+								   input_format->code);
+	u32 val;
+'''
+    new = '''static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 vc)
+{
+	unsigned int pix_pad = MSM_CSID_PADS_NUM - 1;
+	struct v4l2_mbus_framefmt *input_format = &csid->fmt[pix_pad];
+	const struct csid_format_info *format;
+	u32 val;
+
+	if (!input_format->width || !input_format->height)
+		input_format = &csid->fmt[MSM_CSID_PAD_FIRST_SRC + vc];
+	format = csid_get_fmt_entry(csid->res->formats->formats,
+				    csid->res->formats->nformats,
+				    input_format->code);
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: IPP pad-4 format needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: CSI VC 0 feeds IPP when pad 4 is PIX")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "dagu csid ipp status=" not in text:
+    old = '''	if (enable)
+		dev_info(csid->camss->dev,
+			 "dagu csid ipp vc=%u decode=%u %ux%u cfg0=0x%x\\n",
+			 vc, format->decode_format,
+			 input_format->width, input_format->height,
+			 readl_relaxed(csid->base + CSID_IPP_CFG0));
+}
+'''
+    new = '''	if (enable)
+		dev_info(csid->camss->dev,
+			 "dagu csid ipp vc=%u decode=%u %ux%u cfg0=0x%x\\n",
+			 vc, format->decode_format,
+			 input_format->width, input_format->height,
+			 readl_relaxed(csid->base + CSID_IPP_CFG0));
+	else
+		dev_info(csid->camss->dev,
+			 "dagu csid ipp status=0x%x meas0=0x%x meas1=0x%x sof=0x%x/0x%x\\n",
+			 readl_relaxed(csid->base + 0x254),
+			 readl_relaxed(csid->base + 0x278),
+			 readl_relaxed(csid->base + 0x27c),
+			 readl_relaxed(csid->base + 0x290),
+			 readl_relaxed(csid->base + 0x294));
+}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: IPP status dump needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: IPP STREAMOFF status dump")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "dagu csid ipp off " not in text:
+    old = '''				dev_info(csid->camss->dev,
+					 "dagu csid phy=%u lanes=%u assign=0x%x cfg0=0x%x\\n",
+					 csid->phy.csiphy_id, csid->phy.lane_cnt,
+					 csid->phy.lane_assign,
+					 readl_relaxed(csid->base + CSID_CSI2_RX_CFG0));
+			}
+		}
+'''
+    new = '''				dev_info(csid->camss->dev,
+					 "dagu csid phy=%u lanes=%u assign=0x%x cfg0=0x%x\\n",
+					 csid->phy.csiphy_id, csid->phy.lane_cnt,
+					 csid->phy.lane_assign,
+					 readl_relaxed(csid->base + CSID_CSI2_RX_CFG0));
+			}
+		}
+
+	if (!enable && !csid_is_lite(csid) &&
+	    csid_pad_is_pix(csid, MSM_CSID_PADS_NUM - 1))
+		dev_info(csid->camss->dev,
+			 "dagu csid ipp off status=0x%x meas0=0x%x meas1=0x%x sof=0x%x/0x%x cfg0=0x%x\\n",
+			 readl_relaxed(csid->base + 0x254),
+			 readl_relaxed(csid->base + 0x278),
+			 readl_relaxed(csid->base + 0x27c),
+			 readl_relaxed(csid->base + 0x290),
+			 readl_relaxed(csid->base + 0x294),
+			 readl_relaxed(csid->base + CSID_IPP_CFG0));
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: IPP streamoff dump needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: IPP dump on any PIX STREAMOFF")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "CSID_IPP_IRQ_STATUS" not in text:
+    old = '''#define CSID_IPP_ERR_RECOVERY_CFG0	0x2d0
+#define     IPP_PIX_STORE_EN		7
+#define     IPP_OVERFLOW_CTRL_EN	1
+'''
+    new = '''#define CSID_IPP_ERR_RECOVERY_CFG0	0x2d0
+#define CSID_IPP_IRQ_STATUS		0x30
+#define CSID_IPP_IRQ_MASK		0x34
+#define CSID_IPP_IRQ_CLEAR		0x38
+#define     IPP_PIX_STORE_EN		7
+#define     IPP_OVERFLOW_CTRL_EN	1
+#define     IPP_IRQ_FIFO_OVERFLOW	2
+#define     IPP_IRQ_INPUT_EOF		9
+#define     IPP_IRQ_INPUT_SOF		12
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: IPP IRQ define needle missing")
+    text = text.replace(old, new, 1)
+    old = '''	writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
+		       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+
+	val = readl_relaxed(csid->base + CSID_IPP_CFG0);
+'''
+    new = '''	writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
+		       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+
+	if (enable)
+		writel_relaxed(BIT(IPP_IRQ_FIFO_OVERFLOW) |
+			       BIT(IPP_IRQ_INPUT_EOF) |
+			       BIT(IPP_IRQ_INPUT_SOF),
+			       csid->base + CSID_IPP_IRQ_MASK);
+	else
+		writel_relaxed(0, csid->base + CSID_IPP_IRQ_MASK);
+
+	val = readl_relaxed(csid->base + CSID_IPP_CFG0);
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: IPP IRQ mask needle missing")
+    text = text.replace(old, new, 1)
+    old = '''	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
+	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
+
+	/* Read and clear IRQ status for each enabled RDI channel */
+'''
+    new = '''	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
+	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
+
+	if (!csid_is_lite(csid)) {
+		val = readl_relaxed(csid->base + CSID_IPP_IRQ_STATUS);
+		writel_relaxed(val, csid->base + CSID_IPP_IRQ_CLEAR);
+		if (val)
+			dev_info_ratelimited(csid->camss->dev,
+					     "dagu csid ipp irq=0x%x\\n", val);
+	}
+
+	/* Read and clear IRQ status for each enabled RDI channel */
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: IPP IRQ ISR needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: IPP SOF/overflow IRQ")
+
+# Titan 480 IPP CFG0 bit2 is horizontal_bin_en. RDI TIMESTAMP_EN must
+# not be copied onto IPP — it 2×-bins 4080→2040 and overflows Demux.
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+old = '''	val = 1 << RDI_CFG0_BYTE_CNTR_EN;
+	val |= 1 << RDI_CFG0_FORMAT_MEASURE_EN;
+	val |= 1 << RDI_CFG0_TIMESTAMP_EN;
+	val |= 1 << RDI_CFG0_CROP_H_EN;
+	val |= 1 << RDI_CFG0_CROP_V_EN;
+	val |= format->decode_format << RDI_CFG0_DECODE_FORMAT;
+	val |= format->data_type << RDI_CFG0_DATA_TYPE;
+	val |= 1 << IPP_PIX_STORE_EN;
+'''
+new = '''	/*
+	 * CAF cam_ife_csid_core.c IPP CFG0: (1<<1)|1, crop, decode, DT,
+	 * pix_store. Titan 480 IPP bit2 is horizontal_bin_en, not RDI
+	 * TIMESTAMP_EN. Setting it 2×-bins 4080→2040 and overflows
+	 * CAMIF/CLC programmed for full width (debug pixel stuck at 2040).
+	 */
+	val = 1 << RDI_CFG0_BYTE_CNTR_EN;
+	val |= 1 << RDI_CFG0_FORMAT_MEASURE_EN;
+	val |= 1 << RDI_CFG0_CROP_H_EN;
+	val |= 1 << RDI_CFG0_CROP_V_EN;
+	val |= format->decode_format << RDI_CFG0_DECODE_FORMAT;
+	val |= format->data_type << RDI_CFG0_DATA_TYPE;
+	val |= 1 << IPP_PIX_STORE_EN;
+'''
+if old in text:
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: IPP CFG0 no horizontal_bin")
+    text = path.read_text()
+if "RDI_CFG0_TIMESTAMP_EN;\n	val |= 1 << RDI_CFG0_CROP_H_EN" in text:
+    raise SystemExit(f"{path}: IPP CFG0 still sets RDI TIMESTAMP_EN (horizontal_bin)")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid.c"
+text = path.read_text()
+if "dagu: CSID does not stomp IFE core" not in text:
+    old = '''		} else if (clock->nfreqs) {
+			clk_set_rate(clock->clk, clock->freq[0]);
+		}
+'''
+    new = '''		} else if (clock->nfreqs) {
+			/*
+			 * dagu: CSID does not stomp IFE core. Titan CSID
+			 * lists vfe0/vfe1 so the branch stays enabled; VFE
+			 * already picked 576 MHz for PIX. freq[0] is 350.
+			 */
+			if (!strcmp(clock->name, "vfe0") ||
+			    !strcmp(clock->name, "vfe1") ||
+			    !strcmp(clock->name, "vfe_lite") ||
+			    !strncmp(clock->name, "vfe_lite", 8))
+				continue;
+			clk_set_rate(clock->clk, clock->freq[0]);
+		}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: CSID clock freq[0] needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: CSID does not stomp IFE core")
+
+path = root / "drivers/media/platform/qcom/camss/camss-vfe.c"
+text = path.read_text()
+if "dagu: raise VFE clock instead of EBUSY" not in text:
+    old = '''			rate = clk_get_rate(clock->clk);
+			if (rate < min_rate)
+				return -EBUSY;
+'''
+    new = '''			rate = clk_get_rate(clock->clk);
+			if (rate >= min_rate)
+				continue;
+
+			/*
+			 * dagu: raise VFE clock instead of EBUSY.
+			 * clk_rcg2_shared_ops parks IFE at 350 MHz; CSID
+			 * used to clk_set_rate(vfe0, freq[0]) on top.
+			 * PIX needs the 576 MHz bin for 560 MHz CSI.
+			 */
+			for (j = 0; j < clock->nfreqs; j++)
+				if (min_rate < clock->freq[j])
+					break;
+			if (j == clock->nfreqs) {
+				dev_err(vfe->camss->dev,
+					"dagu %s get=%lu min=%llu too high\\n",
+					clock->name, rate, min_rate);
+				return -EBUSY;
+			}
+
+			{
+				long new_rate;
+				int set_ret;
+
+				new_rate = clk_round_rate(clock->clk,
+							  clock->freq[j]);
+				if (new_rate < 0)
+					return -EINVAL;
+				set_ret = clk_set_rate(clock->clk, new_rate);
+				if (set_ret < 0)
+					return set_ret;
+				dev_info(vfe->camss->dev,
+					 "dagu %s raise %lu -> %ld (min=%llu)\\n",
+					 clock->name, rate, new_rate, min_rate);
+			}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: vfe_check_clock_rates EBUSY needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: raise VFE clock instead of EBUSY")
+
+path = root / "drivers/media/platform/qcom/camss/camss.c"
+text = path.read_text()
+if "vfe_res_8250" in text and "formats_pix = &vfe_formats_pix_8250" not in text.split("vfe_res_8250", 1)[-1][:1200]:
+    text = text.replace(
+        '''		.interrupt = { "vfe0" },
+		.vfe = {
+			.line_num = 3,
+			.has_pd = true,
+			.pd_name = "ife0",
+			.hw_ops = &vfe_ops_480,
+			.formats_rdi = &vfe_formats_rdi_845,
+			.formats_pix = &vfe_formats_pix_845
+		}''',
+        '''		.interrupt = { "vfe0" },
+		.vfe = {
+			.line_num = 4,
+			.has_pd = true,
+			.pd_name = "ife0",
+			.hw_ops = &vfe_ops_480,
+			.formats_rdi = &vfe_formats_rdi_845,
+			.formats_pix = &vfe_formats_pix_8250
+		}''',
+        1,
+    )
+    text = text.replace(
+        '''		.interrupt = { "vfe1" },
+		.vfe = {
+			.line_num = 3,
+			.has_pd = true,
+			.pd_name = "ife1",
+			.hw_ops = &vfe_ops_480,
+			.formats_rdi = &vfe_formats_rdi_845,
+			.formats_pix = &vfe_formats_pix_845
+		}''',
+        '''		.interrupt = { "vfe1" },
+		.vfe = {
+			.line_num = 4,
+			.has_pd = true,
+			.pd_name = "ife1",
+			.hw_ops = &vfe_ops_480,
+			.formats_rdi = &vfe_formats_rdi_845,
+			.formats_pix = &vfe_formats_pix_8250
+		}''',
+        1,
+    )
+    path.write_text(text)
+    print(f"patched {path}: dagu titan480 VFE0/1 PIX line_num=4")
+
+# Lite IFE has no CLC. Drop leftover PIX so videoN count stays 14
+# (Venus remains /dev/video14 / video15).
+text = path.read_text()
+if '.reg = { "vfe_lite0" }' in text and "is_lite = true,\n			.line_num = 4" in text.split("vfe_lite0", 1)[-1][:400]:
+    text = text.replace(
+        '''		.reg = { "vfe_lite0" },
+		.interrupt = { "vfe_lite0" },
+		.vfe = {
+			.is_lite = true,
+			.line_num = 4,''',
+        '''		.reg = { "vfe_lite0" },
+		.interrupt = { "vfe_lite0" },
+		.vfe = {
+			.is_lite = true,
+			.line_num = 3,''',
+        1,
+    )
+    text = text.replace(
+        '''		.reg = { "vfe_lite1" },
+		.interrupt = { "vfe_lite1" },
+		.vfe = {
+			.is_lite = true,
+			.line_num = 4,''',
+        '''		.reg = { "vfe_lite1" },
+		.interrupt = { "vfe_lite1" },
+		.vfe = {
+			.is_lite = true,
+			.line_num = 3,''',
+        1,
+    )
+    path.write_text(text)
+    print(f"patched {path}: dagu titan480 VFE lite no PIX")
+
+path = root / "drivers/media/platform/qcom/camss/camss-vfe.c"
+text = path.read_text()
+if "vfe_formats_pix_8250" not in text:
+    old = '''const struct camss_formats vfe_formats_pix_845 = {
+	.nformats = ARRAY_SIZE(formats_rdi_845),
+	.formats = formats_rdi_845
+};
+'''
+    new = '''const struct camss_formats vfe_formats_pix_845 = {
+	.nformats = ARRAY_SIZE(formats_rdi_845),
+	.formats = formats_rdi_845
+};
+
+/* Titan 480 PIX: Bayer sink (CSID IPP) → NV12 source (IFE DISP). */
+static const struct camss_format_info formats_pix_8250[] = {
+	{ MEDIA_BUS_FMT_SBGGR10_1X10, 10, V4L2_PIX_FMT_NV12, 1,
+	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
+	{ MEDIA_BUS_FMT_SGBRG10_1X10, 10, V4L2_PIX_FMT_NV12, 1,
+	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
+	{ MEDIA_BUS_FMT_SGRBG10_1X10, 10, V4L2_PIX_FMT_NV12, 1,
+	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
+	{ MEDIA_BUS_FMT_SRGGB10_1X10, 10, V4L2_PIX_FMT_NV12, 1,
+	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
+	{ MEDIA_BUS_FMT_YUYV8_1_5X8, 8, V4L2_PIX_FMT_NV12, 1,
+	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
+};
+
+const struct camss_formats vfe_formats_pix_8250 = {
+	.nformats = ARRAY_SIZE(formats_pix_8250),
+	.formats = formats_pix_8250
+};
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: pix_8250 table needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: vfe_formats_pix_8250")
+
+path = root / "drivers/media/platform/qcom/camss/camss-vfe.h"
+text = path.read_text()
+if "vfe_formats_pix_8250" not in text:
+    old = "extern const struct camss_formats vfe_formats_pix_845;\n"
+    new = """extern const struct camss_formats vfe_formats_pix_845;
+extern const struct camss_formats vfe_formats_pix_8250;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: pix_845 extern needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: vfe_formats_pix_8250")
+
+path = root / "drivers/media/platform/qcom/camss/camss-vfe.c"
+text = path.read_text()
+if "line->id == VFE_LINE_PIX &&\n	    vfe->camss->res->version == CAMSS_8250" not in text:
+    old = '''static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
+			    unsigned int index, u32 src_req_code)
+{
+	struct vfe_device *vfe = to_vfe(line);
+
+	switch (vfe->camss->res->version) {
+'''
+    new = '''static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
+			    unsigned int index, u32 src_req_code)
+{
+	struct vfe_device *vfe = to_vfe(line);
+
+	if (vfe->camss->res->version == CAMSS_8250 &&
+	    line->id == VFE_LINE_PIX) {
+		switch (sink_code) {
+		case MEDIA_BUS_FMT_SBGGR8_1X8:
+		case MEDIA_BUS_FMT_SGBRG8_1X8:
+		case MEDIA_BUS_FMT_SGRBG8_1X8:
+		case MEDIA_BUS_FMT_SRGGB8_1X8:
+		case MEDIA_BUS_FMT_SBGGR10_1X10:
+		case MEDIA_BUS_FMT_SGBRG10_1X10:
+		case MEDIA_BUS_FMT_SGRBG10_1X10:
+		case MEDIA_BUS_FMT_SRGGB10_1X10:
+		case MEDIA_BUS_FMT_SBGGR12_1X12:
+		case MEDIA_BUS_FMT_SGBRG12_1X12:
+		case MEDIA_BUS_FMT_SGRBG12_1X12:
+		case MEDIA_BUS_FMT_SRGGB12_1X12:
+		case MEDIA_BUS_FMT_SBGGR14_1X14:
+		case MEDIA_BUS_FMT_SGBRG14_1X14:
+		case MEDIA_BUS_FMT_SGRBG14_1X14:
+		case MEDIA_BUS_FMT_SRGGB14_1X14:
+		{
+			u32 src_code[] = {
+				MEDIA_BUS_FMT_YUYV8_1_5X8,
+			};
+
+			return camss_format_find_code(src_code, ARRAY_SIZE(src_code),
+						      index, src_req_code);
+		}
+		default:
+			break;
+		}
+	}
+
+	switch (vfe->camss->res->version) {
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: src_pad_code needle missing")
+    text = text.replace(old, new, 1)
+    old = '''	if (output->buf[index]) {
+		ops->vfe_wm_update(vfe, output->wm_idx[0],
+				   output->buf[index]->addr[0],
+				   line);
+		ops->reg_update(vfe, line->id);
+	} else {
+'''
+    new = '''	if (output->buf[index]) {
+		unsigned int j;
+
+		for (j = 0; j < output->wm_num; j++)
+			ops->vfe_wm_update(vfe, output->wm_idx[j],
+					   output->buf[index]->addr[j],
+					   line);
+		ops->reg_update(vfe, line->id);
+	} else {
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: buf_done wm needle missing")
+    text = text.replace(old, new, 1)
+    old = '''	ops->vfe_wm_start(vfe, output->wm_idx[0], line);
+
+	for (i = 0; i < CAMSS_INIT_BUF_COUNT; i++) {
+		output->buf[i] = vfe_buf_get_pending(output);
+		if (!output->buf[i])
+			break;
+		output->gen2.active_num++;
+		ops->vfe_wm_update(vfe, output->wm_idx[0],
+				   output->buf[i]->addr[0], line);
+		ops->reg_update(vfe, line->id);
+	}
+'''
+    new = '''	for (i = 0; i < output->wm_num; i++)
+		ops->vfe_wm_start(vfe, output->wm_idx[i], line);
+
+	for (i = 0; i < CAMSS_INIT_BUF_COUNT; i++) {
+		unsigned int j;
+
+		output->buf[i] = vfe_buf_get_pending(output);
+		if (!output->buf[i])
+			break;
+		output->gen2.active_num++;
+		for (j = 0; j < output->wm_num; j++)
+			ops->vfe_wm_update(vfe, output->wm_idx[j],
+					   output->buf[i]->addr[j], line);
+		ops->reg_update(vfe, line->id);
+	}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: enable_output wm needle missing")
+    text = text.replace(old, new, 1)
+    old = '''	if (output->state == VFE_OUTPUT_ON &&
+	    output->gen2.active_num < 2) {
+		output->buf[output->gen2.active_num++] = buf;
+		ops->vfe_wm_update(vfe, output->wm_idx[0],
+				   buf->addr[0], line);
+		ops->reg_update(vfe, line->id);
+	} else {
+'''
+    new = '''	if (output->state == VFE_OUTPUT_ON &&
+	    output->gen2.active_num < 2) {
+		unsigned int j;
+
+		output->buf[output->gen2.active_num++] = buf;
+		for (j = 0; j < output->wm_num; j++)
+			ops->vfe_wm_update(vfe, output->wm_idx[j],
+					   buf->addr[j], line);
+		ops->reg_update(vfe, line->id);
+	} else {
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: queue_buffer wm needle missing")
+    text = text.replace(old, new, 1)
+    old = '''	output->wm_num = 1;
+
+	/* Correspondence between VFE line number and WM number.
+	 * line 0 -> RDI 0, line 1 -> RDI1, line 2 -> RDI2, line 3 -> PIX/RDI3
+	 * Note this 1:1 mapping will not work for PIX streams.
+	 */
+	output->wm_idx[0] = line->id;
+	vfe->wm_output_map[line->id] = line->id;
+'''
+    new = '''	if (line->id == VFE_LINE_PIX &&
+	    vfe->camss->res->version == CAMSS_8250 &&
+	    !vfe_is_lite(vfe)) {
+		output->wm_num = 2;
+		output->wm_idx[0] = 4;
+		output->wm_idx[1] = 5;
+		vfe->wm_output_map[4] = line->id;
+	} else {
+		output->wm_num = 1;
+
+		/* Correspondence between VFE line number and WM number.
+		 * line 0 -> RDI 0, line 1 -> RDI1, line 2 -> RDI2, line 3 -> PIX/RDI3
+		 * Note this 1:1 mapping will not work for PIX streams.
+		 */
+		output->wm_idx[0] = line->id;
+		vfe->wm_output_map[line->id] = line->id;
+	}
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: get_output_v2 wm needle missing")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: dagu titan480 PIX WM4/5 NV12")
+
+path = root / "drivers/media/platform/qcom/camss/camss-vfe.h"
+text = path.read_text()
+if "void (*pix_go)(struct vfe_device *vfe);" not in text:
+    old = """	void (*vfe_wm_update)(struct vfe_device *vfe, u8 wm, u32 addr,
+			      struct vfe_line *line);
+};
+"""
+    new = """	void (*vfe_wm_update)(struct vfe_device *vfe, u8 wm, u32 addr,
+			      struct vfe_line *line);
+	/* dagu: CAF starts CAMIF after IMAGE_ADDR + RUP, not inside wm_update */
+	void (*pix_go)(struct vfe_device *vfe);
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vfe_wm_update ops needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: pix_go after RUP")
+
+path = root / "drivers/media/platform/qcom/camss/camss-vfe.c"
+text = path.read_text()
+if "ops->pix_go(vfe)" not in text:
+    old = """		ops->reg_update(vfe, line->id);
+	}
+
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	return 0;
+}
+
+/*
+ * vfe_queue_buffer_v2 - Add empty buffer
+"""
+    new = """		ops->reg_update(vfe, line->id);
+	}
+
+	/* dagu: CAF starts CAMIF after CDM IMAGE_ADDR and RUP */
+	if (line->id == VFE_LINE_PIX && ops->pix_go)
+		ops->pix_go(vfe);
+
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	return 0;
+}
+
+/*
+ * vfe_queue_buffer_v2 - Add empty buffer
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: enable_output_v2 pix_go needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: pix_go after init RUP")
+
 path = root / "drivers/media/i2c/s5kjn1.c"
 text = path.read_text()
 if ".hts = 5888" not in text:
@@ -4054,6 +4888,517 @@ if "dagu: Android s5kjn1 D-PHY settle 0x13" not in text:
     raise SystemExit(f"{path}: D-PHY settle 0x13 missing")
 if "if (phy->cphy)" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
     raise SystemExit("camss-csid-gen2.c: C-PHY PHY_TYPE_SEL missing")
+if "dagu: CSID SOT/EOT stay masked" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
+    raise SystemExit("camss-csid-gen2.c: CSID SOT mask missing")
+if "dagu csid ipp vc=" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
+    raise SystemExit("camss-csid-gen2.c: Titan 480 CSID IPP missing")
+vfe480 = (root / "drivers/media/platform/qcom/camss/camss-vfe-480.c").read_text()
+if "CLC_DEMUX" not in vfe480 or "DISP_Y_WM" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: PIX CLC/DISP path missing")
+if "0x5600" in vfe480.split("CLC_DEMUX", 1)[-1][:80]:
+    raise SystemExit("camss-vfe-480.c: CLC_DEMUX 0x5600 is not IFE MMIO")
+if "CLC_DEMUX_BASE" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Demux CLC EN at 0x3060 missing")
+if "DEMUX_EVEN_GBRG" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Demux GBRG even/odd missing")
+if "vfe_480_clc_enable(vfe, CLC_PREPROCESS, 1)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: empty BLS 0x2200 without DMI used literal 1; use identity DMI + BIT(0)")
+if "vfe_480_crop(vfe, CLC_PREPROCESS, last_x, last_y)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: BLS 0x2268 x0x2e is IQ not Crop11 keep-all")
+if "0xffffffff, vfe->base + CAMIF_LINE_SKIP" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF keep-all skip missing")
+if "IRQ_MASK_1_CAMIF" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF SOF IRQ1 missing")
+if "CSID_IPP_IRQ_STATUS" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
+    raise SystemExit("camss-csid-gen2.c: IPP IRQ 0x30 missing")
+if "#define CLC_DEMOSAIC			0x3800" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Demosaic36 must be CLC 0x3800")
+if "#define CLC_MNDS_Y			0x4c00" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: MNDS Display Y must be 0x4c00 not stats 0x8c00")
+if "CAMIF_CROP_WIDTH" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF crop 0x2668 missing")
+if "CORE_CFG_0_DISP_DS4_R2PD" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CORE_CFG R2PD disable missing")
+if "CORE_CFG_0_OPERATING_MODE" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CORE_CFG online CSID operating_mode missing")
+if "DEMUX_PERIOD_KEEPALL" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Demux keep-all period dump map missing")
+if "DEMUX_WIN			0x68" not in vfe480 or "DEMUX_WIN_N			10" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: FULL Demux 0x3068 dump map missing")
+if "DEMUX_COMPACT_CFG		0x3c003c01" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: compact Demux live moduleConfig 0x3c003c01 missing")
+if "DEMUX_COMPACT_EVEN		0xac" not in vfe480 or "DEMUX_COMPACT_ODD		0xc9" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: compact Demux live even/odd 0xac/0xc9 missing")
+if "vfe_480_demux(vfe, in_w - 1, pipe_h - 1)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: compact Demux is 0x3090 x7; do not pack FULL 0x3068 last/first")
+if "static void vfe_480_demux(struct vfe_device *vfe)\n" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: compact Demux CreateCmdList is 0x3090 x7 only")
+if "0x000003c0" not in vfe480 or "0x0bf40ff0" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM Demux 0x3068 x10 missing")
+if "0x0000443c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM Demux 0x30ac x10 missing")
+if "DEMUX_TAIL			0xac" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX 0x30ac dump addr missing")
+if "CLC_DEMUX_TAIL_CROP		0x304c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Demux 0x30ac dump MODULE base 0x304c missing")
+if "vfe_480_crop(vfe, CLC_DEMUX_TAIL_CROP, last_x, last_y)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: 0x30ac is live CDM 10-word IQ, not Crop11 keep-all")
+if "DEMUX_DMI1_N		0x200" not in vfe480 or "DEMUX_DMI2_N		0x100" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: FULL Demux DMI dump map missing")
+if "CLC_DEMUX_BASE + CLC_DMI_CFG" in vfe480:
+    raise SystemExit("camss-vfe-480.c: compact Demux does not pack DMI 0x3008")
+if "CLC_DEMUX_BASE + DEMUX_TAIL" in vfe480:
+    raise SystemExit("camss-vfe-480.c: pack 0x30ac via live_30ac, not DEMUX_TAIL EN/period")
+if "CLC_PDPC11" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: PDPC11 in-pipe CLC missing")
+if "vfe_480_clc_enable(vfe, CLC_ABF, 0)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: ABF MODULE must be 0 (#355; live 0x3268 stays)")
+if "vfe_480_clc_enable(vfe, CLC_ABF, 0x2)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: ABF EN=0x2 + live 0x3268 is #355 black-pixel candidate")
+if "0x00008020" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM ABF 0x3268 x19 missing")
+if "writel_relaxed(0, vfe->base + CLC_ABF + 0x68)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not zero ABF 0x3268; live CDM is 0x00008020")
+if "ABF_REGION			0x70" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX ABF40 PackIQ 12-bit region is 0x3270 not 0x3268")
+if "writel_relaxed(hwin, vfe->base + CLC_ABF + ABF_REGION)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #337 0x3270 Crop11 read back last=1; compact does not pack 0x3270")
+if "overflow abf40 3260=" not in vfe480 or "3270=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow must dump ABF40 0x3270 region")
+if "CLC_GIC + CLC_DMI_LUT" not in vfe480 or "ABF_BANK2_DMI_N1" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: ABF40 bank2 must stuff DMI 0x3408 before MODULE EN")
+if "ABF_BANK2_MODULE" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: compact ABF bank2 is 0x3460 x1 live MODULE 0xc101")
+if "vfe_480_pack(vfe, 0x3458, (const u32[]){ 0, 0, 0 }, 3)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: ABF bank2 0x3460 MODULE must be 0 (#357; 0xc101 still on after #355)")
+if "vfe_480_pack(vfe, 0x3458, (const u32[]){ 1, 1, ABF_BANK2_MODULE }, 3)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: ABF bank2 EN=0xc101 is #357 black-pixel candidate")
+if "0x03800380" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM ABF bank2 0x3468 x46 missing")
+if "0x3458" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM ABF bank2 0x3458 x3 missing")
+if "writel_relaxed(0, vfe->base + CLC_GIC + 0x68)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not zero ABF bank2 0x3468; compact leaves HW reset")
+if "overflow abf40 3260=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow must dump ABF40 0x3260/0x3460")
+if "DEMOSAIC_INTERP_MID" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Demosaic36 interpolator dump map missing")
+if "writel_relaxed(DEMOSAIC_INTERP_MID" in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM 0x3878 is 0x80/0x00800066 not INTERP_MID 0x800080")
+if "0x00800066" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM Demosaic 0x3878 x2 missing")
+if "DEMOSAIC_WB_N		4" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX WB13 0x3868 x4 missing")
+if "0x07540400" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM Demosaic 0x3868 is 0x07540400 not Q10 0x400")
+if "vfe_480_clc_enable(vfe, CLC_DEMOSAIC, DEMOSAIC_COMPACT_CFG)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #361 restore Demosaic 0x4001; PDPC off is the black-pixel fix")
+if "vfe_480_clc_enable(vfe, CLC_DEMOSAIC, 0)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: Demosaic MODULE=0 was an isolation cut; restore 0x4001 after #360")
+if "overflow wb13 3868=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow must dump WB13 0x3868")
+if "viol_id=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAF violation_status is a module id")
+if "pipe_h / 2, out_w, out_h / 2" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: MNDS C must 4:2:0 of 2ppc luma (viol_id 19)")
+if "pipe_h = in_h / 2" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop/MNDS V must use CAMIF 2ppc line=in_h/2")
+if "vfe_480_crop(vfe, CLC_CROP, in_w - 1, in_h - 1)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 Y last_y=in_h-1 waits for 3059; CAMIF stops at 1530")
+if "vfe_480_clc_enable(vfe, CLC_PDPC11, BIT(0))" in vfe480:
+    raise SystemExit("camss-vfe-480.c: empty PDPC EN=1 is a line-0 brick wall")
+if "vfe_480_pdpc30(vfe)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: PDPC30 identity between Pedestal and Demux missing")
+if "PDPC30_DMI_N		0x90" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX PDPC30 DMI sel1 n=0x90 missing")
+if "MNDS_IMAGE_SIZE" in vfe480:
+    raise SystemExit("camss-vfe-480.c: Titan 170 MNDS IMAGE_SIZE packing is illegal on Titan 480")
+if "MNDS_H_CFG" in vfe480:
+    raise SystemExit("camss-vfe-480.c: Titan 170 MNDS H_CFG packing is illegal on Titan 480")
+if "MNDS_H_INIT" in vfe480:
+    raise SystemExit("camss-vfe-480.c: Titan 170 MNDS H_INIT packing is illegal on Titan 480")
+if "#define MNDS_H_SIZE			0x64" in vfe480:
+    raise SystemExit("camss-vfe-480.c: MNDS +0x64 is Titan 480 spare; H_SIZE starts at +0x68")
+if "#define MNDS_H_SIZE			0x68" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Display MNDS21 H_SIZE 0x68 missing")
+if "#define MNDS_V_PAD			0x84" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Display MNDS21 V_PAD 0x84 missing")
+if "#define     CROP_PIXEL			0x64" in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 PIXEL +0x64 is CAMIF spare; use +0x68/+0x6c")
+if "#define     CROP_PIXEL			0x68" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 PIXEL must be +0x68 like CAMIF_CROP_WIDTH")
+if "#define     CROP_LINE			0x6c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 LINE must be +0x6c like CAMIF_CROP_HEIGHT")
+if "#define     CROP_H_STRIPE		0x70" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 H_STRIPE +0x70 missing (CamX x9)")
+if "#define     CROP_V_STRIPE		0x80" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 V_STRIPE +0x80 missing (CamX x9)")
+if "last_x << 16, vfe->base + base + CROP_H_STRIPE" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 keep-all H_STRIPE last must be last_x")
+if "VFE_CORE_CFG_1" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: dump CORE_CFG_1 at 0x30")
+if "BIT(0) | BIT(1) | (interp << 8)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: MNDS MODULE_CFG must OR 0x3 like CamX")
+if "interp << 28" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: MNDS interpReso in phase[29:28] missing")
+if "(out_w - 1) << 16" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: MNDS H stripe last must be H_OUT-1")
+if "#define CLC_RNDCLAMP			0x4200" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RoundClamp11 0x4200 missing")
+if "#define CLC_CROP			0x4400" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 0x4400 missing")
+if "#define CLC_CROP_C			0x4600" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 C 0x4600 missing")
+if "#define CLC_RNDCLAMP_POST_Y		0x5000" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RoundClamp POST Y 0x5000 missing")
+if "#define CLC_RNDCLAMP_POST_C		0x5200" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RoundClamp POST C 0x5200 missing")
+if "#define     RNDCLAMP_CH0		0x70" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RoundClamp11 clamp burst must be +0x70")
+if "RNDCLAMP_MODULE_CFG		0x3c01" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RoundClamp11 MODULE_CFG must be CamX 0x3c01")
+if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP_POST_Y);" in vfe480:
+    raise SystemExit("camss-vfe-480.c: POST Y RoundClamp missing PIXEL/LINE keep-all")
+if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP_POST_C);" in vfe480:
+    raise SystemExit("camss-vfe-480.c: POST C RoundClamp missing PIXEL/LINE keep-all")
+if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP);" in vfe480:
+    raise SystemExit("camss-vfe-480.c: PRE RoundClamp missing PIXEL/LINE keep-all")
+if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP, in_w - 1, pipe_h - 1)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: PRE RoundClamp keep-all must match Crop input")
+if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP_POST_Y, out_w - 1, out_h - 1)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: POST Y RoundClamp keep-all must match MNDS out")
+if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP_POST_C, out_w - 1," not in vfe480:
+    raise SystemExit("camss-vfe-480.c: POST C RoundClamp keep-all must match MNDS chroma")
+if "#define CLC_RNDCLAMP_OUT_Y		0x5800" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RoundClamp after POST Y 0x5800 missing (CamX 0x5a60 compact)")
+if "#define CLC_RNDCLAMP_OUT_C		0x5a00" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RoundClamp after POST C 0x5a00 missing")
+if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP_OUT_Y, out_w - 1, out_h - 1)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: OUT Y RoundClamp keep-all must match POST")
+if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP_OUT_C, out_w - 1," not in vfe480:
+    raise SystemExit("camss-vfe-480.c: OUT C RoundClamp keep-all must match POST chroma")
+if "overflow rcwin pre=" not in vfe480 or "outy=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow must dump OUT RoundClamp PIXEL/LINE")
+if "dagu ife%d pix cst=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: STREAMON must dump CST origin + POST C +0x70")
+if "vfe_480_live_display_cdm" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM Display Crop/MNDS/TAP pack missing")
+if "0x0fef0bf3" not in vfe480 or "0xc043dbcf" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM MNDS/Crop 0x0fef0bf3 missing")
+if "0x09016c7d" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM TAP filter 0x9016c7d missing")
+if "CLC_RNDCLAMP_POST_C + 0x70" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: POST C RoundClamp +0x70 missing")
+if "0x03ff0000, 7, 0x03ff0000, 7" in vfe480:
+    raise SystemExit("camss-vfe-480.c: chroma round 7 is UBWC 10-bit; linear packer 3 LSB of 512 is #362 green")
+if "0x00ff0000, 0x17, 0x00ff0000, 0x17" in vfe480:
+    raise SystemExit("camss-vfe-480.c: MID C round 0x17 is UBWC 10-bit chroma; use 0x16 like Y (#363)")
+if "0x03ff0000, 6, 0x03ff0000, 6" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: POST/OUT C round must be 6 so 10-bit 512 packs as UV 128")
+if "#define CLC_DS411_C_CROP		0x5504" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX DS411 C 0x5504 dump addr missing")
+if "vfe_480_ds411_crop(" in vfe480:
+    raise SystemExit("camss-vfe-480.c: 0x5408 is DS4 TAP DMI_CFG (type==5 only); crop write stuffed LUT")
+if "ds411=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow must dump DS411 0x5408/0x5504 (expect reset)")
+if "vfe_480_crop(vfe, CLC_DSX," in vfe480:
+    raise SystemExit("camss-vfe-480.c: 0x5e00 Crop EN=1 STREAMON EPIPE -32; need real DSX10")
+if "#define CLC_DSX				0x5e00" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not EN 0x5e00; #318 empty Crop was EPIPE")
+if "#define CLC_RNDCLAMP_MID_Y		0x4800" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RoundClamp MID Y 0x4800 missing")
+if "#define CLC_RNDCLAMP_MID_C		0x4a00" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RoundClamp MID C 0x4a00 missing")
+if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP_MID_Y, in_w - 1, pipe_h - 1)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: MID Y RoundClamp keep-all must match Crop")
+if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP_MID_C, in_w - 1," not in vfe480:
+    raise SystemExit("camss-vfe-480.c: MID C RoundClamp keep-all must match Crop C")
+if "overflow rcwin pre=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow must dump RoundClamp PIXEL/LINE")
+if "BLS DMI_CFG=0 before AHB" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: BLS must clear DMI_CFG after LUT before MODULE")
+if "CLC_PEDESTAL + CLC_DMI_CFG" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Pedestal must clear DMI_CFG after LUT before MODULE")
+if "overflow ped 2c5c=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow must dump Pedestal 0x2c5c window")
+if "PEDESTAL_WIN		0x5c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX Pedestal 0x2c5c is 13-bit last/first (PackIQ input+16)")
+if "vfe_480_pedestal(vfe, in_w - 1, pipe_h - 1)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Pedestal identity DMI must run before PDPC30")
+if "writel_relaxed(hwin, vfe->base + CLC_PEDESTAL + PEDESTAL_WIN)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: compact Pedestal is 0x2c60 x1; do not Crop11 0x2c5c")
+if "CLC_PEDESTAL + PEDESTAL_AHB + i * 4" in vfe480:
+    raise SystemExit("camss-vfe-480.c: compact Pedestal does not pack 0x2c68; do not zero AHB")
+if "CLC_PDPC30 + CLC_DMI_CFG" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: PDPC30 must clear DMI_CFG after LUT before MODULE")
+if "0x08370040" not in vfe480 or "vfe_480_pack(vfe, 0x2e68" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM PDPC30 0x2e68 x16 missing")
+if "vfe_480_pack(vfe, 0x2e58" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM PDPC30 0x2e58 x3 missing")
+if "live_2e58[] = {\n\t\t0x00000000, 0x00000000, 0x00000000," not in vfe480:
+    raise SystemExit("camss-vfe-480.c: PDPC30 MODULE must be 0 (#360; {1,1,1} third word is EN)")
+if "live_2e58[] = {\n\t\t0x00000001, 0x00000001, 0x00000001," in vfe480:
+    raise SystemExit("camss-vfe-480.c: PDPC30 {1,1,1} is #360 black-pixel candidate")
+if "vfe_480_crop(vfe, CLC_PREPROCESS, last_x, last_y)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: BLS 0x2268 x0x2e is IQ not Crop11; #337 class")
+if "CLC_PREPROCESS + 0x68)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not zero BLS 0x2268 (CamX 0x2268 x0x2e / empty window)")
+if "vfe_480_clc_enable(vfe, CLC_PREPROCESS, 0)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: BLS MODULE must be 0 (#354; 0x2268 left at HW reset)")
+if "vfe_480_clc_enable(vfe, CLC_PREPROCESS, BIT(0))" in vfe480:
+    raise SystemExit("camss-vfe-480.c: BLS EN=1 + reset 0x2268 is #354 black-pixel candidate")
+if "bls=0x%x/0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow must dump BLS PIXEL/LINE")
+if "vfe_480_bls(vfe, in_w - 1, pipe_h - 1)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: BLS12 DMI helper must run before Pedestal")
+if "BLS_DMI_SEL			4" in vfe480 or "BLS_DMI_N			0x280" in vfe480:
+    raise SystemExit("camss-vfe-480.c: BLS DMI n=0x280 is CamX sel4 OFFSET; banks are 0x100/0x100/0x80/0xa8")
+if "BLS_DMI_N1			0x100" not in vfe480 or "BLS_DMI_N4			0xa8" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX BLS DMI must program sel1-4 n=0x100/0x100/0x80/0xa8")
+if "CLC_PREPROCESS + CLC_DMI_CFG" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: BLS DMI must use CLC_DMI_CFG 0x2208")
+if "base + CROP_PIXEL" not in vfe480 or "base + CROP_LINE" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RoundClamp must write Crop-class PIXEL/LINE")
+if "MNDS_CROP_LINE" in vfe480:
+    raise SystemExit("camss-vfe-480.c: MNDS +0x68 is H_PHASE not crop")
+if "VFE_BUS_IMAGE_SIZE_VIOLATION" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: BUS image-size dump missing")
+if "MODE_MIPI_RAW" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: RDI path missing")
+if "PACKER_PLAIN_8_LSB_MSB_10" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX NV12 packer 3 missing")
+if "PACKER_UBWC_NV12" not in vfe480 or "PACKER_UBWC_NV12\t\t0xB" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: UBWC overlay packer 0xB must stay documented")
+if "writel_relaxed(PACKER_UBWC_NV12" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not write UBWC packer 0xB onto linear NV12")
+if "0xF0, vfe->base + VFE_BUS_COMP_CFG" in vfe480 or "0x30, vfe->base + VFE_BUS_COMP_CFG" in vfe480:
+    raise SystemExit("camss-vfe-480.c: COMP_CFG is Dual-IFE sync, not WM mask 0xF0/0x30")
+if "is_dual" not in vfe480.split("VFE_BUS_COMP_CFG_0", 1)[0][-800:]:
+    raise SystemExit("camss-vfe-480.c: COMP_CFG_0 must document CAF Dual-IFE-only write")
+if "writel_relaxed(PACKER_DISP_NV12" in vfe480:
+    raise SystemExit("camss-vfe-480.c: PACKER_DISP_NV12 0xB is the UBWC overlay, not PLAIN")
+if "PACKER_PLAIN_8_LSB_MSB_10_ODD_EVEN" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: NV21 chroma packer 4 must stay documented")
+if "if (plain) {\n\t\twritel_relaxed(PACKER_PLAIN_8_LSB_MSB_10_ODD_EVEN" in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAF NV12 packer is 3, not NV21 chroma 4")
+if "wm == DISP_C_WM ? PACKER_PLAIN_8" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #365 chroma WM PLAIN_8, Y stays packer 3")
+if "writel_relaxed(DISP_Y_WM + 1, vfe->base + VFE_BUS_DEBUG_STATUS_TOP_CFG)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: BUS debug_status_top must mux DISP WM4")
+if "writel_relaxed(1, vfe->base + VFE_BUS_DEBUG_STATUS_TOP_CFG)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: debug_status_top_cfg=1 is VID WM0, not DISP")
+if "writel_relaxed(MODE_QCOM_PLAIN << WM_CFG_MODE" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: PLAIN WM must stay EN=0 until IMAGE_ADDR")
+if "if (plain)\n\t\twritel_relaxed(1 << WM_CFG_EN | MODE_QCOM_PLAIN << WM_CFG_MODE" in vfe480:
+    raise SystemExit("camss-vfe-480.c: enabling PLAIN WM in wm_config (addr 0) is illegal")
+if "writel_relaxed(addr, vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));\n\tif (wm == DISP_Y_WM || wm == DISP_C_WM)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAF enables DISP WM after IMAGE_ADDR")
+if "VFE_BUS_WM_DEBUG_CFG" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: WM debug_status_cfg 0xB078 missing")
+if "VFE_BUS_WM_ADDR_STATUS0" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: WM addr_status_0 dump missing")
+if "VFE_BUS_WM_ADDR_STATUS1" not in vfe480 or "VFE_BUS_WM_ADDR_STATUS3" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAF addr_status 1-3 dump missing")
+if "writel_relaxed((0x14 << 16) | epoch, vfe->base + CLC_CAMIF_EPOCH);\n\tvfe_480_clc_enable(vfe, CLC_CAMIF" in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF EN before IMAGE_ADDR is illegal")
+if "static void vfe_480_camif_go" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF start helper missing")
+if ".pix_go = vfe_480_camif_go" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF must start after PIX RUP")
+if "vfe_480_ds_go(vfe);\n\t\t\tvfe_480_camif_go(vfe)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF inside wm_update is before RUP")
+if "ops->pix_go(vfe)" not in (root / "drivers/media/platform/qcom/camss/camss-vfe.c").read_text():
+    raise SystemExit("camss-vfe.c: PIX CAMIF after init RUP missing")
+if "vfe_480_wm_sidecar_linear" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: DISP WM sidecar bind missing")
+if "VFE_BUS_WM_UBWC_META_ADDR" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: WM UBWC meta_addr missing")
+if "VFE_BUS_PWR_ISO_CFG" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: BUS pwr_iso_cfg 0xAA5C missing")
+if "writel_relaxed(0, vfe->base + VFE_BUS_PWR_ISO_CFG)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: pwr_iso_cfg must be cleared")
+if "CAMNOC_IFE_LINEAR" not in vfe480 or "0x0ac42000" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAF CAMNOC 0xac42000 IFE_LINEAR map missing")
+if "0x66665433" not in vfe480 or "vfe_480_camnoc_ife_qos" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAF IFE_LINEAR QoS LUTs missing")
+if "VFE_BUS_IF_FRAMEHEADER_CFG" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAF if_frameheader_cfg missing")
+if "vfe_480_bus_common" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: BUS SRC_GRP frameheader clear missing")
+if "plain ? 0xffffffff : 1" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: PIX framedrop must be CamX keep-all")
+if "writel_relaxed(0, vfe->base + VFE_BUS_WM_UBWC_BW_LIMIT" in vfe480:
+    raise SystemExit("camss-vfe-480.c: bw_limit=0 stalls DISP (CAF skips zero)")
+if "overflow ds as0" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: WM6/7 addr_status dump missing")
+if "CLC_GTM" not in vfe480 or "CLC_WB" not in vfe480 or "CLC_GAMMA" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX GTM/WB/Gamma between CC and CST missing")
+if "vfe_480_clc_enable(vfe, CLC_LIN, BIT(0))" in vfe480:
+    raise SystemExit("camss-vfe-480.c: empty Linearization EN=1 overflowed line 0")
+if "LIN_SLOPE_Q10" in vfe480.split("vfe_480_lin(struct vfe_device")[-1].split("vfe_480_pedestal(struct vfe_device")[0]:
+    raise SystemExit("camss-vfe-480.c: #308 Q10 LIN DMI overflowed line 0; use live dmabuf 36")
+if "256u << 16" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #308 4 guessed LIN knees overflowed line 0")
+if "vfe_480_lin(vfe)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #345 live LIN DMI+16 AHB at 0x2a64 overflowed line 0")
+if "042037c1" not in vfe480 or "0x08370040" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: keep live dmabuf LIN DMI 36 / DumpRegConfig knees in helper")
+if "LIN_DMI_N			36" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX Linearization34 DMI n=36 missing")
+if "overflow lin 2a60=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow must dump LIN 0x2a60")
+if "vfe_480_gtm(vfe, in_w - 1, pipe_h - 1)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: LSC40 keep-all grid must use CAMIF 2ppc last_x/last_y")
+if "LSC_MESH_HM2		15" not in vfe480 or "LSC_MESH_VM2		11" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: LSC40 config0 is mesh-2 15/11 (17x13)")
+if "LSC_CFG_N			11" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX LSC40 0x3668 x11 missing")
+if "overflow lsc40 3660=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow must dump LSC40 0x3668 grid")
+if "GTM_DMI_N			0x374" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX LSC40 DMI sel1/2/3 n=0x374 missing")
+if "vfe_480_clc_enable(vfe, CLC_GTM, BIT(0))" in vfe480 and "static void vfe_480_gtm" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: empty LSC40 EN=1 overflowed line 0")
+if "vfe_480_pack(vfe, 0x3658, (const u32[]){ 0, 0, 0 }, 3)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: LSC 0x3660 MODULE must be 0 (#356; 0x3001 + live mesh is black-pixel candidate)")
+if "0x00003001" in vfe480:
+    raise SystemExit("camss-vfe-480.c: LSC 0x3001 + live mesh is #356 black-pixel candidate")
+if "vfe_480_wb(vfe)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: WB13 identity DMI Fill missing")
+if "vfe_480_pedestal(vfe, in_w - 1, pipe_h - 1)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Pedestal13 identity DMI Fill missing")
+if "PEDESTAL_LUT_N		0x208" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Pedestal13 DMI is 0x208 words banks 1/2")
+if "vfe_480_clc_enable(vfe, CLC_PEDESTAL, BIT(0));\n\tvfe_480_demux" in vfe480:
+    raise SystemExit("camss-vfe-480.c: empty Pedestal EN=1 needs DMI; use vfe_480_pedestal")
+if "vfe_480_clc_enable(vfe, CLC_PEDESTAL, 0)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Pedestal MODULE must be 0 (#353; EN=1 + zero LUT is CST-zero class)")
+if "vfe_480_clc_enable(vfe, CLC_PEDESTAL, BIT(0))" in vfe480:
+    raise SystemExit("camss-vfe-480.c: Pedestal EN=1 + zero DMI is #353 black-pixel candidate")
+if "overflow clcstat" not in vfe480 or "CLC_HW_STATUS" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CLC hw_status dump on overflow missing")
+if "overflow demuxwin" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX Demux 0x3058/0x3068 window dump missing")
+if "WB_LUT_N			512" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: WB13 DMI is 512 words at 0x3c08 bank 1")
+if "vfe_480_clc_enable(vfe, CLC_WB, BIT(0));\n\tvfe_480_gamma" in vfe480:
+    raise SystemExit("camss-vfe-480.c: empty WB13 EN=1 overflowed line 0")
+if "vfe_480_gamma(vfe)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Gamma16 identity DMI Fill missing")
+if "vfe_480_clc_dmi32" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CLC DMI_32 (CamX 0x3e08 banks 1-3) missing")
+if "#define     CLC_DMI_CFG			0x08" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CLC DMI_CFG is module+0x08")
+if "vfe_480_clc_enable(vfe, CLC_GAMMA, BIT(0));\n\tvfe_480_cst" in vfe480:
+    raise SystemExit("camss-vfe-480.c: empty Gamma16 EN=1 overflowed line 0")
+if "bt601_q10" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not pack guessed BT.601 CST matrix")
+if "CLC_CST_MATRIX + i * 4" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not loop CLC_CST_MATRIX; live IQ+0x1c uses CLC_CST+0x68")
+if "0x00750259" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: FULL CST 0x4068 x12 must be live IQ+0x1c (0x00750259)")
+if "0x01fe1eae, 0x00001f54, 0x02000000, 0x03ff0000" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live CDM CST word6 is 0x02000000 (#364 [9:0]=0x200 zeroed PIX)")
+if "0x00000200, 0x03ff0000" in vfe480:
+    raise SystemExit("camss-vfe-480.c: CST [9:0]=0x200 zeros Y/UV (#364); keep 0x02000000")
+if "vfe_480_pack(vfe, 0x3c58, (const u32[]){ 0, 0, 0 }, 3)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: GTM 0x3c60 MODULE must be 0 (#351 0,0,1 still EN)")
+if "vfe_480_pack(vfe, 0x3e58, (const u32[]){ 0, 0, 0 }, 3)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Gamma 0x3e60 MODULE must be 0 (#351 0,0,1 still EN)")
+if "vfe_480_pack(vfe, 0x3c58, (const u32[]){ 0, 0, 1 }, 3)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: GTM 0,0,1 is MODULE=1; #351 wrote zeros")
+if "vfe_480_pack(vfe, 0x3e58, (const u32[]){ 0, 0, 1 }, 3)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: Gamma 0,0,1 is MODULE=1; #351 wrote zeros")
+if "vfe_480_pack(vfe, 0x3c58, (const u32[]){ 1, 1, 1 }, 3)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: GTM 1,1,1 + identity DMI produced #349 all-zero NV12")
+if "vfe_480_pack(vfe, 0x3e58, (const u32[]){ 1, 1, 1 }, 3)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: Gamma 1,1,1 + identity DMI produced #349 all-zero NV12")
+if "Compact CST12 @0x52d178 is 0x4060 x1" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: keep compact vs FULL CST CreateCmdList comment")
+if "vfe_480_cc(vfe)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX CC13 identity Fill missing")
+if "vfe_480_clc_enable(vfe, CLC_CC, BIT(0))" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #362 restore CC EN=1; PDPC off is the black-pixel fix")
+if "vfe_480_clc_enable(vfe, CLC_CC, 0)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: CC MODULE=0 was an isolation cut; restore EN after #361 green")
+if "vfe_480_clc_enable(vfe, CLC_CC, BIT(0));\n\tvfe_480_cst" in vfe480:
+    raise SystemExit("camss-vfe-480.c: CC EN-only is a zero 3x3; use 0x3a68 identity")
+if "#define     CLC_CC_MATRIX		0x68" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CC13 matrix is 0x3a68, +0x64 is spare")
+if "CC_GAIN_UNITY		0x400" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CC13 Q10 unity 0x400 missing")
+if "CAMNOC_NIU_MAXWR" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMNOC NIU +0x08 MAXWR dump missing")
+if "VFE_BUS_WM_FRAME_HEADER_CFG" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: WM frame_header_cfg 0xB028 dump missing")
+if "WM_DEBUG_STATUS_1_CONSTRAINT	11" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAF debug_status_1 mux 11 (constraint) missing")
+if "WM_DEBUG_STATUS_0_MUX		1" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: packer FSM debug_status_0 mux 1 missing")
+if "writel_relaxed(1, vfe->base + VFE_BUS_WM_DEBUG_CFG(wm))" in vfe480:
+    raise SystemExit("camss-vfe-480.c: debug_cfg=1 leaves constraint mux 0; use (11<<8)|1")
+if "DISP_DS4_WM" not in vfe480 or "PACKER_PLAIN_64" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: COMP_GRP_1 WM6/7 PD10 map missing")
+if "vfe_480_ds_go(vfe);\n\t\tvfe_480_camif_go(vfe)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: DS EN must not pull CAMIF before RUP")
+if "core |= BIT(CORE_CFG_0_VID_DS4_R2PD) | BIT(CORE_CFG_0_VID_DS16_R2PD)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Android CORE_CFG sets VID R2PD off")
+if "core |= BIT(CORE_CFG_0_DISP_DS4_R2PD) | BIT(CORE_CFG_0_DISP_DS16_R2PD)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: linear NV12 must set DISP R2PD off; on without DSX10 stalls COMP_GRP_1")
+if "vfe_480_ds_config(vfe, DISP_DS4_WM" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not start WM6 without DSX10")
+if "vfe_480_ds_go(vfe)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not EN WM6/7 without DSX10")
+if "vfe_480_pixel_pattern(sink->code) << CORE_CFG_0_PIXEL_PATTERN" in vfe480:
+    raise SystemExit("camss-vfe-480.c: CORE_CFG_0 bits 24-25 are dsp_mode/DSP_STREAMING; Bayer is Demux even/odd")
+if "vfe_480_clc_enable(vfe, CLC_CAMIF, CAMIF_EN | CAMIF_IFE_OUT_EN);" in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF MODULE 0x101 missing Bayer bits 24-26 (CamX 0x526538)")
+if "pat << CAMIF_PIXEL_PATTERN" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CamX CAMIF MODULE must BFI Bayer into bits 24-26")
+if "CAMIF_PIXEL_PATTERN		24" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF Bayer shift 24 missing")
+if "writel_relaxed(((in_h - 1) << 16) | 0, vfe->base + CAMIF_CROP_HEIGHT)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF HEIGHT 3059 never arrives; 2ppc last is pipe_h-1")
+if "writel_relaxed(((pipe_h - 1) << 16) | 0, vfe->base + CAMIF_CROP_HEIGHT)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAMIF_CROP_HEIGHT must use pipe_h (debug line=1530)")
+if "vfe_480_clc_enable(vfe, base, BIT(0));\n\twritel_relaxed(0, vfe->base + base + CROP_SPARE)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 MODULE 0x1 missing bit1; CamX MNDS-class is 0x3")
+if "vfe_480_clc_enable(vfe, base, BIT(0) | BIT(1));" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Crop11 MODULE must be EN+bit1 like CamX MNDS 0x3")
+if "core = 1 << CORE_CFG_0_OPERATING_MODE" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CORE_CFG_0 must match Android 0x60000800 (no pattern)")
+if "CORE_CFG_0_DSP_STREAMING" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAF DSP_STREAMING shift 25 must stay named")
+if "\n\twritel_relaxed(0, vfe->base + VFE_BUS_WM_PACKER_CFG(wm));\n" in vfe480:
+    raise SystemExit("camss-vfe-480.c: unconditional PACKER_CFG 0 (PLAIN_128) is illegal")
+if "VFE_BUS_WM_DEBUG" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: WM debug 0xB07C dump missing")
+if "UBWC_STATIC_LPDDR5" not in vfe480 or "0x1036" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: kona LPDDR5 ubwc-static-cfg 0x1036 missing")
+if "VFE_BUS_UBWC_STATIC_CTRL" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: BUS ubwc_static_ctrl 0xAA58 missing")
+if "VFE_BUS_WM_UBWC_MODE_CFG" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: WM UBWC mode_cfg missing")
+if "writel_relaxed(0, vfe->base + VFE_BUS_WM_UBWC_MODE_CFG(wm))" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: linear DISP must keep UBWC compressor off")
+if "writel_relaxed(1, vfe->base + VFE_BUS_WM_UBWC_MODE_CFG" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not enable UBWC compressor on V4L2 NV12")
+if "vfe_formats_pix_8250" not in (root / "drivers/media/platform/qcom/camss/camss-vfe.c").read_text():
+    raise SystemExit("camss-vfe.c: PIX Bayer→NV12 table missing")
+if "&vfe_formats_pix_8250" not in (root / "drivers/media/platform/qcom/camss/camss.c").read_text().split("vfe_res_8250", 1)[-1][:1500]:
+    raise SystemExit("camss.c: VFE0/1 PIX not on vfe_formats_pix_8250")
+if "not CSI VC 3" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
+    raise SystemExit("camss-csid-gen2.c: IPP CSI VC0 missing")
+if "CSI VC 0 feeds IPP when pad 4 is PIX" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
+    raise SystemExit("camss-csid-gen2.c: CSI VC 0 → IPP pad 4 missing")
+if "Titan 480 IPP bit2 is horizontal_bin_en" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
+    raise SystemExit("camss-csid-gen2.c: IPP CFG0 still reuses RDI TIMESTAMP_EN as horizontal_bin")
+if "dagu: CSID does not stomp IFE core" not in (root / "drivers/media/platform/qcom/camss/camss-csid.c").read_text():
+    raise SystemExit("camss-csid.c: CSID vfe0 stomp still present")
+if "dagu: raise VFE clock instead of EBUSY" not in (root / "drivers/media/platform/qcom/camss/camss-vfe.c").read_text():
+    raise SystemExit("camss-vfe.c: PIX clock EBUSY still present")
+if "vfe_line_min_clock" not in (root / "drivers/media/platform/qcom/camss/camss-vfe.c").read_text():
+    raise SystemExit("camss-vfe.c: PIX IFE core clock missing")
 
 # UFS clk scaling + OPP rpmhpd deadlocks exception_event vs devfreq on this
 # QHEE (no ICC). Keep gating/hibern8; just do not register devfreq.

@@ -1,6 +1,6 @@
 # dagu 主线 Linux 适配总表
 
-记录日期：**2026-09-12**。  
+记录日期：**2026-09-17**。板上证据：Linux **7.0** `#335`（`SMP PREEMPT Thu Sep 17 08:31 CST 2026`）。  
 设备：小米平板 5 Pro 12.4（`dagu` / SM8250 / `22081281AC`）。  
 运行系统：Linux 7.0 + Ubuntu（userdata），只刷 **B 槽**。  
 内核构建：`DAGU_MINIMAL=1 DAGU_DISPLAY=1`。镜像：`linux-mainline/out/boot-dagu.img`。
@@ -18,7 +18,8 @@
 - 板级 DT：`linux-mainline/dts/sm8250-xiaomi-dagu.dts`
 - 安卓 dump 硬件清单（未随主线更新）：`docs/hardware-inventory.md`
 - ARM Linux 七维评估（含 Python / CPU 软路径）：`linux-mainline/docs/dagu-arm-linux-eval.md`
-- CAMSS VFE PIX 审计（IFE no-go）：`linux-mainline/docs/dagu-camss-pix-audit.md`
+- CAMSS VFE PIX 审计：`linux-mainline/docs/dagu-camss-pix-audit.md`
+- IFE PIX 线性 NV12 尝试与证伪（#333 仍 0 帧）：`linux-mainline/docs/dagu-ife-pix-nv12-attempts.md`
 
 ## 怎么读状态
 
@@ -49,31 +50,34 @@
 
 | 子系统 | 状态 | 一句话 |
 |--------|------|--------|
-| 启动链 / B 槽 Linux | **已通** | 7.0 Image 站住，g_serial >30s |
+| 启动链 / B 槽 Linux | **已通** | 7.0 `#333` Image 站住，`g_serial` `0525:a4a7` >30s |
 | UFS + Ubuntu 桌面 | **已通** | userdata ext4，GNOME。内部 UFS 其它 LUN 对 Nautilus / Resources 隐藏，只留 userdata（sda）和 USB |
 | USB gadget 串口 | **已通** | `0525:a4a7` / `ttyGS0` |
 | 显示 L81A 120Hz | **已通** | 1600×2560，DSC dual-DPHY |
-| GPU Adreno 650 / Turnip | **已通** | GMU + Mesa。LINEAR GMEM store/fetch **FIXED**。主 fb UBWC，Chrome LINEAR GMEM 共存。hangcheck `00800005` 仍会偶发 recover |
+| GPU Adreno 650 / Turnip | **已通** | GMU + Mesa。主 fb UBWC。Chrome 一线 `dagu-chromium-native.sh`（`QCOM_COMPRESSED`，禁止 `libdagu-linear-mod.so`）。hangcheck `00800005` 仍会偶发 recover |
 | CPU 调频 + 温度 | **已通** | EPSS LUT，stress-ng 8/8 |
-| 触控 Himax | **已通** | `spi-gpio`，不要 GENI SPI |
+| 触控 Himax | **已通** | QUP0 SE4 **GENI SPI FIFO**（`990000.spi` `proto=1 skip_wrap=1`）。gpio `himax_spi` 保持 disabled。禁止 GPI/SE DMA |
 | Wi‑Fi QCA6390 | **已通** | ath11k，iperf 约 600–665 Mbps |
-| 扬声器 CS35L41 | **软件已通** | ADSP `running`（`adsp.mbn`）。SoundWire 扫到 WCD9385 RX/TX，**没有** WSA88xx（外放是 CS35L41×4）。`aplay -l` card 0 `Xiaomi-dagu-CS35L41-WCD9385`。PW 默认 Speakers。见 `linux-mainline/docs/dagu-audio-s2idle.md` |
+| 扬声器 CS35L41 | **已通** | ADSP `running`。GENI I2C SE1/SE3。四颗 Halo `CAL_SET_STATUS=2` + Fast Use Case `*-music.txt`。card 0 `Xiaomi-dagu-CS35L41-WCD9385`。禁止 softvol |
 | 麦克风 | **已通** | 安卓 speaker-mic：AMIC5 / ADC4 INP5。UCM HiFi Mic，`hw:0,1`。喇叭 440 Hz 回录 |
-| 后摄 s5kjn1 | **已通（预览）** | live D-PHY 4-lane RAW10 `pGAA` 4080×3060，SoftISP skip 4×4 → 1020×764 @~30fps |
-| 前摄 imx596 | **已通（预览）** | D-PHY 4-lane RAW10 `pBAA` 2592×1952，SoftISP skip 2×2 → 1296×976 @~30fps |
-| CAMSS VFE/SMMU | **已通** | CSID TPG 出过完整 1 帧（约 15.6 MB） |
-| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6；`hci0` `<bt-mac>` Powered: yes。DT 对照 elish/`qcom,qca6390-bt`：`max-speed` 3 Mbps + PMU LDO，BT_EN 走 pmu pwrseq。BLE 鼠标走 HOG（`CONFIG_UHID` + `CONFIG_BT_LE`）。经典 HID：`ClassicBondedOnly=false` + `UserspaceHID=persist`。寻呼带 clock offset，HID 主机 Central + FastConnectable，sniff 6–18。Page Timeout 拆 unset-handle ACL。GNOME Settings 是配对 UI：6390 去掉 `HCI_QUIRK_SIMULTANEOUS_DISCOVERY`，type 7 由内核分时 LE/Inquiry；`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。`TemporaryTimeout=180`。保留 sniff / UART RPM / IBS / WakeAllowed |
+| 后摄 s5kjn1 | **已通（预览）** | live D-PHY 4-lane RAW10 4080×3060，SoftISP skip 4×4 → 1020×764 @~30fps。桌面 `/dev/video21` |
+| 前摄 imx596 | **已通（预览）** | D-PHY 4-lane RAW10 2592×1952，SoftISP skip 2×2 → 1296×976 @~30fps。桌面 `/dev/video20` |
+| CAMSS RDI / SMMU | **已通** | CSIPHY→CSID→VFE RDI 出 RAW。CSID TPG 也曾出完整 1 帧（约 15.6 MB） |
+| CAMSS IFE PIX | **部分** | `#365` IFE1 线性 NV12 ≥3 帧非零，UV 原点 ~133。饱和度仍窄。产品预览继续 SoftISP。见 `dagu-ife-pipeline-status.md` |
+| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6。`#333` `hci0` UP RUNNING PSCAN，HCI 5.2。BLE HOG + 经典 HID（`ClassicBondedOnly=false`）。`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。A2DP 未测 |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
-| 双电芯电量 | **DT 已写** | 双 BQ27Z561 走 GENI I2C SE0/SE13 + `xiaomi-dual-fg`，脚本可查 `power_supply`。gpio `fg_i2c_se0` / `fg_i2c_se13` 保持 disabled |
-| 充电（SMB5） | **DT+驱动已写** | PM8150B `@1000` overlay；GPIO74 拉低放行 VBUS。未刷核验收 |
-| 充电泵 / 无线充 | **DT 已写** | BQ25970 ×2 走 GENI I2C SE15/SE16（PPS，不是 5 V 主路径）；P9418 无线充仍 i2c-gpio se8 |
-| 霍尔 / 音量键 | **DT 已写** | gpio-keys；未专项验收 |
-| 马达 | **DT 已写** | PMI632 LRA；未专项验收 |
-| 闪光灯 | **DT 已写** | pm8150l flash；脚本可点 torch |
-| 磁吸键盘 | **DT 已写** | Nanosic 走 GENI `&i2c2`（uart2 关）。gpio `kb_i2c_se2` 保持 disabled |
+| 双电芯电量 | **已通** | 双 BQ27Z561 走 GENI I2C SE0/SE13 + `xiaomi-dual-fg`。`#333` `bms` Battery SoC（桌面跟 bms）。gpio `fg_i2c_se0` / `fg_i2c_se13` 保持 disabled |
+| 充电（SMB5 5 V） | **已通** | `#333` `pm8150b-charger` `online=1` `status=Charging`，APSD=SDP，ICL **2 A**，`bms` 同步 Charging |
+| 充电泵 PPS | **DT 已写** | BQ25970 ×2 走 GENI I2C SE15/SE16。`#333` `online=0`（不是 5 V 主路径）。67W 未专项 |
+| 笔充 P9418 | **DT 已写** | Smart Pen 侧吸 TX，**不是平板 Qi**，仍 i2c-gpio se8。`#333` `p9418-pen` `online=0` |
+| 霍尔 | **已通** | gpio-keys `SW_LID` / `SW_TABLET_MODE`（`SW=3`）。不再注入 `dagu-tablet-mode.py` |
+| 音量键 | **部分** | PON `pm8941_resin`（音量下）已枚举；音量上 pm8150 gpio6 未在这次遥测看到独立节点 |
+| 马达 | **DT 已写** | `#333` `pm8xxx_vib_ffmemless` 已 probe；未专项震感 |
+| 闪光灯 | **DT 已写** | `white:flash` max=255；脚本可点 torch |
+| 磁吸键盘 | **已通** | Nanosic GENI `&i2c2` `2-004c`。`#335` `Xiaomi Keyboard` `0018:15D9:00A3` `ID_BUS=i2c`，MCU `XM2022-152-0721B`。点 Shift → `dagu-fcitx5-shift-tap`（禁止 keyd grab 15d9:00a3）。`0x22` 保活后 400ms 内的空 `0x05` 不注入（GENI 残渣假 KEY_UP） |
 | IMU / 光线传感器 | **有意关闭** | `&slpi` disabled，不在 AP I2C 上猜 |
-| 视频编解码 Venus | **软件已通（4K60 HEVC dmabuf）** | `#169`：1080p H.264 + **4K60 HEVC** `DMA_DRM`/`NV12` 上 Mutter，无 SMMU/SSR。日常播放器：`gst-play-1.0 --videosink=waylandsink`。mpv 仍是 `v4l2m2m-copy`。**禁止**开 SM8250 ICC。见 `linux-mainline/docs/dagu-venus.md` |
-| CDSP | **有意关闭** | `status = disabled` |
+| 视频编解码 Venus | **已通** | `/dev/video14` 解码 + `/dev/video15` 编码。1080p + **4K60 HEVC** `DMA_DRM`/`NV12` 上 Mutter。日常 `gst-play-1.0 --videosink=waylandsink`。mpv 仍 `v4l2m2m-copy`。**禁止**开 SM8250 ICC |
+| CDSP | **有意关闭** | `status = disabled`。`#333` 只有 ADSP `remoteproc0` |
 | 蓝牙音频 / 耳机口 | **未做** | 板子无 3.5mm；控制器已通，A2DP / 耳机听感未测 |
 | S2Idle | **电源键可唤醒** | `mem_sleep=[s2idle]`，`echo mem` 睡约 65 min，`success=1`。DPU UBWC、Venus 节点、ADSP 都在，无 hangcheck/SSR。远程无 RTC/USB 唤不醒。见 `linux-mainline/docs/dagu-audio-s2idle.md` |
 | RTC | **没有设备** | 无 `/dev/rtc*`，`rtcwake` 不可用。用户态时钟靠 NTP |
@@ -87,7 +91,7 @@
 
 | 项 | 证据 / 做法 |
 |----|-------------|
-| 内核 | Linux 7.0，`head.S` `primary_entry` 直接 `bl record_mmu_state` |
+| 内核 | Linux 7.0 `#333`，`head.S` `primary_entry` 直接 `bl record_mmu_state` |
 | 槽位 | `flash-boot.sh flash-b`：`dtbo_b` / `vbmeta_b` / `vendor_boot_b` / `boot_b` / `set_active b` |
 | USB 稳定 | `0525:a4a7` 保持到 t≥35s，未见兔子 |
 | UFS | 枚举后挂 userdata Ubuntu |
@@ -141,7 +145,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - Himax HX83121，QUP0 SE4 **GENI SPI FIFO**（gpio8–11 + IRQ39）。spi-gpio 节点 `himax_spi` 保持 disabled
 - 驱动：`linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c`
 - `&spi4` okay + per-SE `firmware-name` + `qcom,skip-wrapper-fw-init`；`&gpi_dma0` disabled；`CONFIG_SPI_QCOM_GENI=y`，**禁止** GPI DMA
-- 板上 #244：`geni_spi 990000.spi: dagu SPI FIFO proto=1 depth=16 width=32 fifo_if_dis=0 skip_wrap=1`。装固件前 proto=255（INVALID），装完是 SPI=1。`spi4.0` → himax-dagu，IRQ gpio39
+- 板上 #333：`geni_spi 990000.spi: dagu SPI FIFO proto=1 depth=16 width=32 fifo_if_dis=0 skip_wrap=1`。`spi4.0` → himax-dagu，`HX83121 1600x2560 irq 197`
 - IRQ 亲和：`dagu-himax-irq-affinity.service` 把 himax IRQ 持久绑到 CPU4–7（Gold）。不要跟 SoftISP 抢 CPU0。
 - Snapshot 开后置点不了：Himax 仍报点（背光会醒），mutter 被 12MP CPU SoftISP 饿死。默认关掉常驻 `dagu-camera-loopback` 双路 STREAMON；Viewfinder Bayer skip（后置 /4、前置 /2），StillCapture 仍全幅。SoftISP cpuset CPU0–3。板上推送：`linux-mainline/scripts/dagu-snapshot-touch-deploy.sh`。libcamera 源码：`dagu-libcamera-softisp.sh`。验收：预览实时且关窗口跟手。
 - 滑动断触：IRQ 线程里不要 `dev_info`（`ignore_loglevel` 会堵 fbcon/串口）；DT 用 `IRQ_TYPE_LEVEL_LOW`，坏帧（全 0xff）不当抬手
@@ -166,18 +170,15 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 - 喇叭 440 Hz → 麦克风 Goertzel 检出。推送：`linux-mainline/scripts/dagu-mic-deploy.sh`
 - 脚本：`linux-mainline/scripts/dagu-mic-route.sh`、`linux-mainline/scripts/dagu-av-test.sh`
 
-### CAMSS 后端（不含传感器 MIPI）
+### CAMSS 后端（RDI 已通；PIX 未合格）
 
-- CSID TPG 出过完整 1 帧：`/tmp/tpg.raw` 15618240 字节
-- 结论：VFE DMA / SMMU / CAMNOC 已通；卡在传感器 HS 进 CSID
-
----
-
-## 软件已通
+- CSID TPG 出过完整 1 帧：`/tmp/tpg.raw` 15618240 字节。传感器 RAW 也进得了 CSID（后置 `SGBRG10_1X10/4080x3060` 在 media 图上）
+- 结论：VFE **RDI** DMA / SMMU / CAMNOC 已通
+- `#333` IFE PIX：`msm_vfe1_pix` / `msm_vfe1_video3` 已实例化。`dagu-ife-pix-test.sh` STREAMON 12s 仍 **PIXEL PIPE OVERFLOW**，`/tmp/pix.nv12` 0 字节。产品预览继续 SoftISP。细账 `linux-mainline/docs/dagu-ife-pix-nv12-attempts.md`
 
 ### 扬声器（CS35L41 ×4）
 
-- 总线：QUP0 SE1/SE3 **GENI I2C**（per-SE IRAM + skip-wrapper）。gpio 位bang 节点 `amp_i2c_se1` / `amp_i2c_se3` 保持 disabled。KTZ SE11/SE9、电量 SE0/SE13、键盘 SE2、充电泵 SE15/SE16 同款 GENI；无线充 se8 仍 `i2c-gpio`
+- 总线：QUP0 SE1/SE3 **GENI I2C**（per-SE IRAM + skip-wrapper）。gpio 位bang 节点 `amp_i2c_se1` / `amp_i2c_se3` 保持 disabled。KTZ SE11/SE9、电量 SE0/SE13、键盘 SE2、充电泵 SE15/SE16 同款 GENI；笔充 se8（P9418 TX）仍 `i2c-gpio`
 - 播放：ADSP Q6 + `TERT_TDM_RX_0`，2ch S24_LE 48 kHz，CAF `TDM_MAX_SLOTS=4`
 - DAPM：四颗 `TL/TR/BL/BR Main AMP: On`；`speaker-test -l 3` 完整 3 轮 440 Hz
 - overlay：`linux-mainline/scripts/apply-overlays.sh` 里 TDM `bit_width` 保持 16/24（slot_width=32）；强行 32 会让 AFE `0x100ef` 返回 `ADSP_EBADPARAM`
@@ -190,24 +191,54 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
   - `linux-mainline/scripts/dagu-speaker-route.sh`
   - `linux-mainline/alsa/50-dagu-speaker.conf`（装到 `/etc/wireplumber/wireplumber.conf.d/`）
   - `linux-mainline/alsa/50-dagu-alsa-sink.conf`（装到 `/etc/pipewire/pipewire.conf.d/`）
-- **听感（对齐安卓，2026-09-12）**：安卓 `mixer_paths_overlay_static.xml` 走 CS35L41 **DSP Protection**（`PCM Source=DSP`、`AMP PCM Gain=18`、`Digital=0 dB`、`DRE=on`、`TL/TR/BL/BR-cs35l41-dsp1-spk-prot.bin`）。Linux 之前切成 ASP 直通，没有 Xiaomi 调音/DRC，所以再加大数字增益也和安卓差一截。`linux-mainline/scripts/dagu-speaker-route.sh` 现按安卓路径 preload 每颗功放的 prot.bin。
-- **拉满仍然很小声（2026-09-12）**：不是 GNOME 滑条，也不是再加数字增益。四颗 CS35L41 **在通路里**（DSP 已载 L81A Music prot.bin，`Analog PCM=18` `Digital PCM=0 dB`）。`-110` 是 PMD 关断超时，不是没上电。安卓 tinymix 里 Halo `CAL_SET_STATUS=2`；现网内核只写到 `CAL_STATUS=1`。主线没有 Fast Use Case mixer，`*-music.txt` 还没灌。控件名已对齐主线（`Analog PCM` 不是 `Analog PCM Volume`）。底稿 `linux-mainline/docs/dagu-deep-hardware-reclamation.md`。禁止 softvol。
-- **拉满仍然很小声（2026-09-15）**：通路、sink、Analog 18 / Digital 817、Fast Use Case music.txt 都在。主线 `cs35l41_pcm_hw_params` 把 `params_width`（S24_LE=24）写进 `ASP_WIDTH_RX`，而 Q6 TDM 是 **32-bit slot × 4**。安卓 CAF DAGU 是 `ASP_WIDTH=params_physical_width`（32）+ `RX_WL=24`。槽宽差 8 bit → MSB 空约 **-48 dB**。overlay 已按 CAF 拆开 slot/sample；Class-H tracking mixer 对齐安卓 `Enable=1` / `Target=0`。禁止 Digital PCM / softvol 补响。
+- **听感（#333）**：四颗都写上 Halo `CAL_SET_STATUS=2`（TL 9524 / TR 9632 / BL 9497 / BR 9696），Fast Use Case `TL/TR/BL/BR-music.txt` 已灌。mixer 读 `CAL_SET_STATUS` 字节 `0x00,0x00,0x00,0x02`。播放路径 `PCM Source=DSP`（空闲 mixer 可能仍显示 ASP，以 `dagu-speaker-route.sh` 为准）。禁止 softvol。
+- **已修：拉满很小声（2026-09-12 / 09-15）**：不是 GNOME 滑条。根因曾是 Halo 只写到 `CAL_STATUS=1`、以及 `ASP_WIDTH_RX` 用 sample width 24 而 Q6 TDM 是 **32-bit slot × 4**（MSB 空约 -48 dB）。overlay 已按 CAF 拆开 slot/sample；Class-H tracking 对齐安卓 `Enable=1` / `Target=0`。禁止 Digital PCM / softvol 补响。
 
 `&adsp` okay，固件 `qcom/sm8250/xiaomi/dagu/adsp.mbn`。需要 `CONFIG_QRTR_SMD=y`（不要 =m），否则 PDR/APR 起不来。
 
+### 双电芯电量
+
+- GENI I2C `&i2c0` / `&i2c13` + overlay `xiaomi-dual-fg.c`。设计 5000 mAh ×2
+- `#333`：`bms` `type=Battery` `status=Charging` `capacity=79` `voltage_now=4.151 V` `charge_full_design=10000000`。两颗 `bq27z561-*` 对 UPower 隐藏，桌面跟 `bms`
+- gpio `fg_i2c_se0` / `fg_i2c_se13` 保持 disabled
+
+### 充电（SMB5 5 V）
+
+- overlay `pm8150b-charger-dagu.c`；关 charger wdog、清 USBIN suspend。GPIO74 低电平放行 VBUS
+- `#333`：`pm8150b-charger` `online=1` `status=Charging`，`usb_type=SDP`，ICL **2 A**（不要 USB51 500 mA），`constant_charge_voltage=4.45 V`。`bms` 同步 Charging
+- 67W PPS 泵是另一条路径（见 DT 已写）
+
+### 霍尔
+
+- gpio-keys GPIO110 lid、GPIO121 tablet。`SW_LID` / `SW_TABLET_MODE`。活 DT `GPIO_ACTIVE_HIGH`
+- `#333`：`gpio-keys` `SW=3` 已枚举。不再注入 `dagu-tablet-mode.py`
+
+### 磁吸键盘
+
+- 产品路径 GENI `&i2c2` gpio115/116 @0x4c（uart2/spi2 disabled）。IRQ 83 / wakeup 46 / vdd 127 / reset 141 / sleep 155
+- `#335`：`nanosic-803-dagu 2-004c` MCU `XM2022-152-0721B`。HID `Xiaomi Keyboard` 15d9:00a3 BUS_I2C `Phys=2-004c`、udev `ID_BUS=i2c`
+- 安卓 HyperOS（`53dcc70`）按住 D：内核只有一次 `KEY_D` DOWN，无 `EV_REP`；MCU `_rawdata_` 是 `57..3905000007`（HID D）然后 `57..3922…` 保活，松手才 `3905000000`。InputFlinger / mutter 50 都按 KEY_DOWN 做 compositor 连发（Chrome/WPS 不吃内核 EV_REP）。Linux GENI 在 `0x22` 保活 IRQ 排空时会再读到残渣空 `0x05` → 假 KEY_UP。`#335`：`0x39` 只吃第一条；空 `0x05` 在同 IRQ 见过 vendor、或 vendor 后 400ms 内不注入
+- 点 Shift 切 fcitx5：`/usr/local/sbin/dagu-fcitx5-shift-tap`（**不** `EVIOCGRAB`）。keyd 独占 15d9:00a3 后 Wayland 第一键不连发，见 `linux-mainline/keyd/dagu.conf`
+- gpio `kb_i2c_se2` 保持 disabled。不要 okay `uart2`（会和键盘抢 SE2 MMIO）
+
+### Venus
+
+- `/dev/video14` `qcom-venus-decoder`，`/dev/video15` `qcom-venus-encoder`。`#333` 两节点都在
+- 1080p H.264/VP8/VP9/HEVC + **4K60 HEVC** `DMA_DRM`/`NV12` 上 Mutter。日常 `gst-play-1.0 --videosink=waylandsink`。mpv 仍 `v4l2m2m-copy`
+- **禁止**开 SM8250 ICC。见 `linux-mainline/docs/dagu-venus.md`
+
 ---
 
-## 部分（相机）
+## 部分（相机 ISP）
 
-目标仍是：后摄至少 1 帧 + 前摄至少 1 帧。CSID TPG 已证明 ISP 后端没问题。
+预览已通（SoftISP skip）。缺的是 Spectra **IFE PIX NV12**，不是「传感器还没出帧」。
 
 ### 后摄 Samsung s5kjn1（主摄 / csiphy1）
 
 | 项 | 现状 |
 |----|------|
 | 电源 / MCLK / 复位 / CCI | probe 成功，进 media 图。上电顺序 VIO → VANA → VDIG → MCLK → XSHUTDOWN |
-| 预览尺寸 | 4080×3060 GBRG 10-bit，fourcc `pGAA`，`/dev/video0` |
+| 预览尺寸 | 4080×3060 GBRG 10-bit，fourcc `pGAA`。`#333` RDI 节点是 `msm_vfe0_video0`（`/dev/video0`）；桌面预览走 loopback `/dev/video21`，不要把 `/dev/video3` 当后摄（那是 `msm_vfe0_video3` PIX） |
 | PHY | 安卓预览 **D-PHY 4-lane**（live CSIPHY `0x0800=0x02` / `0x0814=0xD5`，`0x0114=0x0300`）。CamX 4080 表的 C-PHY `0x0301` 会让 CSID/VFE 黑屏 |
 | DT | `bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>`（本树 = 4），`data-lanes = <1 2 3 4>`，`clock-lanes = <7>` |
 | CSIPHY | csiphy1 D-PHY settle `0x13`（安卓 dump）；不要用 C-PHY `0x12` 跑 4080 预览 |
@@ -230,7 +261,7 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 |----|------|
 | 地址 | CAF dtsi 写 `@0x1a`；这颗硅在 **0x10** 读到 chip id `0x0596` |
 | 驱动 | `linux-mainline/overlays/linux/drivers/media/i2c/imx596-dagu.c` |
-| 尺寸 | 2592×1952 BGGR 10-bit，fourcc `pBAA`，`/dev/video3` |
+| 尺寸 | 2592×1952 BGGR 10-bit，fourcc `pBAA`。桌面预览走 loopback `/dev/video20`。`#333` `/dev/video3` 是 `msm_vfe0_video3` PIX，不是前置 RDI |
 | PHY | **D-PHY** 4-lane，`bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>`（本树 = 4）。`0x0114=3` 在 group hold 释放后再写一次 |
 | CSIPHY | csiphy4 用 T_hs 公式（678.4 MHz），**不要**抄后摄 settle `0x13` |
 | SoftISP | 安卓预览是 IFE 1440×1080 全 FOV @30fps。Linux Viewfinder skip 2×2 → **1296×976** 全 FOV。`DebayerCpu::sizes()` 必须把 processed max 卡在 skip 尺寸，否则 PipeWire 1920×1080 会 skip 1×1 卡死 Snapshot。CSID SOT/EOT（bits 0–7）保持 mask，禁止 `0xffffffff` |
@@ -244,7 +275,15 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 - libcamera simple + Software ISP 出 NV12。WirePlumber **关掉** `monitor.libcamera`（Chrome 走 spa-libcamera 会把 12MP CPU demosaic 打在会话核上，mutter `DL replenish lagged` 卡死）。桌面相机只暴露 `v4l2loopback` `/dev/video20/21`。Python `dagu-camera-pw-source.py` 不再作为默认源
 - Snapshot「No Camera Found」：CAMSS 可变链路 `csiphyN→csid0` 在 `cam`/WP 被杀后仍 ENABLED，内核关 fd 不清。下一轮 `CameraManager` `EBUSY`，PipeWire 无 Video/Source。`dagu-camss-graph-reset.sh` 在 pipewire/wireplumber `ExecStartPre` 做 `media-ctl -r`。扬声器路由只 `try-restart pipewire`（WP `BindsTo`），禁止只重启 WP。soname 必须是 `libcamera-base.so.0.7` → `libcamera-base.so.0.7.0`，不能留 `.dagu` stub
 - Viewfinder 默认不是传感器 max：后置 4080→1020（4× skip）、前置 2592→1296（2× skip），FOV 靠 Bayer skip 不是中心裁切。拍照 StillCapture 仍全幅。`dagu-libcamera-softisp.sh`。`/etc/libcamera/configuration.yaml` `software_isp.threads=2`
-- `v4l2loopback` `/dev/video20` 前、`/dev/video21` 后。`dagu-camera-loopback-watch.service` 只在有人打开节点时 STREAMON。开机 **不要** 双路 SoftISP。不是 Spectra ISP
+- `v4l2loopback` `/dev/video20` 前、`/dev/video21` 后。`#333` watch 单元 enabled+active，空闲只 stamp YUYV 1280×720。开机 **不要** 双路 SoftISP。不是 Spectra ISP
+
+### IFE PIX（Linux 未合格）
+
+安卓 HyperOS 后置预览是 Titan 480 **IFE1 PIX** 1920×1080 UBWC，不是 SoftISP。Linux `#333` 已把 `vfe_ops_480` 接到 CLC+DISP WM4/5，实体 `msm_vfe1_pix` 在 media 图上。
+
+飞行门：**STREAMON ≥3 帧非零 NV12**。当前 `/tmp/pix.nv12` **0 字节**，`streamon_rc=124`，dmesg `dagu ife1 overflow` PIXEL PIPE。不要把 PIX 实体存在当成预览已通。
+
+细账：`linux-mainline/docs/dagu-camss-pix-audit.md`、`linux-mainline/docs/dagu-ife-pix-nv12-attempts.md`。禁止改后置 `0x0114`、禁止解 CSID SOT mask、禁止开 CDSP 来「补」IFE。
 
 ### SLPI
 
@@ -258,17 +297,13 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 
 | 外设 | 硬件 | 说明 |
 |------|------|------|
-| 双电芯 | BQ27Z561 ×2 + `xiaomi,dual-fuel-gauge` | GENI I2C `&i2c0` / `&i2c13`（per-SE IRAM + skip-wrapper）。overlay `linux-mainline/overlays/linux/drivers/power/supply/xiaomi-dual-fg.c`；设计 5000 mAh ×2 |
-| 充电（SMB5） | PM8150B `@1000` | overlay `linux-mainline/overlays/linux/drivers/power/supply/pm8150b-charger-dagu.c`；关 charger wdog、清 USBIN suspend。5 V 路径 ICL **2 A**（墙充常被 APSD 成 SDP，不要 USB51 500 mA）。AICL 仍可折叠。GPIO74 低电平放行 VBUS |
-| 充电泵 | BQ25970 ×2 | GENI I2C `&i2c15` / `&i2c16`（per-SE IRAM + skip-wrapper，`&qupv3_id_2` 只 okay AHB）。`bq2597x-dagu.c`；67W PPS，不是 5 V 主路径 |
-| 无线充探测 | P9418 | `p9418-dagu.c` |
-| 霍尔 | GPIO110 lid、GPIO121 tablet | `SW_LID` / `SW_TABLET_MODE`；folio 磁铁拉低 121，空闲应为平板。活 DT 用 `GPIO_ACTIVE_HIGH`。不再注入 `dagu-tablet-mode.py` |
-| 音量上 | pm8150 gpio6（elish-common） | |
-| 马达 | PM8150B `@c000` LRA | 主线 `qcom,pmi632-vib` |
-| 闪光灯 | pm8150l `@d300` | `echo 64 > /sys/class/leds/white:flash/brightness` |
+| 充电泵 PPS | BQ25970 ×2 | GENI I2C `&i2c15` / `&i2c16`（per-SE IRAM + skip-wrapper，`&qupv3_id_2` 只 okay AHB）。`#333` `bq25970-master/slave` `online=0`。67W 不是 5 V 主路径 |
+| 笔侧吸充电 | P9418 TX | Smart Pen 侧边线圈，**不是**机身 Qi。仍 i2c-gpio se8。`#333` `p9418-pen` `online=0` |
+| 音量上 | pm8150 gpio6（elish-common） | `#333` 只看到 PON `pm8941_resin`（音量下）。音量上未在这次遥测出现独立节点 |
+| 马达 | PM8150B `@c000` LRA | `#333` `pm8xxx_vib_ffmemless` 已 probe；未专项震感 |
+| 闪光灯 | pm8150l `@d300` | `white:flash` max=255。`echo 64 > /sys/class/leds/white:flash/brightness` |
 | USB OTG | `dr_mode=otg`，默认 peripheral | 切 host 会掉 g_serial，只能走 Wi‑Fi SSH；`usb_1_qmpphy` **disabled**。`pm8150b_typec` **okay**（充电 / PD），USB 图仍切断 |
 | USB3 / DP redriver | PS5169 overlay | 活 DT 未挂节点；`i2c17` 仍 disabled |
-| 磁吸键盘 MCU | nanosic overlay | 产品路径 GENI `&i2c2` gpio115/116 @0x4c（uart2/spi2 disabled）。IRQ 83 / wakeup 46 / vdd 127 / reset 141 / sleep 155。虚拟 HID 15d9:a3/a2/a1/a4。gpio `kb_i2c_se2` 保持 disabled |
 
 ---
 
@@ -288,24 +323,20 @@ PLL：CamX OP 19.2 MHz / 3 × `0xD4` = 1.3568 Gbps，DT `link-frequencies = 6784
 
 ## 未做 / 下一步
 
-优先级按用户目标（相机出帧）和「听得到喇叭」：
+预览、喇叭、5 V 充电、磁吸键盘 HID 已经不是「下一步」。剩下按飞行件优先级：
 
-1. **后摄出 ≥1 帧**：`v4l2-ctl` `/tmp/rear.raw` 约 15.6 MB。MCU `0x2400` 扫描已在驱动里；不要退回瞎猜的 C-PHY PLL
-2. **前摄出 ≥1 帧**：`0x0114` 在 group hold 后再写；csiphy4 不抄后摄 settle；`/tmp/front.raw` 约 6.3 MB
-3. **SoftISP / Snapshot**：`/dev/udmabuf` + libcamera NV12。Viewfinder skip/bin，禁止 12MP@30 CPU demosaic 喂预览。`dagu-libcamera-softisp.sh`。禁止 meson `-Dipmbs`
-4. **v4l2loopback**：`/dev/video20/21` 按需，`dagu-camera-loopback-watch.service`。不是 ISP
-5. **扬声器听感**：功放已醒，缺 Halo `CAL_SET_STATUS=2`（下次编核）和 Fast Use Case。见 `linux-mainline/docs/dagu-deep-hardware-reclamation.md`。禁止 softvol。`linux-mainline/scripts/dagu-av-test.sh`
-6. **充电验收**：插 5 V 砖后 `pm8150b-charger` `status=Charging`，`bms` `current_now` 为负（充电）；PD 砖看 TCPM log。67W 泵以后再接
-5. OTG host：Wi‑Fi SSH 下切 role，插 U 盘 / HID
-6. 霍尔、马达、torch 用 `dagu-periph-test.sh` 点一次
-7. 蓝牙音频（A2DP / 耳机）专项听感；控制器本身已通
-8. SLPI：固件签名确认后再开 IMU/ALS
-9. USB3 + DP + PS5169：先保证 HS gadget 不回退
-10. 磁吸键盘：活 DT 已挂 GENI `&i2c2`（skip-wrapper）。刷核后查 `Xiaomi Keyboard` / `Xiaomi Touch`，`nanosic-803` irq 上升。不要 okay `uart2`（会和键盘抢 SE2 MMIO）
-11. **S2Idle**：电源键唤醒已通一轮（65 min）。没有 RTC 时不要再远程 `echo mem`。日常桌面仍 mask systemd sleep（背光 HWEN）。底稿 `linux-mainline/docs/dagu-audio-s2idle.md`
-12. **Venus**：4K60 HEVC dmabuf + Overview 已通（`dagu-venus-4k-ecosystem`）。日常用 `gst-play-1.0 --videosink=waylandsink` / Totem。下一步若要烤电影级高码率 4K 或让 mpv 也零拷贝，再谈 FFmpeg `drm_prime`；不要开 ICC，不要 VA-API，不要 v4l2 request。底稿 `linux-mainline/docs/dagu-venus.md`
-13. Win11 ARM：独立于本表
-14. **Chrome 动态花屏 / Mineradio 白屏**：安卓 HWC+SYNC_FD 基线已抓。Linux 关 `PartialSwap`、开 `WaylandLinuxDrmSyncobj`，看门狗盯 fd/hangcheck。`linux-mainline/scripts/dagu-chrome-fence-probe.sh`、`linux-mainline/scripts/dagu-mineradio-watch.sh`
+1. **IFE PIX NV12**：`STREAMON` ≥3 帧非零。`#333` 仍 PIXEL PIPE OVERFLOW / 0 字节。不要退回 C-PHY，不要解 SOT mask。`dagu-ife-pix-nv12-attempts.md`
+2. **SoftISP 保持 skip**：后置 4×4、前置 2×2。禁止 12MP@30 CPU 预览，禁止 spa-libcamera，禁止 meson `-Dipmbs`
+3. **67W PPS 充电泵**：`bq25970-*` `#333` 仍 `online=0`。PD 砖看 TCPM log
+4. **OTG host**：Wi‑Fi SSH 下切 role，插 U 盘 / HID（会掉 g_serial）
+5. **音量上 / 马达 / torch**：`dagu-periph-test.sh` 点一次手感
+6. **蓝牙音频（A2DP）**：控制器已通，听感未测
+7. **SLPI**：PAS 验签 + 有 IIO 客户端再 okay IMU/ALS。不要在 AP I2C 上猜
+8. **USB3 + DP + PS5169**：先保证 HS gadget 不回退
+9. **S2Idle**：电源键唤醒已通（65 min）。没有 RTC 时不要再远程 `echo mem`。日常桌面仍 mask systemd sleep
+10. **Venus**：4K60 已通。下一步若要电影级高码率 4K 或 mpv 零拷贝，再谈 FFmpeg `drm_prime`；不要开 ICC
+11. **GPU hangcheck `00800005`** / 静置抽帧：能 recover，不是交付终点
+12. Win11 ARM：独立于本表
 
 验收命令备忘：
 
@@ -334,6 +365,7 @@ linux-mainline/scripts/dagu-periph-test.sh
 | 深水区排雷底稿 | `linux-mainline/docs/dagu-deep-hardware-reclamation.md` |
 | Chrome fence 探针 | `linux-mainline/scripts/dagu-chrome-fence-probe.sh` |
 | Mineradio 看门狗 | `linux-mainline/scripts/dagu-mineradio-watch.sh` |
+| IFE PIX 尝试与证伪 | `linux-mainline/docs/dagu-ife-pix-nv12-attempts.md` |
 | 安卓只提取 | `linux-mainline/scripts/dagu-android-extract.sh` |
 
 内核源码树 `linux-mainline/linux/` **不入库**；相机/音频对主线驱动的修改都在 `apply-overlays.sh` 里重放。

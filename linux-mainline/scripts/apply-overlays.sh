@@ -3880,6 +3880,14 @@ static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 
 	val |= format->data_type << RDI_CFG0_DATA_TYPE;
 	/* CSID pad 4 is PIX, not CSI VC 3. Sensor packets are VC 0. */
 	val |= 1 << IPP_PIX_STORE_EN;
+	/*
+	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736.
+	 * CAF IPP CFG0 EARLY_EOF_EN (RDI_CFG0 bit29) fires CSID EOF
+	 * before the last CSI line so CAMIF/WM can drain. Front
+	 * 2592×1952 only. Do not unmask SOT. Do not crop last again.
+	 */
+	if (input_format->width == 2592 && input_format->height == 1952)
+		val |= 1 << RDI_CFG0_EARLY_EOF_EN;
 	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
 
 	val = 2 << RDI_CFG1_TIMESTAMP_STB_SEL;
@@ -3887,7 +3895,10 @@ static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 
 
 	val = ((input_format->width - 1) << 16) | 0;
 	writel_relaxed(val, csid->base + CSID_IPP_HCROP);
-	val = ((input_format->height - 1) << 16) | 0;
+	if (input_format->width == 2592 && input_format->height == 1952)
+		val = (0x05bf << 16) | 0;
+	else
+		val = ((input_format->height - 1) << 16) | 0;
 	writel_relaxed(val, csid->base + CSID_IPP_VCROP);
 
 	writel_relaxed(1, csid->base + CSID_IPP_FRM_DROP_PERIOD);
@@ -3899,8 +3910,20 @@ static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 
 	writel_relaxed(1, csid->base + CSID_IPP_LINE_DROP_PERIOD);
 	writel_relaxed(0, csid->base + CSID_IPP_LINE_DROP_PATTERN);
 
-	writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
-		       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+	/*
+	 * #394 on #408: errrec=0x0 stuck, PIXEL PIPE OVERFLOW gone,
+	 * ipp_bp=False, second CAMIF SOF, still 4591616. IPP irq
+	 * bit17 is CAF CSID_PATH_OVERFLOW_RECOVERY "Overflow due to
+	 * back pressure". Extra CSID recover line was the overflow.
+	 * Keep front overflow_ctrl=0. Rear stays CAF 0x9. Do not
+	 * crop last. Do not retry EARLY_EOF / CAMIF EN pulse /
+	 * overflow buf_done.
+	 */
+	if (input_format->width == 2592 && input_format->height == 1952)
+		writel_relaxed(0, csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+	else
+		writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
+			       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
 
 	val = readl_relaxed(csid->base + CSID_IPP_CFG0);
 	if (enable)
@@ -3917,10 +3940,11 @@ static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 
 
 	if (enable)
 		dev_info(csid->camss->dev,
-			 "dagu csid ipp vc=%u decode=%u %ux%u cfg0=0x%x\n",
+			 "dagu csid ipp vc=%u decode=%u %ux%u cfg0=0x%x vcrop=0x%x\n",
 			 vc, format->decode_format,
 			 input_format->width, input_format->height,
-			 readl_relaxed(csid->base + CSID_IPP_CFG0));
+			 readl_relaxed(csid->base + CSID_IPP_CFG0),
+			 readl_relaxed(csid->base + CSID_IPP_VCROP));
 }
 
 '''
@@ -4183,6 +4207,33 @@ if "CSID_IPP_IRQ_STATUS" not in text:
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: IPP SOF/overflow IRQ")
 
+# #394: front IPP overflow_ctrl off (bit17 back-pressure recover-push).
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "Overflow due to back pressure" not in text:
+    old = '''	writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
+		       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+'''
+    new = '''	/*
+	 * #394 on #408: errrec=0x0 stuck, PIXEL PIPE OVERFLOW gone,
+	 * ipp_bp=False, second CAMIF SOF, still 4591616. IPP irq
+	 * bit17 is CAF CSID_PATH_OVERFLOW_RECOVERY "Overflow due to
+	 * back pressure". Extra CSID recover line was the overflow.
+	 * Keep front overflow_ctrl=0. Rear stays CAF 0x9. Do not
+	 * crop last. Do not retry EARLY_EOF / CAMIF EN pulse /
+	 * overflow buf_done.
+	 */
+	if (input_format->width == 2592 && input_format->height == 1952)
+		writel_relaxed(0, csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+	else
+		writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
+			       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: #394 IPP overflow_ctrl needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: #394 front IPP overflow_ctrl off")
+
 # Titan 480 IPP CFG0 bit2 is horizontal_bin_en. RDI TIMESTAMP_EN must
 # not be copied onto IPP — it 2×-bins 4080→2040 and overflows Demux.
 path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
@@ -4216,6 +4267,91 @@ if old in text:
     text = path.read_text()
 if "RDI_CFG0_TIMESTAMP_EN;\n	val |= 1 << RDI_CFG0_CROP_H_EN" in text:
     raise SystemExit(f"{path}: IPP CFG0 still sets RDI TIMESTAMP_EN (horizontal_bin)")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "RDI_CFG0_EARLY_EOF_EN" not in text:
+    old = '''	val |= 1 << IPP_PIX_STORE_EN;
+	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
+'''
+    new = '''	val |= 1 << IPP_PIX_STORE_EN;
+	/*
+	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736.
+	 * CAF IPP CFG0 EARLY_EOF_EN (RDI_CFG0 bit29) fires CSID EOF
+	 * before the last CSI line so CAMIF/WM can drain. Front
+	 * 2592×1952 only. Do not unmask SOT. Do not crop last again.
+	 */
+	if (input_format->width == 2592 && input_format->height == 1952)
+		val |= 1 << RDI_CFG0_EARLY_EOF_EN;
+	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
+'''
+    if old not in text:
+        raise SystemExit(f"{path}: #390 IPP EARLY_EOF needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: #390 front IPP EARLY_EOF_EN")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "IPP pix_store (CFG0 bit7)" not in text:
+    old = '''	val |= 1 << IPP_PIX_STORE_EN;
+	/*
+	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736
+'''
+    new = '''	/*
+	 * #396: #394 errrec=0 killed PIXEL PIPE OVERFLOW, still
+	 * 4591616 UV short 1984. CAF IPP pix_store (CFG0 bit7) holds
+	 * a CSI line for back-pressure. With overflow_ctrl off that
+	 * stored line never flushes into chroma WM. Front only; rear
+	 * DQBUF 3 frames keeps pix_store. Do not crop last. Do not
+	 * retry CAMIF EOF buf_done. Keep errrec=0.
+	 */
+	if (!(input_format->width == 2592 && input_format->height == 1952))
+		val |= 1 << IPP_PIX_STORE_EN;
+	/*
+	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736
+'''
+    if old not in text:
+        old = '''	val |= 1 << IPP_PIX_STORE_EN;
+	/*
+	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736.
+'''
+        new = new.replace('still line=736\n', 'still line=736.\n')
+    if old not in text:
+        raise SystemExit(f"{path}: #396 IPP pix_store needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: #396 front IPP pix_store off")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "clips chroma WM" not in text:
+    old = '''	/*
+	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736
+	 * 4591616. CAF IPP CFG0 EARLY_EOF_EN (RDI_CFG0 bit29) fires
+	 * CSID EOF before the last CSI line so CAMIF/WM can drain.
+	 * Front 2592×1952 only; rear already DQBUF 3 frames. Do not
+	 * unmask SOT. Do not crop last again.
+	 */
+	if (input_format->width == 2592 && input_format->height == 1952)
+		val |= 1 << RDI_CFG0_EARLY_EOF_EN;
+	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
+'''
+    new = '''	/*
+	 * #397: #396 pix_store=0 stuck on #410, still 4591616,
+	 * UV 659.145 lines (last_partial=336), Y 88-102 UV~132.5,
+	 * pix_store=False, early_eof=True cfg0=0xa02b2063. Overflow
+	 * is gone (#394 errrec=0). EARLY_EOF still fires CSID EOF
+	 * before the last CSI line and clips chroma WM. Front bit29
+	 * off. Rear never set it. Keep pix_store=0. Keep errrec=0.
+	 * Do not retry EARLY_EOF ON. Do not crop last.
+	 */
+	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
+'''
+    if old not in text:
+        old = old.replace('still line=736\n', 'still line=736.\n')
+    if old not in text:
+        raise SystemExit(f"{path}: #397 IPP EARLY_EOF off needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: #397 front IPP EARLY_EOF off")
 
 path = root / "drivers/media/platform/qcom/camss/camss-csid.c"
 text = path.read_text()
@@ -5270,24 +5406,162 @@ if "0x08c908c9" not in vfe480 or "0x000000ca" not in vfe480:
     raise SystemExit("camss-vfe-480.c: front Demux 0x3090 even 0xca/odd 0x9c missing")
 if "0x05fa0400" not in vfe480 or "0x0000082c" not in vfe480:
     raise SystemExit("camss-vfe-480.c: front Demosaic WB 0x3868 0x05fa0400 missing")
-if "0x077f0437" not in vfe480 or "0x00000101, 0x00000600, 0x077f0437" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: front Display Crop Y last 0x077f0437 missing")
-if "0x00000101, 0x00000600, 0x03bf021b, 0xc0200000" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #376 Crop C chroma dest 0x03bf021b missing")
+if "0x00000101, 0x00000600, 0x03bf021b, 0xc0200000" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #376 Crop C 0x03bf021b excluded (#392 still viol 19)")
 if "0x00000001, 0x00000600, 0x03bf021b" in vfe480:
     raise SystemExit("camss-vfe-480.c: #378 MNDS_C dest last 0x03bf021b excluded (#377 still viol 19)")
-if "0x00000001, 0x00000600, 0x077f0437, 0xc0400000,\n\t\t0x00000000, 0xc0400000, 0x00000000, 0x00000437" in vfe480:
-    raise SystemExit("camss-vfe-480.c: #378 MNDS_C must not stuff Crop unpacked last into V_STRIPE")
-if "0x00000001, 0x00000600, 0x077f0437, 0xc0400000,\n\t\t0x00000000, 0xc0400000, 0x00000000, 0x00000000" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #378 MNDS_C Display last + 2x phase + trailing zeros missing")
+if "0x00000001, 0x00000600, 0x077f0437" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #378-#380 dest last 0x077f0437 on MNDS excluded (still viol 19)")
+if "0x00000101, 0x00000600, 0x077f0437" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #381 Crop MODULE 0x101 last 0x077f0437 is IPE 1920, not live IFE 2304")
+if "0xc02b3333" in vfe480:
+    raise SystemExit("camss-vfe-480.c: invented MNDS Q21 0xc02b3333 excluded (#370)")
+if "0x00000001, 0x00000600, 0x08ff050f, 0xc023d82c" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #383 Crop Y dest last 0x08ff050f excluded (viol 14 crop=1)")
+if "0x00000001, 0x00000600, 0x047f0287, 0xc047b058" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #383 Crop C dest last 0x047f0287 excluded (viol 14 crop=1)")
+if "0x00000001, 0x00000600, 0x0a1f05bf, 0xc023d82c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #381 Crop Y live 0x0a1f05bf phase 0xc023d82c missing")
+if "0x00000001, 0x00000600, 0x0a1f05bf, 0xc047b058" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #381 Crop C live 0x0a1f05bf phase 0xc047b058 missing")
+if "0x00000001, 0x00000600, 0x0a1f05bf, 0xc0200000" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #381 MNDS Y last 0x0a1f05bf unity missing")
+if "0x00000001, 0x00000600, 0x0a1f05bf, 0xc0400000" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #381 MNDS_C last 0x0a1f05bf 2x @0x4e60 packing missing")
 if "0x0a1f0000, 0x03cf0000" in vfe480:
     raise SystemExit("camss-vfe-480.c: MID 0xa1f0000/0x3cf0000 is Linux keep-all; #350 overflow")
 if "0x003c01a3, 0x0000027f" not in vfe480:
     raise SystemExit("camss-vfe-480.c: live MID Y 0x4868 0x3c01a3 missing")
-if "0x00000437, 0x0000077f" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: front Display MID/POST 0x437/0x77f missing")
-if "0x000003cf, 0x00000a1f" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: front PRE RoundClamp 0x3cf/0xa1f missing")
+if "0x00000437, 0x0000077f" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #381 MID 0x437/0x77f is IPE 1920; #395 still viol 0 on 2304 WM")
+if "0x00000527, 0x0000090f" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #386 MID/POST dest 2320×1320 0x527/0x90f missing")
+if "0x00000293, 0x00000487" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #386 MID/POST chroma 1160×660 0x293/0x487 missing")
+if "0x0000050f, 0x000008ff" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #384 2304 RC with 2320 WM falsified (img=0x30); use 0x527/0x90f")
+if "camif_last_y = (0x05bf + 1) / 2 - 1" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #385 CAMIF last 735 falsified (overflow still line=976)")
+if "#384 2320 WM" not in vfe480 or "falsified" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #384 2320 WM falsified (img=0x30 as0=0) must stay in comment")
+pix_test = (root.parent / "scripts/dagu-ife-pix-test.sh").read_text()
+if "pix_wh = '2304x1296'" in pix_test:
+    raise SystemExit("dagu-ife-pix-test.sh: #386 RC+WM 2320×1320; front must not stay 2304")
+if "pix_wh = '2320x1320'" not in pix_test:
+    raise SystemExit("dagu-ife-pix-test.sh: front Display 2320x1320 missing")
+if "early_eof=" not in pix_test:
+    raise SystemExit("dagu-ife-pix-test.sh: #390 IPP EARLY_EOF bit29 probe missing")
+if "ovf_recover" not in pix_test:
+    raise SystemExit("dagu-ife-pix-test.sh: #391 ovf recover probe missing")
+if "0x00000287, 0x0000047f" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #386 chroma dest must be 0x293/0x487 not 2304 0x287/0x47f")
+csidgen = (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text()
+if "0x05bf << 16" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #387 front IPP VCROP last 0x05bf (live Crop last Y) missing")
+if "input_format->width == 2592 && input_format->height == 1952" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #387 front 2592x1952 IPP VCROP gate missing")
+if "vcrop=0x%x" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #387 IPP VCROP dump missing")
+if "camif_last_y = (0x05bf + 1) / 2 - 1" in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #385 CAMIF last 735 was VFE; do not put it on CSID")
+if "0x000002df, 0x00000a1f" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #388 PRE 2ppc last 735 0x2df (CSID 0x05bf) missing")
+if "0x000003cf, 0x00000a1f" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #388 PRE 0x3cf is keep-all 976; CSID now feeds 736")
+if "pipe_h = (0x05bf + 1) / 2" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #388 front pipe_h 736 from CSID VCROP 0x05bf missing")
+if "epoch = (0x05bf + 1) / 4" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #389 front CAMIF epoch pixel_h/4 of CSID 1472 missing")
+if "Epoch is not" not in vfe480 or "the EOF drain" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #389 epoch 368 still line=736 must stay falsified")
+if "EARLY_EOF_EN cfg0=0xa02b20e3" not in vfe480 or "falsified" not in vfe480.split("EARLY_EOF_EN cfg0=0xa02b20e3", 1)[-1][:200]:
+    raise SystemExit("camss-vfe-480.c: #390 EARLY_EOF still line=736 must stay falsified")
+if "EARLY_EOF=0 on #411" not in vfe480 or "falsified" not in vfe480.split("EARLY_EOF=0 on #411", 1)[-1][:120]:
+    raise SystemExit("camss-vfe-480.c: #397 EARLY_EOF=0 still 4591616 must stay falsified")
+if "Do not retry WM5 2304" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #398 WM5 width 2304 img=0x20 0-byte must stay falsified")
+if "cw = 2304" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #398 WM5 2304 must stay reverted")
+if "CAF skips burst_limit when CamX value is 0" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #399 front WM5 burst_limit 0 missing")
+if "plain && wm == DISP_C_WM && width == 2320 && height == 660" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #399 WM5 burst_limit 0 must stay gated to front 2320x660")
+if "burst_limit 0 on #414 burst5=0x0 stuck" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #399 burst_limit 0 still 4591616 must stay falsified")
+if "cin -= 1984" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #400 FRAME_INCR 1984 must stay reverted")
+if "incr5=0x175580 still 4591616" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #400 FRAME_INCR 1984 still 4591616 must stay falsified")
+if "Do not retry FRAME_INCR 1984" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #400 must not retry FRAME_INCR 1984")
+if "ch = 659" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #401 WM5 height 659 must stay reverted")
+if "Do not retry height 659" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #401 height 659 img=0x20 must stay falsified")
+if "Do not retry front packer 3" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #402 front packer 3 UV avg 19 must stay falsified")
+if "wm == DISP_C_WM && width == 2320 && height == 660)\n\t\t\twritel_relaxed(PACKER_PLAIN_8_LSB_MSB_10" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #402 front WM5 packer 3 must stay reverted")
+if "0x0293016f" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #403 front MNDS_C V_SIZE 0x0293016f missing")
+if "CLC_MNDS_C + MNDS_V_SIZE" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #403 MNDS_C V_SIZE write missing")
+if "vsz=0x293016f still 4591616" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #403 V_SIZE still 4591616 must stay falsified")
+if "0x02930000" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #404 front MNDS_C V_STRIPE 0x02930000 missing")
+if "CLC_MNDS_C + MNDS_V_STRIPE" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #404 MNDS_C V_STRIPE write missing")
+if "Do not retry burst as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #399 must not retry burst as the chroma gap")
+if "PIXEL PIPE is TOP" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #391 bus=0 TOP overflow must stay falsified")
+if "CAMIF EN pulse" not in vfe480 or "camif=0x2000101" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #392 CAMIF EN pulse still 4591616 must stay falsified")
+if "camif & ~CAMIF_EN" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #392 CAMIF EN pulse must not retry")
+if "9183232" not in vfe480 or "overflow buf_done" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #393 overflow buf_done 9183232 chunk1 zeros must stay falsified")
+isr_ovf = vfe480.split("static irqreturn_t vfe_isr", 1)[-1]
+ovf_blk = isr_ovf.split("IRQ_MASK_0_PIX_OVERFLOW", 1)[-1].split("IRQ_MASK_0_RESET_ACK", 1)[0]
+if "vfe_buf_done(vfe, DISP_Y_WM)" in ovf_blk:
+    raise SystemExit("camss-vfe-480.c: #393 must not retry overflow buf_done")
+if "ovf recover irq0=" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: overflow recover log missing")
+if "VFE_BUS_OVERFLOW_STATUS_CLEAR);\n\t\twmb();" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #391 must clear BUS overflow latch before dump")
+isr = vfe480.split("static irqreturn_t vfe_isr", 1)[-1]
+clr = isr.find("VFE_BUS_OVERFLOW_STATUS_CLEAR")
+dump = isr.find("PIXEL PIPE OVERFLOW irq0")
+bus = isr.find("IRQ_MASK_0_BUS_TOP_IRQ")
+if clr < 0 or dump < 0 or bus < 0 or not (clr < bus < dump):
+    raise SystemExit("camss-vfe-480.c: #391 must clear overflow and handle BUS_TOP before dump")
+if "RDI_CFG0_EARLY_EOF_EN" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: RDI_CFG0_EARLY_EOF_EN define missing")
+if "2592 && input_format->height == 1952)\n\t\tval |= 1 << RDI_CFG0_EARLY_EOF_EN" in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #397 must not set EARLY_EOF on front (#410 still 4591616)")
+if "clips chroma WM" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #397 front EARLY_EOF off comment missing")
+if "Overflow due to back pressure" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #394 IPP bit17 back-pressure comment missing")
+if "writel_relaxed(0, csid->base + CSID_IPP_ERR_RECOVERY_CFG0)" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #394 front must disable IPP overflow_ctrl")
+if "ipp_errrec=" not in pix_test:
+    raise SystemExit("dagu-ife-pix-test.sh: #394 IPP errrec probe missing")
+if "ipp_bp=" not in pix_test:
+    raise SystemExit("dagu-ife-pix-test.sh: #394 IPP bit17 back-pressure probe missing")
+if "eof buf_done irq1=" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #395 CAMIF EOF buf_done 9183232 chunk1 zeros must not retry")
+if "Do not retry CAMIF EOF" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #395 CAMIF EOF buf_done must stay falsified")
+if "Keep front overflow_ctrl=0" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #394 errrec=0 on #408 must stay (overflow gone)")
+if "IPP pix_store (CFG0 bit7)" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #396 front must drop IPP pix_store")
+if "if (!(input_format->width == 2592 && input_format->height == 1952))\n\t\tval |= 1 << IPP_PIX_STORE_EN" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #396 PIX_STORE must stay on rear, off front")
+if "pix_store=" not in pix_test:
+    raise SystemExit("dagu-ife-pix-test.sh: #396 pix_store probe missing")
 if "in_w == 2592 && in_h == 1952" not in vfe480:
     raise SystemExit("camss-vfe-480.c: front 2592x1952 live Crop gate missing")
 if "0x09016c7d" not in vfe480:

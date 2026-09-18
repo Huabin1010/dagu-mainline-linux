@@ -379,7 +379,7 @@ CAMIF 在出 4080×1530。**不是卡死点。**
 
 - 能解释为什么 `#338` 的 CAMIF 满计数却 packer 无 valid
 - 空 IQ 不会变成 line-0 / EPIPE
-- 占 `linux-mainline/tmp/kernel-build/lock` 编核，只刷 B，`g_serial>30s`
+- 只刷 B，`g_serial>30s`
 
 候选（未作为完整程序证伪，不是「先试这个」的承诺）：
 

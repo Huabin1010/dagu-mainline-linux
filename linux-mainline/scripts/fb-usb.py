@@ -231,7 +231,13 @@ class Fastboot:
 		print("OKAY")
 
 	def reboot(self) -> None:
-		self.cmd("reboot")
+		# ABL drops USB and never sends OKAY. Waiting on bulk IN hangs
+		# the host at "Rebooting" while the tablet is already 18d1:d00d
+		# or already jumping. 2s is enough to fire the command.
+		try:
+			self.cmd("reboot", timeout=2000)
+		except Exception:
+			pass
 		print("rebooting")
 
 

@@ -1156,68 +1156,58 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		0x00000000,
 	};
 	/*
-	 * Camera ID 1 heap Display Full (2026-09-17 19:37, provider
-	 * 77e906a000+e7b198): Crop Y/C last 0x077f0437 = 1919×1079,
-	 * MODULE 0x101, phase unity 0xc0200000, unpacked last 0x437/
-	 * 0x77f in words 7-8. 1MB CDM 640 list put 0xc081999a at
-	 * 0x4460 and unity at 0x4c60. Display analog: Crop is the
-	 * 1920 window. Historical MNDS last 0x0a1f079f + unity is
-	 * the 2592 sensor pair, not Display Full.
-	 * #370 invented MNDS Q21 0xc02b3333 (not in this heap) and
-	 * still overflowed. Do not put 4.05 at 0x4c60 while WM is
-	 * 1920×1080.
-	 * #372 Crop 0x077f0437 + MNDS still 0x0a1f079f: MNDS waited
-	 * on 2592 after Crop already windowed to 1920 (packer 0x2aa,
-	 * still overflow). Display Full heap uses 0x077f0437 on the
-	 * Crop pair; MNDS must see the same 1920 last. MID/POST
-	 * 0x1df/0x27f is the 640 CDM — Display uses unpacked
-	 * 0x437/0x77f.
+	 * Camera ID 1 live 2026-09-17 23:16, Device 1, provider 14720:
+	 * CamX Display full path is 2304×1296, Applied [0,7,2592,1458],
+	 * MNDS output 2314×1314. IPE then zooms [192,108,1920,1080]
+	 * on that 2304 buffer. 1MB CDM is still the 640 list
+	 * (0x0a1f079f / 0xc081999a). Heap MODULE=1 last 0x0a1f05bf =
+	 * 2592×1472 with Q21 0xc023d82c = 2592/2314 (not the invented
+	 * 2592/1920 Q21, not dest last 1920×1080). MODULE 0x101 last
+	 * 0x077f0437 is the IPE 1920 object; #378–#380 programmed it
+	 * onto IFE MNDS_C and stayed viol 19. 640 CDM packs Crop as
+	 * MODULE=1 + scale phase @0x4460/0x4660 and MNDS as same last
+	 * + Y unity / C 0xc0400000 @0x4c60/0x4e60. #381 uses that
+	 * packing on the live 0x0a1f05bf blobs. #382 MID/POST 0x50f/0x8ff
+	 * on 2304 WM wrote the first non-zero front NV12 (Y 91–147,
+	 * UV 125–140, 2048 bytes short of 1 frame) then viol_id=0 at
+	 * CAMIF last line. #383 Crop dest last 0x08ff050f / 0x047f0287
+	 * stuck, still 4476928 bytes, but viol_id=14 and clcstat
+	 * crop=1 — dest last on Crop is falsified. #384 WM/V4L2
+	 * 2320×1320 pad (16-aligned around CamX MNDS 2314×1314)
+	 * stuck on #398 when RC stayed 2304: IMAGE_CFG 0x5280910,
+	 * img=0x30, as0=0, 0-byte. #386 RC+WM both 2320 on #400:
+	 * mid_y=0x527/0x90f, wm4=0x5280910, img=0x0, as0 consumed,
+	 * 4591616 (need 4593600, UV short 1984), Y 87–101 UV~128.
+	 * Still viol_id=0 line=976. #384 2320 WM falsified only
+	 * when RC stayed 2304 (img=0x30). Do not dest last on
+	 * MNDS_C (viol 19). Do not copy 0xfef0bf3.
 	 */
 	static const u32 front_crop_y[] = {
-		0x00000101, 0x00000600, 0x077f0437, 0xc0200000,
-		0x00000000, 0xc0200000, 0x00000000, 0x00000437,
-		0x0000077f,
+		0x00000001, 0x00000600, 0x0a1f05bf, 0xc023d82c,
+		0x00000000, 0xc023d909, 0x00000000, 0x00000000,
+		0x00000000,
 	};
 	static const u32 front_crop_c[] = {
-		0x00000101, 0x00000600, 0x03bf021b, 0xc0200000,
-		0x00000000, 0xc0200000, 0x00000000, 0x0000021b,
-		0x000003bf,
+		0x00000001, 0x00000600, 0x0a1f05bf, 0xc047b058,
+		0x00000000, 0xc047b212, 0x00000000, 0x00000000,
+		0x00000000,
 	};
 	/*
-	 * MNDS MODULE stays 1 like rear live CDM / #376 dump cfg=0x1.
-	 * Crop 0x101 is interp on the window; do not copy that bit
-	 * onto MNDS. Last/stripe must be the 1920 Display pair so
-	 * MNDS does not wait on 2592 after Crop already windowed.
-	 * #373 copied Crop C phase 0xc0400000 onto MNDS_C: viol_id=19
-	 * MNDS_C (clcstat mnds=1, packer 0x22a). Rear C phase is 2×
-	 * only when last is INPUT. Dest last + identity is 0xc0200000
-	 * on Y.
-	 * #375 MNDS_C last 0x03bf021b stuck, still viol 19: Crop C
-	 * still luma 0x077f0437 so chroma entered MNDS at 1920.
-	 * #376 Crop C dest 960×540 identity, matching MID_C / MNDS_C.
-	 * Heap Display Crop C kept luma last — that packing overflowed
-	 * Linux MNDS_C. Do not copy 0xfef0bf3.
-	 * #387 STREAMON: crop_c last 0x03bf021b stuck, still viol 19
-	 * packer 0x22a as0=0. mnds_c vph=0x21b vst=0x3bf — Crop
-	 * unpacked last stuffed into MNDS V_PHASE/V_STRIPE.
-	 * Front 1MB CDM Camera ID 1 @0x4c60/@0x4e60 n=9 ends 0,0,0
-	 * (sensor last 0x0a1f079f, MNDS Y unity / C 0xc0400000).
-	 * Rear live MNDS same trailing zeros. #377 keep dest last,
-	 * zero V words: #390 vph=0 vst=0 stuck, still viol 19.
-	 * Front 1MB CDM @0x4e60 is last=Crop-domain + phase 0xc0400000
-	 * + trailing zeros, not dest last identity. #373 copied 2×
-	 * phase with Crop unpacked V_STRIPE. #378 MNDS_C last
-	 * 0x077f0437 (Display Crop Y) phase 0xc0400000 H_PAD same,
-	 * trailing zeros. Do not invent 0xc02b3333. Do not copy
-	 * 0xfef0bf3. Do not stuff unpacked last into V_STRIPE.
+	 * MNDS MODULE stays 1. Last is the live 0x0a1f05bf INPUT pair
+	 * so MNDS does not wait on 1952 after Crop already windowed
+	 * to 1472. Y unity / C 2× + trailing zeros is the 640 CDM
+	 * @0x4c60/@0x4e60 packing, not Crop C 0xc047b058 (#373).
+	 * Dest last 0x077f0437 identity (#380) and 2× (#378) both
+	 * stuck viol 19. Do not invent 2592/1920 Q21. Do not copy
+	 * 0xfef0bf3. Do not stuff unpacked last into MNDS V_STRIPE.
 	 */
 	static const u32 front_mnds_y[] = {
-		0x00000001, 0x00000600, 0x077f0437, 0xc0200000,
+		0x00000001, 0x00000600, 0x0a1f05bf, 0xc0200000,
 		0x00000000, 0xc0200000, 0x00000000, 0x00000000,
 		0x00000000,
 	};
 	static const u32 front_mnds_c[] = {
-		0x00000001, 0x00000600, 0x077f0437, 0xc0400000,
+		0x00000001, 0x00000600, 0x0a1f05bf, 0xc0400000,
 		0x00000000, 0xc0400000, 0x00000000, 0x00000000,
 		0x00000000,
 	};
@@ -1245,29 +1235,51 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 	vfe_480_pack(vfe, CLC_CROP_C + CLC_MODULE_CFG, crop_c, 9);
 	vfe_480_pack(vfe, CLC_MNDS_Y + CLC_MODULE_CFG, mnds_y, 9);
 	vfe_480_pack(vfe, CLC_MNDS_C + CLC_MODULE_CFG, mnds_c, 9);
+	/*
+	 * #403 front MNDS_C V_SIZE 0x0293016f after 640 pack
+	 * zeros vsz. vfe_480_mnds already wrote
+	 * ((660-1)<<16)|((736/2)-1) then pack stomped it. Same
+	 * 2ppc chroma in as pipe_h/2, same 660 out as WM5/RC
+	 * last 0x293. #418 vsz=0x293016f still 4591616 — not
+	 * the chroma gap. Keep. #404 V_STRIPE 0x02930000 =
+	 * (660-1)<<16. Do not dest last.
+	 * Do not retry front packer 3. Do not retry height 659.
+	 * Do not retry FRAME_INCR 1984. Do not retry WM5 2304.
+	 */
+	if (in_w == 2592 && in_h == 1952) {
+		writel_relaxed(0x0293016f,
+			       vfe->base + CLC_MNDS_C + MNDS_V_SIZE);
+		writel_relaxed(0x02930000,
+			       vfe->base + CLC_MNDS_C + MNDS_V_STRIPE);
+	}
 
 	/*
-	 * CamX RoundClamp11 CalculateHWSetting @0x52b168 packs
-	 * 14-bit (first<<16)|last, not Linux keep-all (last<<16)|0.
-	 * Rear live CDM 0x4868=0x3c01a3. Front Display 1920 uses
-	 * unpacked last_y/last_x like Crop words 7-8: 0x437/0x77f.
-	 * 1MB CDM 0x1df/0x27f is 640. PRE stays CamX keep-all on
-	 * 2592×976 2ppc (0x3cf/0xa1f). Do not copy 0xfef0bf3.
+	 * CamX RoundClamp11 0x68 is unpacked last_y, last_x (front
+	 * 1MB CDM 0x4868=0x1df/0x27f = 480×640 dest). Not Linux
+	 * keep-all (last<<16)|0 (#350 overflow). Rear 0x4868 is
+	 * 14-bit 0x3c01a3. Camera ID 1 live Display Full is
+	 * 2304×1296, MNDS 2314×1314. #382 MID 0x50f/0x8ff on 2304
+	 * WM wrote 1 truncated NV12. #384 WM 2320 with 2304 dest:
+	 * img=0x30 as0=0. #386 RC+WM 2320 on #400: 4591616 short
+	 * 1984, img=0x0, still line=976. Keep MID/POST/OUT
+	 * 2320×1320 (0x527/0x90f, chroma 0x293/0x487). PRE is
+	 * CSID 2ppc last 735 0x2df/0xa1f (#388). Do not dest last
+	 * on Crop. Do not copy 0xfef0bf3. Do not invent Q21.
 	 */
 	if (in_w == 2592 && in_h == 1952) {
 		vfe_480_clc_enable(vfe, CLC_RNDCLAMP, RNDCLAMP_MODULE_CFG);
 		vfe_480_pack(vfe, CLC_RNDCLAMP + 0x68,
-			     (const u32[]){ 0x000003cf, 0x00000a1f }, 2);
+			     (const u32[]){ 0x000002df, 0x00000a1f }, 2);
 		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_Y, 0x0e01);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x68,
-			     (const u32[]){ 0x00000437, 0x0000077f }, 2);
+			     (const u32[]){ 0x00000527, 0x0000090f }, 2);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x70,
 			     (const u32[]){ 0x00ff0000, 0x16, 0x00ff0000, 0x16,
 					    0, 0 },
 			     6);
 		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_C, 0x3e01);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_C + 0x68,
-			     (const u32[]){ 0x0000021b, 0x000003bf }, 2);
+			     (const u32[]){ 0x00000293, 0x00000487 }, 2);
 	} else {
 		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_Y, 0x0e01);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x68,
@@ -1293,25 +1305,25 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 	if (in_w == 2592 && in_h == 1952) {
 		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_POST_Y, 0x0e01);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_Y + 0x68,
-			     (const u32[]){ 0x00000437, 0x0000077f }, 2);
+			     (const u32[]){ 0x00000527, 0x0000090f }, 2);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_Y + 0x70,
 			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
 			     6);
 		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_POST_C, 0x3e01);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_C + 0x68,
-			     (const u32[]){ 0x0000021b, 0x000003bf }, 2);
+			     (const u32[]){ 0x00000293, 0x00000487 }, 2);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_POST_C + 0x70,
 			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
 			     6);
 		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_OUT_Y, 0x0e01);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_Y + 0x68,
-			     (const u32[]){ 0x00000437, 0x0000077f }, 2);
+			     (const u32[]){ 0x00000527, 0x0000090f }, 2);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_Y + 0x70,
 			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
 			     6);
 		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_OUT_C, 0x3e01);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_C + 0x68,
-			     (const u32[]){ 0x0000021b, 0x000003bf }, 2);
+			     (const u32[]){ 0x00000293, 0x00000487 }, 2);
 		vfe_480_pack(vfe, CLC_RNDCLAMP_OUT_C + 0x70,
 			     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 },
 			     6);
@@ -1503,6 +1515,15 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 	pipe_h = in_h / 2;
 	if (!pipe_h)
 		pipe_h = in_h;
+	/*
+	 * #387 CSID IPP VCROP last 0x05bf feeds 1472 pixel / 736
+	 * 2ppc lines. Overflow moved 976→736. CAMIF/PRE still used
+	 * in_h/2=976 (last 975 never arrives). #388 pipe_h is the
+	 * CSID window in 2ppc. Do not retry #385 CAMIF 735 while
+	 * CSID still sent 976.
+	 */
+	if (in_w == 2592 && in_h == 1952)
+		pipe_h = (0x05bf + 1) / 2;
 
 	/* Ungate CLC / NOC so demux→demosaic→MNDS actually clocks. */
 	writel_relaxed(0xffffffff, vfe->base + VFE_CORE_CGC_OVD_0);
@@ -1626,6 +1647,11 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 	 */
 	writel_relaxed(0, vfe->base + CAMIF_SPARE);
 	writel_relaxed(((in_w - 1) << 16) | 0, vfe->base + CAMIF_CROP_WIDTH);
+	/*
+	 * #385 CAMIF last 735 with CSID keep-all 1951: overflow still
+	 * line=976. #387 CSID last 0x05bf moved overflow to 736.
+	 * #388 pipe_h=(0x05bf+1)/2 so last=735 matches that feed.
+	 */
 	writel_relaxed(((pipe_h - 1) << 16) | 0, vfe->base + CAMIF_CROP_HEIGHT);
 	/* Titan 170 keep-all: 1-bits in skip pattern, period 1, IRQ every frame. */
 	writel_relaxed(0xffffffff, vfe->base + CAMIF_LINE_SKIP);
@@ -1634,6 +1660,33 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 	writel_relaxed(0xffffffff, vfe->base + CAMIF_IRQ_SUBSAMPLE);
 
 	epoch = in_h / 4;
+	/*
+	 * CAF epoch = pixel_h/4 mid of the 2ppc debug counter.
+	 * in_h/4=488 is 66% of CSID 736 (#387). #389 used the
+	 * live Crop last window 1472: epoch=0x140170 stuck on
+	 * #403, still viol_id=0 line=736 4591616. Epoch is not
+	 * the EOF drain. #390 CSID IPP EARLY_EOF_EN cfg0=0xa02b20e3
+	 * stuck on #404, still line=736 4591616 — falsified.
+	 * #396 pix_store=0 on #410 still 4591616 with bit29 on.
+	 * #397 EARLY_EOF=0 on #411 cfg0=0x802b2063 still 4591616
+	 * UV 659.145 — falsified. #398 WM5 width 2304 on #412
+	 * img=0x20 as0 C=0 0 bytes — falsified, reverted. #399
+	 * burst_limit 0 on #414 burst5=0x0 stuck, still 4591616
+	 * — falsified. #400 FRAME_INCR 2320*660-1984 on #415
+	 * incr5=0x175580 still 4591616 — falsified, reverted.
+	 * #401 height 659 on #416 wm5=0x2930910 img=0x20 still
+	 * 4591616 — falsified, reverted. Do not invent Q21.
+	 * Do not crop last again.
+	 * Do not retry EARLY_EOF bit29. Do not retry WM5 2304.
+	 * Do not retry burst as the chroma gap.
+	 * Do not retry FRAME_INCR 1984. Do not retry height 659.
+	 * #402 packer 3 on #417 UV avg 19.3 — falsified, reverted.
+	 * Do not retry front packer 3. #403 MNDS_C V_SIZE 0x0293016f
+	 * on #418 vsz=0x293016f still 4591616 — not the chroma gap.
+	 * #404 V_STRIPE 0x02930000.
+	 */
+	if (in_w == 2592 && in_h == 1952)
+		epoch = (0x05bf + 1) / 4;
 	writel_relaxed((0x14 << 16) | epoch, vfe->base + CLC_CAMIF_EPOCH);
 	/*
 	 * CAF starts CAMIF last, after CDM IMAGE_ADDR and start_wm EN.
@@ -1644,7 +1697,7 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 	 */
 
 	dev_info(vfe->camss->dev,
-		 "dagu ife%d pix clc in %ux%u pipe_h=%u out %ux%u core=0x%x camif=0x%x crop=0x%x/0x%x pdpc=0x%x/0x%x ped=0x%x lin=0x%x gtm=0x%x wb=0x%x gamma=0x%x demux=0x%x/0x%x/0x%x/0x%x abf=0x%x gic=0x%x demosaic=0x%x/0x%x cc=0x%x/0x%x/0x%x/0x%x\n",
+		 "dagu ife%d pix clc in %ux%u pipe_h=%u out %ux%u core=0x%x camif=0x%x crop=0x%x/0x%x pdpc=0x%x/0x%x ped=0x%x lin=0x%x gtm=0x%x wb=0x%x gamma=0x%x demux=0x%x/0x%x/0x%x/0x%x abf=0x%x gic=0x%x demosaic=0x%x/0x%x cc=0x%x/0x%x/0x%x/0x%x epoch=0x%x\n",
 		 vfe->id, in_w, in_h, pipe_h, out_w, out_h,
 		 readl_relaxed(vfe->base + VFE_CORE_CFG_0),
 		 readl_relaxed(vfe->base + CLC_CAMIF + CLC_MODULE_CFG),
@@ -1668,7 +1721,8 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 		 readl_relaxed(vfe->base + CLC_CC + CLC_MODULE_CFG),
 		 readl_relaxed(vfe->base + CLC_CC + CLC_CC_SPARE),
 		 readl_relaxed(vfe->base + CLC_CC + CLC_CC_MATRIX),
-		 readl_relaxed(vfe->base + CLC_CC + CLC_CC_MATRIX + 16));
+		 readl_relaxed(vfe->base + CLC_CC + CLC_CC_MATRIX + 16),
+		 readl_relaxed(vfe->base + CLC_CAMIF_EPOCH));
 	dev_info(vfe->camss->dev,
 		 "dagu ife%d pix bls cfg=0x%x px=0x%x ln=0x%x dmi=0x%x\n",
 		 vfe->id,
@@ -1798,7 +1852,19 @@ static void vfe_480_wm_config(struct vfe_device *vfe, u8 wm,
 	writel_relaxed(0x0, vfe->base + VFE_BUS_WM_TEST_BUS_CTRL);
 
 	writel_relaxed(frame_incr, vfe->base + VFE_BUS_WM_FRAME_INCR(wm));
-	writel_relaxed(0xf, vfe->base + VFE_BUS_WM_BURST_LIMIT(wm));
+	/*
+	 * #399 burst_limit 0 on #414 burst5=0x0 stuck, still
+	 * 4591616 UV 659.145 last_partial=336 — falsified.
+	 * CAF skips burst_limit when CamX value is 0 (HW default,
+	 * not "0 beats" — that is UBWC bw_limit). Leave front WM5
+	 * at 0; same pixels as 0xf. Do not retry burst as the chroma
+	 * gap. Width stays 2320. Do not retry WM5 2304. Do not
+	 * retry bit29.
+	 */
+	if (plain && wm == DISP_C_WM && width == 2320 && height == 660)
+		writel_relaxed(0, vfe->base + VFE_BUS_WM_BURST_LIMIT(wm));
+	else
+		writel_relaxed(0xf, vfe->base + VFE_BUS_WM_BURST_LIMIT(wm));
 	if (plain)
 		writel_relaxed((height << 16) | width,
 			       vfe->base + VFE_BUS_WM_IMAGE_CFG_0(wm));
@@ -1811,6 +1877,14 @@ static void vfe_480_wm_config(struct vfe_device *vfe, u8 wm,
 		writel_relaxed(wm == DISP_C_WM ? PACKER_PLAIN_8 :
 			       PACKER_PLAIN_8_LSB_MSB_10,
 			       vfe->base + VFE_BUS_WM_PACKER_CFG(wm));
+		/*
+		 * #402 front WM5 packer 3 on #417 packer5=0x3 stuck,
+		 * still 4591616, UV avg 19.3 (2-38) — same as #362
+		 * green. CamX get_packer_fmt(NV12)=3 is UBWC 10-bit;
+		 * linear C stays PLAIN_8. Reverted. Do not retry front packer 3.
+		 * Do not retry height 659. Do not retry FRAME_INCR 1984.
+		 * Do not retry WM5 2304.
+		 */
 		writel_relaxed(WM_DEBUG_STATUS_0_MUX |
 			       (WM_DEBUG_STATUS_1_CONSTRAINT << 8),
 			       vfe->base + VFE_BUS_WM_DEBUG_CFG(wm));
@@ -1915,10 +1989,21 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 			 */
 		}
 
-		if (wm == DISP_C_WM)
+		if (wm == DISP_C_WM) {
+			/*
+			 * #401 WM5 IMAGE_CFG_0 height 659 on #416:
+			 * wm5=0x2930910 incr5=0x175430 stuck, img=0x20,
+			 * still 4591616 UV 659.145 last_partial=336.
+			 * Chroma height does not stop the 336 leftover
+			 * or start frame 2. Reverted. Do not retry
+			 * height 659. Do not retry FRAME_INCR 1984.
+			 * Do not retry WM5 2304. Width stays 2320.
+			 * Burst stays 0 (falsified). Keep errrec=0
+			 * pix_store=0 EARLY_EOF=0.
+			 */
 			vfe_480_wm_config(vfe, wm, pix->width, pix->height / 2,
 					  bpl, bpl * (pix->height / 2), true);
-		else
+		} else
 			vfe_480_wm_config(vfe, wm, pix->width, pix->height,
 					  bpl, bpl * pix->height, true);
 		if (wm == DISP_C_WM)
@@ -1950,7 +2035,7 @@ static void vfe_wm_stop(struct vfe_device *vfe, u8 wm)
 	if (wm == DISP_Y_WM || wm == DISP_C_WM) {
 		if (wm == DISP_Y_WM) {
 			dev_info(vfe->camss->dev,
-				 "dagu ife%d pix stop irq0=0x%x bus=0x%x viol=0x%x img=0x%x ccif=0x%x ovf=0x%x camif=0x%x/0x%x core=0x%x wm4=0x%x/0x%x wm5=0x%x/0x%x\n",
+				 "dagu ife%d pix stop irq0=0x%x bus=0x%x viol=0x%x img=0x%x ccif=0x%x ovf=0x%x camif=0x%x/0x%x core=0x%x wm4=0x%x/0x%x wm5=0x%x/0x%x burst5=0x%x incr5=0x%x\n",
 				 vfe->id,
 				 readl_relaxed(vfe->base + VFE_IRQ_STATUS(0)),
 				 readl_relaxed(vfe->base + VFE_BUS_IRQ_STATUS(0)),
@@ -1964,7 +2049,9 @@ static void vfe_wm_stop(struct vfe_device *vfe, u8 wm)
 				 readl_relaxed(vfe->base + VFE_BUS_WM_CFG(DISP_Y_WM)),
 				 readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_CFG_0(DISP_Y_WM)),
 				 readl_relaxed(vfe->base + VFE_BUS_WM_CFG(DISP_C_WM)),
-				 readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_CFG_0(DISP_C_WM)));
+				 readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_CFG_0(DISP_C_WM)),
+				 readl_relaxed(vfe->base + VFE_BUS_WM_BURST_LIMIT(DISP_C_WM)),
+				 readl_relaxed(vfe->base + VFE_BUS_WM_FRAME_INCR(DISP_C_WM)));
 			dev_info(vfe->camss->dev,
 				 "dagu ife%d pix stop as0=0x%x/0x%x as1=0x%x/0x%x as2=0x%x/0x%x as3=0x%x/0x%x\n",
 				 vfe->id,
@@ -2158,6 +2245,72 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	writel_relaxed(IRQ_CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
 
+	/*
+	 * #391: PIXEL PIPE OVERFLOW latches the Titan 480 pipe.
+	 * CAF error_irq_mask0 0x82000200 includes bit31 so they
+	 * recover, not halt-and-dump. Clear BUS overflow and run
+	 * COMP_DONE before the dump so the last 1984 UV and the
+	 * next SOF can finish. #389 epoch and #390 EARLY_EOF
+	 * stuck, still line=736 4591616. #391 ovf recover stuck
+	 * on #405: irq0=0x80000000 bus=0x0 — PIXEL PIPE is TOP,
+	 * not BUS, still 4591616. Do not crop last. Do not retry
+	 * EARLY_EOF bit29. Do not treat BUS overflow clear as
+	 * TOP recover.
+	 */
+	if (status & IRQ_MASK_0_PIX_OVERFLOW) {
+		u32 bus = readl_relaxed(vfe->base + VFE_BUS_IRQ_STATUS(0));
+
+		writel_relaxed(1, vfe->base + VFE_BUS_OVERFLOW_STATUS_CLEAR);
+		wmb();
+		/*
+		 * #393 overflow buf_done on #407: 9183232 = 2*4591616,
+		 * chunk1 Y avg 0.1 UV 0, camif irq1 still 0x1 0xc 0x2,
+		 * one PIXEL PIPE OVERFLOW. buf_done retired an empty
+		 * pending WM, not a second SOF. #395 CAMIF EOF buf_done
+		 * on #409: eof_buf_done irq1=0x2 bus=0x0, still 9183232
+		 * chunk1 Y avg 0.1 UV 0.2, irq1 0x1 0xc 0x2 0x1, one
+		 * EOF. Same empty pending WM without overflow. Do not
+		 * retry overflow buf_done. Do not retry CAMIF EOF
+		 * buf_done. Do not retry CAMIF EN pulse. #392 pulse
+		 * stuck camif=0x2000101 still 4591616. Do not crop
+		 * last. Do not retry EARLY_EOF.
+		 */
+		dev_err_ratelimited(vfe->camss->dev,
+				    "dagu ife%d ovf recover irq0=0x%x bus=0x%x\n",
+				    vfe->id, status, bus);
+	}
+
+	if (status & IRQ_MASK_0_RESET_ACK)
+		vfe_isr_reset_ack(vfe);
+
+	if (status & IRQ_MASK_0_BUS_TOP_IRQ) {
+		u32 bus = readl_relaxed(vfe->base + VFE_BUS_IRQ_STATUS(0));
+
+		writel_relaxed(bus, vfe->base + VFE_BUS_IRQ_CLEAR(0));
+		writel_relaxed(1, vfe->base + VFE_BUS_IRQ_CLEAR_GLOBAL);
+
+		for (i = 0; i < MAX_VFE_OUTPUT_LINES; i++) {
+			if (i == VFE_LINE_PIX)
+				continue;
+			if (bus & BUS_IRQ_MASK_0_RDI_RUP(vfe, i))
+				vfe_isr_reg_update(vfe, i);
+		}
+
+		if (!vfe_is_lite(vfe) && (bus & BUS_IRQ_MASK_0_PIX_RUP))
+			vfe_isr_reg_update(vfe, VFE_LINE_PIX);
+
+		if (!vfe_is_lite(vfe) &&
+		    (bus & BUS_IRQ_MASK_0_COMP_DONE(vfe, DISP_COMP_GROUP))) {
+			vfe_isr_reg_update(vfe, VFE_LINE_PIX);
+			vfe_buf_done(vfe, DISP_Y_WM);
+		}
+
+		for (i = 0; i < MSM_VFE_IMAGE_MASTERS_NUM; i++) {
+			if (bus & BUS_IRQ_MASK_0_COMP_DONE(vfe, RDI_COMP_GROUP(i)))
+				vfe_buf_done(vfe, i);
+		}
+	}
+
 	if (status & IRQ_MASK_0_PIX_OVERFLOW) {
 		u32 viol = readl_relaxed(vfe->base + VFE_VIOLATION_STATUS);
 		u32 camif0 = readl_relaxed(vfe->base + CAMIF_DEBUG_0);
@@ -2344,38 +2497,6 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 				    readl_relaxed(vfe->base + VFE_BUS_WM_DEBUG_1(DISP_C_WM)));
 		vfe_480_bus_dump(vfe, "ovf");
 		vfe_480_camnoc_dump(vfe, "ovf");
-	}
-
-	if (status & IRQ_MASK_0_RESET_ACK)
-		vfe_isr_reset_ack(vfe);
-
-	if (status & IRQ_MASK_0_BUS_TOP_IRQ) {
-		u32 status = readl_relaxed(vfe->base + VFE_BUS_IRQ_STATUS(0));
-
-		writel_relaxed(status, vfe->base + VFE_BUS_IRQ_CLEAR(0));
-		writel_relaxed(1, vfe->base + VFE_BUS_IRQ_CLEAR_GLOBAL);
-
-		for (i = 0; i < MAX_VFE_OUTPUT_LINES; i++) {
-			if (i == VFE_LINE_PIX)
-				continue;
-			if (status & BUS_IRQ_MASK_0_RDI_RUP(vfe, i))
-				vfe_isr_reg_update(vfe, i);
-		}
-
-		if (!vfe_is_lite(vfe) && (status & BUS_IRQ_MASK_0_PIX_RUP))
-			vfe_isr_reg_update(vfe, VFE_LINE_PIX);
-
-		if (!vfe_is_lite(vfe) &&
-		    (status & BUS_IRQ_MASK_0_COMP_DONE(vfe, DISP_COMP_GROUP))) {
-			vfe_isr_reg_update(vfe, VFE_LINE_PIX);
-			vfe_buf_done(vfe, DISP_Y_WM);
-		}
-
-		/* Loop through all WMs IRQs */
-		for (i = 0; i < MSM_VFE_IMAGE_MASTERS_NUM; i++) {
-			if (status & BUS_IRQ_MASK_0_COMP_DONE(vfe, RDI_COMP_GROUP(i)))
-				vfe_buf_done(vfe, i);
-		}
 	}
 
 	return IRQ_HANDLED;

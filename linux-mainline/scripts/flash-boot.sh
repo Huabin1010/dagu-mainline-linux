@@ -39,8 +39,8 @@ flash-b)
 	python3 "$FBUSB" flash vendor_boot_b "$VBOOT"
 	python3 "$FBUSB" flash boot_b "$BOOTIMG"
 	python3 "$FBUSB" set-active b
-	echo "==> reboot"
-	python3 "$FBUSB" reboot || echo "reboot cmd sent (no OKAY is ok)"
+	echo "==> reboot (timeout: ABL drops USB, no OKAY)"
+	timeout 3 python3 "$FBUSB" reboot || echo "reboot cmd sent (no OKAY is ok)"
 	echo "Host: ./scripts/usb-connect.sh"
 	echo "Brick recovery: ../scripts/flash-boot-legacy.sh restore-a"
 	;;
@@ -66,8 +66,8 @@ flash)
 	python3 "$FBUSB" flash vendor_boot_b "$VBOOT"
 	python3 "$FBUSB" flash boot_a "$BOOTIMG"
 	python3 "$FBUSB" flash boot_b "$BOOTIMG"
-	echo "==> reboot"
-	python3 "$FBUSB" reboot || echo "reboot cmd sent (no OKAY is ok)"
+	echo "==> reboot (timeout: ABL drops USB, no OKAY)"
+	timeout 3 python3 "$FBUSB" reboot || echo "reboot cmd sent (no OKAY is ok)"
 	echo "Host: ./scripts/usb-connect.sh"
 	echo "Restore: $0 restore"
 	;;
@@ -84,8 +84,8 @@ restore)
 	python3 "$FBUSB" flash vbmeta_a "$DUMP/vbmeta_a.img"
 	python3 "$FBUSB" flash vbmeta_b "$DUMP/vbmeta_b.img"
 	python3 "$FBUSB" set-active a || echo "set-active a skipped"
-	echo "==> reboot"
-	python3 "$FBUSB" reboot
+	echo "==> reboot (timeout: ABL drops USB, no OKAY)"
+	timeout 3 python3 "$FBUSB" reboot || echo "reboot cmd sent (no OKAY is ok)"
 	;;
 *)
 	echo "usage: $0 [flash|flash-b|restore]" >&2

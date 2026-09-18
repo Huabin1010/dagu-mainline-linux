@@ -24,22 +24,6 @@ if grep -q 'dagu bringup: SMC-first primary_entry probe' "$KERNEL_SRC/arch/arm64
 fi
 
 mkdir -p "$KBUILD_OUTPUT" "$OUT"
-LOCK_DIR="$ROOT/tmp/kernel-build"
-LOCK="$LOCK_DIR/lock"
-mkdir -p "$LOCK_DIR"
-while [[ -f "$LOCK" ]]; do
-	lock_pid=$(sed -n 's/^pid=//p' "$LOCK" | head -1)
-	if [[ -n "$lock_pid" && -d "/proc/$lock_pid" ]]; then
-		echo "==> kernel build lock held by pid $lock_pid; waiting"
-		sleep 15
-	else
-		rm -f "$LOCK"
-		break
-	fi
-done
-printf 'pid=%s\nwhat=DAGU_DISPLAY=%s DAGU_MINIMAL=%s %s\n' \
-	"$$" "${DAGU_DISPLAY:-0}" "${DAGU_MINIMAL:-}" "$0 $*" >"$LOCK"
-trap 'rm -f "$LOCK"' EXIT
 
 cd "$KERNEL_SRC"
 

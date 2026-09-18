@@ -23,7 +23,7 @@
 - ADSP 语音 / A2DP：`linux-mainline/docs/dagu-adsp-voice.md`
 - ADSP 语音流水线卡死点（mermaid）：`linux-mainline/docs/dagu-adsp-voice-pipeline-status.md`
 - 前置 imx596 IFE PIX 卡死点（mermaid）：`linux-mainline/docs/dagu-ife-front-pipeline-status.md`
-- CDSP / SLPI 流水线卡死点（mermaid）：`linux-mainline/docs/dagu-dsp-pipeline-status.md`
+- CDSP / SLPI 流水线状态（mermaid）：`linux-mainline/docs/dagu-dsp-pipeline-status.md`
 
 ## 怎么读状态
 
@@ -67,7 +67,7 @@
 | 后摄 s5kjn1 | **已通（预览）** | live D-PHY 4-lane RAW10 4080×3060，SoftISP skip 4×4 → 1020×764 @~30fps。桌面 `/dev/video21` |
 | 前摄 imx596 | **已通（预览）** | D-PHY 4-lane RAW10 2592×1952，SoftISP skip 2×2 → 1296×976 @~30fps。桌面 `/dev/video20` |
 | CAMSS RDI / SMMU | **已通** | CSIPHY→CSID→VFE RDI 出 RAW。CSID TPG 也曾出完整 1 帧（约 15.6 MB） |
-| CAMSS IFE PIX | **部分** | `#365` IFE1 线性 NV12 ≥3 帧非零，UV 原点 ~133。饱和度仍窄。产品预览继续 SoftISP。后置图 `dagu-ife-pipeline-status.md`；前置图 `dagu-ife-front-pipeline-status.md` |
+| CAMSS IFE PIX | **部分** | `#365` 后置 IFE1 线性 NV12 ≥3 帧非零。前置 `#418` 1 帧非零截断 4591616；`#403` MNDS_C V_SIZE 证伪并保留。`#404` V_STRIPE 已编未刷。产品预览继续 SoftISP。后置图 `dagu-ife-pipeline-status.md`；前置图 `dagu-ife-front-pipeline-status.md` |
 | 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6。`#333` `hci0` UP RUNNING PSCAN，HCI 5.2。BLE HOG + 经典 HID（`ClassicBondedOnly=false`）。`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。A2DP 走 Q6 `SLIMBUS_7_RX`（`hw:0,3`），见 `dagu-adsp-voice.md` |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
 | 双电芯电量 | **已通** | 双 BQ27Z561 走 GENI I2C SE0/SE13 + `xiaomi-dual-fg`。`#333` `bms` Battery SoC（桌面跟 bms）。gpio `fg_i2c_se0` / `fg_i2c_se13` 保持 disabled |
@@ -339,11 +339,12 @@ LSM6DSO 在 SLPI `bus_instance 3`，tcs3701 在 `bus_instance 4`。禁止在 AP 
 4. **OTG host**：Wi‑Fi SSH 下切 role，插 U 盘 / HID（会掉 g_serial）
 5. **音量上 / 马达 / torch**：`dagu-periph-test.sh` 点一次手感
 6. **蓝牙音频（A2DP）**：Q6 `SLIMBUS_7_RX` 已接。听感配对耳机。`dagu-adsp-voice.md`
-7. **USB3 + DP + PS5169**：先保证 HS gadget 不回退
-8. **S2Idle**：电源键唤醒已通（65 min）。没有 RTC 时不要再远程 `echo mem`。日常桌面仍 mask systemd sleep
-9. **Venus**：4K60 已通。下一步若要电影级高码率 4K 或 mpv 零拷贝，再谈 FFmpeg `drm_prime`；不要开 ICC
-10. **GPU hangcheck `00800005`** / 静置抽帧：能 recover，不是交付终点
-11. Win11 ARM：独立于本表
+7. **iio-sensor-proxy / Mutter 真姿态**：IMU 事件已在 `event11`。不要拿配置假旋转交差。`dagu-dsp-pipeline-status.md`
+8. **USB3 + DP + PS5169**：先保证 HS gadget 不回退
+9. **S2Idle**：电源键唤醒已通（65 min）。没有 RTC 时不要再远程 `echo mem`。日常桌面仍 mask systemd sleep
+10. **Venus**：4K60 已通。下一步若要电影级高码率 4K 或 mpv 零拷贝，再谈 FFmpeg `drm_prime`；不要开 ICC
+11. **GPU hangcheck `00800005`** / 静置抽帧：能 recover，不是交付终点
+12. Win11 ARM：独立于本表
 
 验收命令备忘：
 
@@ -353,6 +354,11 @@ linux-mainline/scripts/dagu-av-test.sh
 
 # GPU / 电量 / OTG / hall / 闪光灯
 linux-mainline/scripts/dagu-periph-test.sh
+
+# SLPI SEE / CDSP（不要编第二路内核）
+systemctl is-active dagu-cdsp-rpc hexagonrpcd-sdsp dagu-ssc
+journalctl -u dagu-ssc -n 20 --no-pager   # accel suid / accel sample
+cat /run/dagu-ssc/lux
 ```
 
 ---
@@ -374,5 +380,8 @@ linux-mainline/scripts/dagu-periph-test.sh
 | Mineradio 看门狗 | `linux-mainline/scripts/dagu-mineradio-watch.sh` |
 | IFE PIX 尝试与证伪 | `linux-mainline/docs/dagu-ife-pix-nv12-attempts.md` |
 | 安卓只提取 | `linux-mainline/scripts/dagu-android-extract.sh` |
+| SLPI / CDSP 部署 | `linux-mainline/scripts/dagu-dsp-deploy.sh` |
+| hexagonrpcd overlay | `linux-mainline/patches/hexagonrpc/` |
+| SEE 客户端 | `linux-mainline/userspace/dagu-ssc.c` |
 
 内核源码树 `linux-mainline/linux/` **不入库**；相机/音频对主线驱动的修改都在 `apply-overlays.sh` 里重放。

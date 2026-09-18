@@ -1,4 +1,4 @@
-# dagu：CDSP / SLPI 两岛与 SEE 卡死点
+# dagu：CDSP / SLPI 两岛与 SEE 流水线状态
 
 对照 **2026-09-17 22:26 CST** 板上 Linux（B 槽，hexagonrpcd BuildID `4bbdc95c…`，packed `dagu-ssc`）。SM8250 **没有** 8 系那种独立 NPU 砖。账面约 15 TOPS INT8 全在 **CDSP（Compute DSP / Hexagon 698，计算数字信号处理器）** 的 HVX（Hexagon Vector eXtensions，向量扩展）上。IMU / 光线走 **SLPI（Sensor Low Power Island，传感器低功耗岛）**，硅上 I2C 不接 AP QUP。
 
@@ -21,7 +21,7 @@ CDSP FastRPC **过**。SLPI **PAS（Peripheral Authentication Service，外设�
 | SLPI PAS | **过** | `remote processor slpi is now up`，PAS id 12，`slpi.mbn` 本机签名 |
 | fopen 注册表 | **过** | `hexagonrpcd -f /dev/fastrpc-sdsp -s` `INIT_ATTACH_SNS`；`openat` `soc0/hw_platform`。uptime 14 min **无** `USER-PD DOG` / `SNS_REG_INIT` |
 | SEE 信封 | **过** | QMI 400 `node=9 port=14`。tx `10 01 00 01` + ARRAY `0x01`。`type=2 msgid=0x0020` `tlvs t=0x02 ln=4(res=0 err=0)`。`MALFORMED=0`。`sns_suid_req` `register_updates=true` `default_only=false`（`10 01 18 00`）。SEE 后 sleep 8s。`suid_tries` 120 次打在 21:39:14 一秒内 |
-| SEE IND TLV | **过** | 小包 `msgid=0x0022` `t=0x01 ln=8` + `t=0x02 ln=47/46/55`。64KiB rxbuf 收下 jumbo `len=9687` `t=0x02 ln=9673` ARRAY `inner+2==ln`（首 96 字节仍是 gyro/als **类型名**）。另有一次 `type=4 msgid=0x0000 len=0`。**无** `event msgid=`（非 768/1025 proto 事件） |
+| SEE IND TLV | **过** | `msgid=0x0022` TLV `0x02` ARRAY。22:26 出样包 `len=70` envelope=accel suid，`msgid=1025` packed `repeated float` |
 | SEE 出样 | **过** | `accel suid 1fbb6afc…:9a418d19…` `gyro suid` `als suid`。`accel 25 Hz`。样 `7.605 0.186 4.014` / `8.665 0.222 4.589` m/s²。`dagu-lsm6dso-accel` `event11` 1s **96** 字节。lux **13.100**。三服务 active，cdsp/slpi/adsp running |
 
 怎么对齐安卓：sscrpcd 式 reverse RPC 把 `/vendor/etc/sensors/*` 送进岛，然后 `sns_client` QMI 400 找 SUID、使能 25 Hz。禁止 AP 上猜 LSM6DSO / tcs3701 / `rohm_bu27030`。禁止 WebNN / TFLite CPU。禁止用 CDSP「补」IFE（Image Front End，图像前端）。
@@ -61,12 +61,12 @@ flowchart TB
     C1 --> C2 --> C3
   end
 
-  subgraph SLPI["部分 · SLPI 传感器岛"]
+  subgraph SLPI["已通 · SLPI 传感器岛"]
     S1["PAS id 12 · slpi@5c00000"]
     S2["/dev/fastrpc-sdsp"]
-    S3["hexagonrpcd -s<br/>INIT_ATTACH_SNS + fopen"]
+    S3["hexagonrpcd -s<br/>INIT_ATTACH_SNS + persist fwrite"]
     S4["SEE QMI 400"]
-    S5["dagu-ssc<br/>IND TLV 过 · suid 无实例 · 0 样"]
+    S5["dagu-ssc<br/>accel suid + 25 Hz 非零"]
     S1 --> S2 --> S3 --> S4 --> S5
   end
 
@@ -77,8 +77,7 @@ flowchart TB
     N4["用 CDSP 补 IFE PIX"]
   end
 
-  class C1,C2,C3,S1,S2,S3,S4 ok
-  class S5 stuck
+  class C1,C2,C3,S1,S2,S3,S4,S5 ok
   class N1,N2,N3,N4 later
 
   classDef ok fill:#1b5e20,stroke:#a5d6a7,color:#fff
@@ -87,9 +86,9 @@ flowchart TB
   classDef later fill:#424242,stroke:#bdbdbd,color:#eee
 ```
 
-一句话：**CDSP 已经在岛上干活；SLPI 岛活着、SEE 信封已收、IND TLV 已拆对；加速度卡在 `sns_suid_event` 只有类型名没有 suid 实例，不是 MALFORMED，也不是再拆错 TLV。**
+一句话：**CDSP FastRPC 已钉住；SLPI persist 转换跑完；SEE 给出 accel suid，25 Hz 非零加速度进 uinput。** 不是 MALFORMED，不是再拆 TLV。
 
-## 2. SLPI 内部：绿到红
+## 2. SLPI 内部：进门到出样
 
 LSM6DSO 在 SLPI `bus_instance 3`，tcs3701 在 `bus_instance 4`。安卓 JSON 已经在 HexagonFS 里。
 
@@ -126,7 +125,7 @@ flowchart LR
   classDef stuck fill:#b71c1c,stroke:#ef9a9a,color:#fff
 ```
 
-`remoteproc running` 不能当成出样。DOG 消失只证明 **fopen 把 `sensor_process` 喂饱了**。SUID 是另一条信封。
+`remoteproc running` 不能当成出样。DOG 消失只证明 fopen 把 `sensor_process` 喂饱了。SUID 是另一条信封，22:26 已经交出实例。
 
 HexagonFS 根：`-R /usr/share/qcom/sm8250/Xiaomi/dagu`（DT `model = "Xiaomi Pad 5 Pro 12.4"` + `compatible = "xiaomi,dagu"`）。主线没有 `/sys/devices/soc0`，第一次 attach 约 22s 走 `SNS_REG_INIT` 断言；补上 `hw_platform=DAGU` 之后才稳住。禁止把 `elish` 当板名。
 
@@ -161,32 +160,27 @@ flowchart TB
 
 Linux 不搬 SNPE / QNN / WebNN。CDSP 飞行件是 **FastRPC 会话钉在 HVX 上**，不是 `chrome://gpu` 绿一格。SLPI 飞行件是 **LSM6DSO 事件进 uinput**，不是空的 `remoteproc`。
 
-## 4. 无样上还没证伪的刀
+## 4. 曾卡住出样的刀（均已证伪）
 
 ```mermaid
 flowchart TB
-  STUCK["SEE 400 在 · 0 样<br/>IND TLV 过 · 无 suid 实例"]
+  DONE["SEE 400 · accel suid<br/>25 Hz 非零 · lux 13.1"]
 
-  STUCK --> H1
-  STUCK --> H2
-  STUCK --> H3
-  STUCK --> NO
+  DONE --> H1
+  DONE --> H2
+  DONE --> H3
+  DONE --> H4
+  DONE --> NO
 
   H1["TLV 0x10 宽度 · 已证伪<br/>1 字节 jumbo → res=0"]
-  H2["IND TLV 0x02 ARRAY · 已证伪<br/>仍无 accel suid · payload 无 field 2"]
-  H3["jumbo 6681 后段 / LSM6DSO 未实例化<br/>岛认识 accel 字但没给 suid"]
+  H2["IND TLV 0x02 ARRAY · 已证伪<br/>不是拆错 TLV"]
+  H3["persist fwrite/rename · 已证伪<br/>dup 活 fd + next2 64KiB"]
+  H4["packed repeated float · 已证伪<br/>不是 unpacked fixed32"]
   NO["已排除当死岛<br/>PAS 验签 · DOG 消失<br/>SEE 广告 · CTRL 成功<br/>CDSP GET_DSP_INFO"]
 
-  class STUCK stuck
-  class H1 ok
-  class H2 ok
-  class H3 gap
-  class NO ok
+  class DONE,H1,H2,H3,H4,NO ok
 
   classDef ok fill:#1b5e20,stroke:#a5d6a7,color:#fff
-  classDef gap fill:#e65100,stroke:#ffcc80,color:#111
-  classDef stuck fill:#b71c1c,stroke:#ef9a9a,color:#fff
-  classDef later fill:#424242,stroke:#bdbdbd,color:#eee
 ```
 
 门过的定义（缺一项即失败）：
@@ -233,7 +227,6 @@ systemctl start dagu-ssc
 验收：
 
 ```bash
-# 不要编第二路内核。锁在 linux-mainline/tmp/kernel-build/lock
 # 不要刷 A 槽
 
 # CDSP

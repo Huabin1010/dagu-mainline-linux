@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # STREAMON Titan 480 PIX: CSID IPP → CAMIF → CLC → DISP linear NV12.
 # Rear HyperOS path is CSID1 + IFE1 (IFE0 idle). Front Camera ID 1 is
-# the same IFE1/CSID1, CSIPHY4, 2592×1952 → Display 1920×1080. Do not
-# dual STREAMON with DebayerCpu / loopback. Do not copy rear Crop last
-# 0xfef0bf3 onto imx596.
+# the same IFE1/CSID1, CSIPHY4, 2592×1952 → Display 2320×1320
+# (#386 RC+WM pad around MNDS 2314×1314; #384 WM-only 2320 falsified).
+# Do not dual STREAMON with DebayerCpu / loopback.
+# Do not copy rear Crop last 0xfef0bf3 onto imx596.
 # DAGU_IFE_PIX=front for imx596. Default rear s5kjn1.
 # D-PHY 0x0114=0x0300 (rear) / 3 (front) and CSID SOT mask must stay.
 # media-ctl entity names MUST be quoted; PIX sink is CSID pad 4, not pad 1.
@@ -74,16 +75,18 @@ run(['media-ctl', '-d', MC, '-l', '"msm_csid1":4 -> "msm_vfe1_pix":0[1]'], check
 
 if FRONT:
     fmt = 'fmt:SBGGR10_1X10/2592x1952 field:none'
+    pix_wh = '2320x1320'
 else:
     fmt = 'fmt:SGBRG10_1X10/4080x3060 field:none'
+    pix_wh = '1920x1080'
 for spec in (
     f'"{sensor}":0[' + fmt + ']',
     f'"{phy}":0[' + fmt + ']',
     f'"{phy}":1[' + fmt + ']',
     '"msm_csid1":0[' + fmt + ']',
     '"msm_csid1":4[' + fmt + ']',
-    '"msm_vfe1_pix":0[' + fmt + ' compose:(0,0)/1920x1080]',
-    '"msm_vfe1_pix":1[fmt:YUYV8_1_5X8/1920x1080 field:none]',
+    f'"msm_vfe1_pix":0[' + fmt + f' compose:(0,0)/{pix_wh}]',
+    f'"msm_vfe1_pix":1[fmt:YUYV8_1_5X8/{pix_wh} field:none]',
 ):
     run(['media-ctl', '-d', MC, '-V', spec], check=True)
 
@@ -112,11 +115,13 @@ try:
 except FileNotFoundError:
     pass
 r = run([
-    'timeout', '12', 'v4l2-ctl', '-d', pix,
-    '--set-fmt-video=width=1920,height=1080,pixelformat=NV12',
+    'timeout', '--kill-after=2', '12', 'v4l2-ctl', '-d', pix,
+    '--set-fmt-video=width=%s,height=%s,pixelformat=NV12' % (
+        '2320' if FRONT else '1920', '1320' if FRONT else '1080'),
     '--stream-mmap', '--stream-count=3', '--stream-to=/tmp/pix.nv12',
 ])
 print(f'streamon_rc={r.returncode}')
+run(['pkill', '-9', '-x', 'v4l2-ctl'], check=False)
 run(['ls', '-l', '/tmp/pix.nv12'], check=False)
 PY
 
@@ -131,7 +136,41 @@ ov = re.findall(r'PIXEL PIPE OVERFLOW.*?viol_id=(\d+).*?pix=(\d+) line=(\d+)', l
 ov_old = re.findall(r'PIXEL PIPE OVERFLOW.*?camif=(0x[0-9a-f]+)/', log)
 if cfg:
     v = int(cfg[-1], 16)
-    print(f'ipp_cfg0={cfg[-1]} bit2_hbin={bool(v & 4)} expect_hbin=0')
+    print(f'ipp_cfg0={cfg[-1]} bit2_hbin={bool(v & 4)} expect_hbin=0 early_eof={bool(v & (1<<29))}')
+vcrop = re.findall(r'dagu csid ipp vc=\d+ decode=\d+ \d+x\d+ cfg0=0x[0-9a-f]+ vcrop=(0x[0-9a-f]+)', log)
+if vcrop:
+    print(f'ipp_vcrop={vcrop[-1]}')
+errrec = re.findall(r'dagu csid ipp vc=\d+ decode=\d+ \d+x\d+ cfg0=0x[0-9a-f]+ vcrop=0x[0-9a-f]+ errrec=(0x[0-9a-f]+)', log)
+if errrec:
+    print(f'ipp_errrec={errrec[-1]}')
+ipp_irq = re.findall(r'dagu csid ipp irq=(0x[0-9a-f]+)', log)
+bp = [i for i in ipp_irq if int(i, 16) & (1 << 17)]
+print('ipp_bp=%s' % (bp[-1] if bp else 'False'))
+print('pix_store=%s' % (bool(int(cfg[-1], 16) & (1 << 7)) if cfg else '?'))
+burst5 = re.findall(r'dagu ife\d+ pix stop .* burst5=(0x[0-9a-f]+)', log)
+if burst5:
+    print(f'burst5={burst5[-1]}')
+incr5 = re.findall(r'dagu ife\d+ pix stop .* incr5=(0x[0-9a-f]+)', log)
+if incr5:
+    print(f'incr5={incr5[-1]}')
+vszc = re.findall(r'dagu ife\d+ mnds_c .* vsz=(0x[0-9a-f]+)', log)
+if vszc:
+    print(f'mnds_c_vsz={vszc[-1]}')
+vstc = re.findall(r'dagu ife\d+ mnds_c .* vst=(0x[0-9a-f]+)', log)
+if vstc:
+    print(f'mnds_c_vst={vstc[-1]}')
+irq1 = re.findall(r'dagu ife\d+ camif irq1=(0x[0-9a-f]+)', log)
+if irq1:
+    print('camif_irq1', ' '.join(irq1[-8:]))
+rec = re.findall(r'dagu ife\d+ ovf recover(?: top| bufdone)? irq0=(0x[0-9a-f]+) bus=(0x[0-9a-f]+)(?: camif=(0x[0-9a-f]+))?', log)
+if rec:
+    r = rec[-1]
+    print('ovf_recover irq0=%s bus=%s camif=%s' % (r[0], r[1], r[2] or '?'))
+eofbd = re.findall(r'dagu ife\d+ eof buf_done irq1=(0x[0-9a-f]+) bus=(0x[0-9a-f]+)', log)
+print('eof_buf_done', ' '.join('%s/%s' % t for t in eofbd[-8:]) if eofbd else 'False')
+ep = re.findall(r'dagu ife\d+ pix clc in .* epoch=(0x[0-9a-f]+)', log)
+if ep:
+    print(f'camif_epoch={ep[-1]}')
 if ov:
     print(f'viol_id={ov[-1][0]} pix={ov[-1][1]} line={ov[-1][2]} id19=MNDS_C_DISP')
 elif ov_old:
@@ -203,7 +242,7 @@ if remote 'test -s /tmp/pix.nv12'; then
 from pathlib import Path
 p = Path("$ROOT/out/camera/pix.nv12")
 raw = p.read_bytes()
-w, h = 1920, 1080
+w, h = (2320, 1320) if "$PIX_CAM" == "front" else (1920, 1080)
 need = w * h * 3 // 2
 n = len(raw) // need
 print(f"nv12 bytes={len(raw)} frames={n} expect={need}")

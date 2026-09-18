@@ -45,9 +45,9 @@ Python / 软路径严重程度：
 
 | 一级维度 | 硬件账面 | Linux 落地 | 平板权重 | 结论 |
 |----------|----------|------------|----------|------|
-| 1. 核心算力与存储 | 骁龙 870 一线 | CPU/GPU/UFS 已通；NPU/CDSP 关；ICC 关 | 高 | 够用。瓶颈不在核数，在 **无 ICC 带宽投票** 和 **SoftISP 吃 CPU** |
+| 1. 核心算力与存储 | 骁龙 870 一线 | CPU/GPU/UFS 已通；CDSP FastRPC 已通；无独立 NPU；ICC 关 | 高 | 够用。瓶颈不在核数，在 **无 ICC 带宽投票** 和 **SoftISP 吃 CPU** |
 | 2. 多媒体 | Venus + Spectra 480 + Hexagon | Venus 4K60 已通；IFE1 PIX 已出线性 NV12；Viewfinder 仍 SoftISP | 极高 | 视频正路。预览还没离开 CPU |
-| 3. 外设与感知 | 120 Hz + 双摄 + 四喇叭 + IMU | 显示/触控/麦/喇叭已通；IMU/ALS 关；DP 未接 | 极高 | 日常能用。传感器和 Type-C 异显缺 |
+| 3. 外设与感知 | 120 Hz + 双摄 + 四喇叭 + IMU | 显示/触控/麦/喇叭已通；IMU/ALS 走 SLPI SEE；DP 未接 | 极高 | 日常能用。Type-C 异显缺 |
 | 4. 网络 | QCA6390 Wi‑Fi 6 + BT 5.x | ath11k ~600 Mbps；蓝牙 HID 已通；无蜂窝 | 高 | 够用。无以太网、无 5G（本 SKU 本就没有） |
 | 5. 总线扩展 | PCIe / USB3 / QUP GENI | PCIe0 只给 Wi‑Fi；**Himax / CS35L41 / KTZ / FG / 键盘 / 充电泵 已走 GENI**；USB3 未训 | 中 | 平板够。工控总线本机没有 |
 | 6. 软件生态 | 原厂 4.19 BSP | 主线 7.0 + Ubuntu + 大量 overlay | 极高 | 主线是资产。QHEE 禁的是 **wrapper CSR / ICC / GPI**，不是 GENI SE |
@@ -93,7 +93,7 @@ Chrome：一线是 `use_v4l2_codec=true` 的 Chromium（`dagu-chromium-native.sh
 | 框架 | 安卓 NNAPI + Hexagon | 无。WebNN 禁止（会掉 TFLite/CPU） |
 | 相机 3A / 降噪 | IPE / BPS / IFE 在 Spectra | Linux **没有** Titan ISP 用户态。预览是 libcamera **DebayerCpu** |
 
-平板场景：人脸/超分/离线模型不是当前交付。缺 CDSP 的直接后果是 **相机 ISP 只能吃 CPU**（见 §2.2、§8）。
+平板场景：人脸/超分/离线模型不是当前交付。CDSP FastRPC **已通**，禁止拿它「补」IFE（Image Front End，图像前端）。预览仍是 libcamera **DebayerCpu**（见 §2.2、§8）。禁止 WebNN / TFLite CPU。
 
 ### 1.4 内存与存储
 
@@ -202,8 +202,8 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 
 | 传感器 | 安卓 | Linux |
 |--------|------|-------|
-| IMU LSM6DSO | SLPI | **`&slpi` okay**。`dagu-ssc` SEE QMI。禁止在 AP I2C 上猜 |
-| ALS tcs3701 / rohm_bu27030 | SLPI | 同上。照度 `/run/dagu-ssc/lux` |
+| IMU LSM6DSO | SLPI | **`&slpi` okay**。`dagu-ssc` SEE 25 Hz 非零 uinput。禁止在 AP I2C 上猜 |
+| ALS tcs3701 / rohm_bu27030 | SLPI | 同上。照度 `/run/dagu-ssc/lux` 非空 |
 | 霍尔 GPIO110/121 | gpio-keys | DT 已写 `SW_LID` / `SW_TABLET_MODE`。**已迁走**：不再装 `dagu-tablet-mode.py` |
 | 距离 / 地磁 | 未作为交付 | 未做 |
 | 触控 Himax HX83121 | GENI SPI | **已通** `#244`：`990000.spi` / `spi4.0`，`dagu SPI FIFO proto=1 depth=16 width=32 fifo_if_dis=0 skip_wrap=1`。gpio8–11 function qup4，IRQ gpio39 LEVEL_LOW。probe 读 event30 不是全 `0xff`。禁止 GPIO100、禁止 GPI/SE DMA |
@@ -218,7 +218,7 @@ PipeWire **关掉** `monitor.libcamera`。Chrome 若走 spa-libcamera，会把 1
 | 以太网 | **无** | 无 |
 | TSN / 双 MAC | 无 | 无 |
 | Wi‑Fi | QCA6390，PCIe0，**Wi‑Fi 6 硅** | ath11k `wlp1s0`。现网 iperf 证据是 **VHT 80 MHz 2SS PHY 866.7 Mbps，TCP 600–665 Mbps**（对端可能是 AC AP）。BDF 必须 `bd_l81a.elf` → `board.bin` |
-| 蓝牙 | QCA6390 UART，BT 5.x | uart6 + `hci_qca`，3 Mbps。BLE HOG 鼠标、经典 HID 键盘已通。A2DP 未测 |
+| 蓝牙 | QCA6390 UART，BT 5.x | uart6 + `hci_qca`，3 Mbps。BLE HOG 鼠标、经典 HID 键盘已通。A2DP 走 Q6 `SLIMBUS_7_RX`（听感要配对耳机） |
 | 4G/5G | **22081281AC 无猫** | 无 M.2 |
 | Zigbee / LoRa | 无 | 无 |
 
@@ -357,7 +357,7 @@ g_serial 0525:a4a7 held >30s；A 槽未动
 |------|------|------------|
 | CPU | A77/A55、8 核、3.2 GHz | **已通**，LUT 调频，无 ICC |
 | GPU | Adreno、GFLOPS、GLES/Vulkan/OpenCL | Turnip GLES3.2 + VK1.3 **已通**。OpenCL **未做** |
-| NPU | TOPS、TFLite/QNN | **有意关闭** |
+| NPU | TOPS、TFLite/QNN | 无独立 NPU 砖。CDSP FastRPC **已通**。禁止 WebNN |
 | 内存存储 | LPDDR、UFS、ECC | ~8 GB + 256 GB UFS **已通**。无 ECC |
 
 ### 维度 2
@@ -375,14 +375,14 @@ g_serial 0525:a4a7 held >30s；A 槽未动
 | CSI | 口数、lane、带宽 | 2× 4-lane D-PHY **已通** |
 | 显示 | HDMI/DP/DSI、异显 | 内屏 120 Hz **已通**。DP **未接** |
 | 麦 | PDM / I2S | WCD 模拟麦 **已通**。无 PDM 阵列 |
-| 传感器 | ALS/IMU/霍尔 | 霍尔 DT 已写。IMU/ALS **关** |
+| 传感器 | ALS/IMU/霍尔 | 霍尔 gpio-keys **已通**。IMU/ALS **SLPI SEE 已通** |
 
 ### 维度 4
 
 | 二级 | 指标 | dagu Linux |
 |------|------|------------|
 | 有线网 | GbE/TSN | **无此硬件** |
-| Wi‑Fi/BT | Wi‑Fi 6、BT 5 | Wi‑Fi **已通** ~0.6 Gbps。BT HID **已通**。A2DP 未测 |
+| Wi‑Fi/BT | Wi‑Fi 6、BT 5 | Wi‑Fi **已通** ~0.6 Gbps。BT HID **已通**。A2DP 拓扑 **已接**（听感要配对耳机） |
 | 广域 | 5G/LoRa | **无此硬件** |
 
 ### 维度 5
@@ -460,8 +460,8 @@ NPU **没有**。相机是 CPU SoftISP。弱光/HDR 比不过安卓 IFE。要视
 | 5 | Himax GENI SPI FIFO + 内核 `freq_qos` | **已迁走** spi-gpio 与 Python 升频 |
 | 6 | CS35L41 GENI I2C SE1/SE3 | **已迁走** 功放 i2c-gpio |
 | 7 | KTZ / FG / 键盘 / 充电泵 按 uart6 同款收 GENI | **已迁** SE0/SE2/SE9/SE11/SE13/SE15/SE16。仍 `i2c-gpio-se8`（P9418 笔充 TX，不是平板 Qi） |
-| 8 | SLPI：PAS 验签 + 有客户端再 okay | 不要 AP 上猜 I2C。见 PIX 审计笔记 |
+| 8 | SLPI SEE IMU/ALS | **已通** `dagu-dsp-pipeline-status.md`。禁止 AP I2C |
 | 9 | USB3 + DP | 现在只有 HS gadget |
-| 10 | Spectra IFE / CDSP | **IFE1 PIX 已出线性 NV12**（`dagu-ife-pipeline-status.md`）。Viewfinder 未切。CDSP 无工作负荷不开 |
+| 10 | Spectra IFE / CDSP | **IFE1 PIX 已出线性 NV12**（`dagu-ife-pipeline-status.md`）。Viewfinder 未切。CDSP FastRPC **已通**，禁止用来补 IFE |
 
 **Python 不是这台机器的架构。** `#244` 产品路径：loopback ELF、C 版电源键/触控升频/Shift 点按、timesyncd、霍尔 gpio-keys、Himax GENI SPI FIFO、CS35L41 GENI I2C。KTZ/FG/键盘/充电泵 同款 GENI。仍软的是 **DebayerCpu** 和笔充 se8（P9418 TX）的 **i2c-gpio**。禁止 wrapper CSR / GPI DMA / ICC；失败 `restore-a`。

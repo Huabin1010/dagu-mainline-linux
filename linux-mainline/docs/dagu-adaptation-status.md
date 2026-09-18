@@ -22,6 +22,7 @@
 - IFE PIX 线性 NV12 尝试与证伪（#333 仍 0 帧）：`linux-mainline/docs/dagu-ife-pix-nv12-attempts.md`
 - ADSP 语音 / A2DP：`linux-mainline/docs/dagu-adsp-voice.md`
 - ADSP 语音流水线卡死点（mermaid）：`linux-mainline/docs/dagu-adsp-voice-pipeline-status.md`
+- 前置 imx596 还要走的门（mermaid）：`linux-mainline/docs/dagu-front-camera-pipeline-status.md`
 - 前置 imx596 IFE PIX 卡死点（mermaid）：`linux-mainline/docs/dagu-ife-front-pipeline-status.md`
 - CDSP / SLPI 流水线状态（mermaid）：`linux-mainline/docs/dagu-dsp-pipeline-status.md`
 
@@ -65,9 +66,9 @@
 | 扬声器 CS35L41 | **已通** | ADSP `running`。GENI I2C SE1/SE3。四颗 Halo `CAL_SET_STATUS=2` + Fast Use Case `*-music.txt`。card 0 `Xiaomi-dagu-CS35L41-WCD9385`。禁止 softvol |
 | 麦克风 | **已通** | 安卓 speaker-mic：AMIC5 / ADC4 INP5。UCM HiFi Mic，`hw:0,1`。喇叭 440 Hz 回录 |
 | 后摄 s5kjn1 | **已通（预览）** | live D-PHY 4-lane RAW10 4080×3060，SoftISP skip 4×4 → 1020×764 @~30fps。桌面 `/dev/video21` |
-| 前摄 imx596 | **已通（预览）** | D-PHY 4-lane RAW10 2592×1952，SoftISP skip 2×2 → 1296×976 @~30fps。桌面 `/dev/video20` |
+| 前摄 imx596 | **已通（预览）** | D-PHY 4-lane RAW10 2592×1952，SoftISP skip 2×2 → 1296×976 @~30fps。桌面 `/dev/video20`。硬件 PIX 未过门：`dagu-front-camera-pipeline-status.md` |
 | CAMSS RDI / SMMU | **已通** | CSIPHY→CSID→VFE RDI 出 RAW。CSID TPG 也曾出完整 1 帧（约 15.6 MB） |
-| CAMSS IFE PIX | **部分** | `#365` 后置 IFE1 线性 NV12 ≥3 帧非零。前置 `#418` 1 帧非零截断 4591616；`#403` MNDS_C V_SIZE 证伪并保留。`#404` V_STRIPE 已编未刷。产品预览继续 SoftISP。后置图 `dagu-ife-pipeline-status.md`；前置图 `dagu-ife-front-pipeline-status.md` |
+| CAMSS IFE PIX | **部分** | `#365` 后置 IFE1 线性 NV12 ≥3 帧非零。前置 `#420` Demux `0x3058` 已粘仍 0 字节；`#421` 活 DS411 C `0x5504`。产品预览继续 SoftISP。后置图 `dagu-ife-pipeline-status.md`；前置图 `dagu-ife-front-pipeline-status.md` |
 | 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6。`#333` `hci0` UP RUNNING PSCAN，HCI 5.2。BLE HOG + 经典 HID（`ClassicBondedOnly=false`）。`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。A2DP 走 Q6 `SLIMBUS_7_RX`（`hw:0,3`），见 `dagu-adsp-voice.md` |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
 | 双电芯电量 | **已通** | 双 BQ27Z561 走 GENI I2C SE0/SE13 + `xiaomi-dual-fg`。`#333` `bms` Battery SoC（桌面跟 bms）。gpio `fg_i2c_se0` / `fg_i2c_se13` 保持 disabled |
@@ -297,7 +298,7 @@ LSM6DSO 在 SLPI `bus_instance 3`，tcs3701 在 `bus_instance 4`。禁止在 AP 
 
 ### CDSP（Compute DSP，计算数字信号处理器 / Hexagon 698）
 
-`&cdsp` **okay**，固件 `qcom/sm8250/xiaomi/dagu/cdsp.mbn`。板上 `remoteproc cdsp state=running`，`/dev/fastrpc-cdsp`，`dagu-cdsp-rpc` `GET_DSP_INFO` 读到 HVX 属性后 `INIT_ATTACH` 钉住 PD。刷 B 后 `0525:a4a7` 保持 ≥32s。禁止 WebNN / TFLite CPU。不要用 CDSP「补」IFE。细账：`linux-mainline/docs/dagu-dsp-pipeline-status.md`。
+`&cdsp` **okay**，固件 `qcom/sm8250/xiaomi/dagu/cdsp.mbn`。板上 `remoteproc cdsp state=running`，`/dev/fastrpc-cdsp`，`dagu-cdsp-rpc` `GET_DSP_INFO` 读到 HVX 属性后 `INIT_ATTACH` 钉住 PD。刷 B 后 `0525:a4a7` 保持 ≥32s。关机：`fastrpc_user` kref 活过 close，DMA 释放用 `buf->phys`，禁止再从已释放的 `buf->fl->cctx` 解 SID（`#437` 15:58 `fastrpc_buf_free+0x20` 把 `reboot bootloader` 卡死）。禁止 WebNN / TFLite CPU。不要用 CDSP「补」IFE。细账：`linux-mainline/docs/dagu-dsp-pipeline-status.md`。
 
 ---
 

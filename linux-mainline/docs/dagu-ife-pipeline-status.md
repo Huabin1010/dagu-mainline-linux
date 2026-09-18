@@ -1,6 +1,6 @@
 # dagu：相机两路与 IFE 卡死点
 
-对照 **`#418`**（2026-09-18 09:14 CST；`#403` V_SIZE 粘住，不是缺口）。后置 **CLC（Camera Logic Core，相机逻辑核）门已过**（`#360` / `#365`）。本刀把前置 imx596 接到同一条 **IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）**：**CSIPHY4（CSI Physical Layer，CSI 物理层）→ CSID1（CSI Decoder，CSI 解码器）IPP → IFE1 CAMIF（Camera Interface，相机接口）→ CLC → WM4/5 线性 NV12**。桌面仍走 RDI（Raw Dump Interface，原始旁路出口）SoftISP。前置卡死点图：`dagu-ife-front-pipeline-status.md`。细账：`dagu-ife-pix-nv12-attempts.md`。
+对照 **`#437`**（2026-09-18 15:54 CST；前置 `#420` 活 Demux `0x3058` 仍 0 字节）。后置 **CLC（Camera Logic Core，相机逻辑核）门已过**（`#360` / `#365`）。本刀把前置 imx596 接到同一条 **IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）**：**CSIPHY4（CSI Physical Layer，CSI 物理层）→ CSID1（CSI Decoder，CSI 解码器）IPP → IFE1 CAMIF（Camera Interface，相机接口）→ CLC → WM4/5 线性 NV12**。桌面仍走 RDI（Raw Dump Interface，原始旁路出口）SoftISP。前置还要过的门：`dagu-front-camera-pipeline-status.md`。前置卡死细账：`dagu-ife-front-pipeline-status.md`。细账：`dagu-ife-pix-nv12-attempts.md`。
 
 图例：绿 = 板上已证明 · 蓝 = 正在飞的软预览 · 黄 = 寄存器粘住、像素没证明穿过 · 红 = 卡死 · 灰 = 本阶段不做。
 
@@ -26,12 +26,12 @@ HyperOS Camera ID 1：IFE1+CSID1，CSIPHY4。堆 IQ Crop/MNDS last **`0x0a1f079f
 
 `DAGU_IFE_PIX=front`：`csiphy4 → csid1 pad4 → vfe1_pix`，≥3 帧非零线性 NV12，UV ~128。PDPC30 MODULE=0，chroma packer 1，不空 `0x5e00`。
 
-已刷仍 1 帧截断：`#367`–`#402`。`#394` `errrec=0x0` **overflow 消失**、第二 SOF，仍 4591616 — **保留 errrec=0**。`#395` CAMIF EOF buf_done 9183232 chunk1 zeros，已撤回。`#396` `#410` pix_store=0 证伪。`#397` `#411` EARLY_EOF=0 `cfg0=0x802b2063` 粘住，**仍 4591616** UV 659.145 行 — **证伪 bit29**。`#398` `#412` WM5 宽 2304 `img=0x20` **0 字节**，已撤回。`#399` `#414` WM5 `BURST_LIMIT=0` `burst5=0x0` 粘住，**仍 4591616** — **证伪末突发**。`#400` `#415` WM5 `FRAME_INCR` `2320×660−1984` `incr5=0x175580` 粘住，**仍 4591616** — **证伪 increment，已撤回**。`#401` `#416` WM5 高度 659 `img=0x20` 仍 4591616，已撤回。`#402` `#417` packer 3 UV avg 19.3，已撤回。`#403` MNDS_C V_SIZE `0x0293016f`。`#404` MNDS_C V_STRIPE `0x02930000`。前置图：`dagu-ife-front-pipeline-status.md`。禁止抄 `0xfef0bf3`。禁止再砍 CAMIF/CSID last。禁止解 SOT mask。禁止再打开 EARLY_EOF bit29。禁止再 pulse CAMIF EN。禁止 overflow buf_done。禁止 CAMIF EOF buf_done。禁止把 BUS overflow clear 当 TOP recover。禁止 WM5 宽度 2304。禁止再把 burst / FRAME_INCR 1984 / 高度 659 / packer 3 / V_SIZE 当 chroma 缺口。
+`#420` 前置 identity：活 Demux `0x3058` 第一表粘住仍 0 字节。下一刀 `#421` 只改 DS411 C `0x5504` identity。细账：`dagu-ife-front-pipeline-status.md`。禁止抄 `0xfef0bf3`。禁止 Dual-IFE `COMP_CFG`。禁止只改 WM。禁止 WM 640。禁止再扩 640 dest。禁止 `0x04df04df`。禁止抄 `0x5d04` 488×648。禁止再写 H_SIZE dest。禁止再写 H_PHASE `0xc047b058`。禁止解 SOT mask。
 
 ```mermaid
 flowchart LR
   NOW["现在 · 后置 PIX 已过门<br/>前置仍 SoftISP skip 2×2"]
-  CUT["#404 · front MNDS_C V_STRIPE 0x02930000"]
+  CUT["#421 · 前置 DS411 C 0x5504 identity"]
   GOAL["≥3 帧非零 NV12 · UV~128"]
   LATER["之后才允许<br/>Viewfinder 离开 DebayerCpu"]
   NOW --> CUT --> GOAL --> LATER
@@ -272,7 +272,21 @@ ION CDM：进程内 dump 48 个 <400KB dmabuf。LIN DMI n=36 在 **212992B** 缓
 
 `#369` 已刷 B：前置 Demux `0x3090` 用堆 `0x08c908c9` + even `0xca` odd `0x9c`（BGGR）。dump `demux=0x3c003c01/0x8c908c9/0xca/0x9c` 粘住。仍 **0 字节**，`streamon_rc=124`，`viol_id=0` pix=2592 line=976，`as0=0`，clcstat 全 0。even/odd **不是**剩下的 AXI 卡死点。Crop last `0xa1f079f`、Demux last `0x07a00a20`、MID `0x3c01a3` 都粘着。
 
-`#403` 已刷 B（`#418`）：front MNDS_C V_SIZE `0x0293016f` `vsz=0x293016f` 粘住。仍 4591616，UV 659.145 avg 132.6，`vst=0`。**V_SIZE 不是 chroma 缺口。** 保留。`#404` 只改 MNDS_C V_STRIPE `0x02930000`。
+`#411` 已刷 B（`#427`）后撤回：front MNDS_C H_PAD `0xc047b212` `hpd=0xc047b212` 粘住。**0 字节**，`viol=0` `img=0x0` as0 C=0。640 pack 的 MNDS_C 词作为 chroma 缺口已穷尽。禁止再写 H_PAD。
+
+`#410` 已刷 B（`#426`）：front MNDS_C V_PAD `0x0011d7a9` `vpd=0x0` 弹回。仍 4591616。**硅不吃 V_PAD。已撤回。** 禁止再写 V_PAD。
+
+`#408` 已刷 B（`#424`）后撤回：front MNDS_C H_PHASE `0xc047b058` `hph=0xc047b058` 粘住。**0 字节，`img=0x20`**，as0 C=0，`bus=0x80000000`。`#425` 恢复 4591616。禁止再写 H_PHASE `0xc047b058`。禁止再写 H_SIZE dest。
+
+`#407` 已刷 B（`#422`）：front MNDS_C H_SIZE `0x090f0a1f` `hsz=0x90f0a1f` 粘住。**0 字节，`viol=0x13`（19）**，as0 C=0。Display Full dest + 640 chroma 2× 相位是 dest last 同类。**已撤回。** `#423` 回到 4591616。
+
+`#406` 已刷 B（`#421`）：front MNDS_C H_STRIPE `0x090f0000` `hst=0x90f0000` 粘住。仍 4591616，UV 659.145 avg 132.4。**H_STRIPE 不是 chroma 缺口。** 保留。
+
+`#405` 已刷 B（`#420`）：front MNDS_C V_PHASE `0x0011d7a9` `vph=0x1117a9` 粘住。仍 4591616，UV 659.145 avg 132.4。**V_PHASE 不是 chroma 缺口。** 保留。
+
+`#404` 已刷 B（`#419`）：front MNDS_C V_STRIPE `0x02930000` `vst=0x2930000` 粘住。仍 4591616，UV 659.145 avg 132.4，`vph=0`。**V_STRIPE 不是 chroma 缺口。** 保留。
+
+`#403` 已刷 B（`#418`）：front MNDS_C V_SIZE `0x0293016f` `vsz=0x293016f` 粘住。仍 4591616，UV 659.145 avg 132.6，`vst=0`。**V_SIZE 不是 chroma 缺口。** 保留。
 
 `#402` 已刷 B（`#417`）：front WM5 packer 3 `packer5=0x3` 粘住。仍 4591616，**UV avg 19.3**。**CamX packer 3 是 UBWC；线性 C 必须 PLAIN_8。** 已撤回。
 

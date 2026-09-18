@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # STREAMON Titan 480 PIX: CSID IPP → CAMIF → CLC → DISP linear NV12.
 # Rear HyperOS path is CSID1 + IFE1 (IFE0 idle). Front Camera ID 1 is
-# the same IFE1/CSID1, CSIPHY4, 2592×1952 → Display 2320×1320
+# the same IFE1/CSID1, CSIPHY4, 2592×1952 identity NV12
+# (#412 Camera ID 1 live WM 2592×1952 / 2592×976; Display Full
+# pix_wh = '2320x1320' was mashed 640+CamX).
 # (#386 RC+WM pad around MNDS 2314×1314; #384 WM-only 2320 falsified).
 # Do not dual STREAMON with DebayerCpu / loopback.
 # Do not copy rear Crop last 0xfef0bf3 onto imx596.
@@ -75,7 +77,7 @@ run(['media-ctl', '-d', MC, '-l', '"msm_csid1":4 -> "msm_vfe1_pix":0[1]'], check
 
 if FRONT:
     fmt = 'fmt:SBGGR10_1X10/2592x1952 field:none'
-    pix_wh = '2320x1320'
+    pix_wh = '2592x1952'
 else:
     fmt = 'fmt:SGBRG10_1X10/4080x3060 field:none'
     pix_wh = '1920x1080'
@@ -117,7 +119,7 @@ except FileNotFoundError:
 r = run([
     'timeout', '--kill-after=2', '12', 'v4l2-ctl', '-d', pix,
     '--set-fmt-video=width=%s,height=%s,pixelformat=NV12' % (
-        '2320' if FRONT else '1920', '1320' if FRONT else '1080'),
+        '2592' if FRONT else '1920', '1952' if FRONT else '1080'),
     '--stream-mmap', '--stream-count=3', '--stream-to=/tmp/pix.nv12',
 ])
 print(f'streamon_rc={r.returncode}')
@@ -153,12 +155,39 @@ if burst5:
 incr5 = re.findall(r'dagu ife\d+ pix stop .* incr5=(0x[0-9a-f]+)', log)
 if incr5:
     print(f'incr5={incr5[-1]}')
+wm5cfg1 = re.findall(r'dagu ife\d+ pix stop .* wm5cfg1=(0x[0-9a-f]+)', log)
+if wm5cfg1:
+    print(f'wm5cfg1={wm5cfg1[-1]}')
+wm4 = re.findall(r'dagu ife\d+ pix stop .* wm4=(0x[0-9a-f]+)/', log)
+if wm4:
+    print(f'wm4={wm4[-1]}')
+wm5 = re.findall(r'dagu ife\d+ pix stop .* wm5=(0x[0-9a-f]+)/', log)
+if wm5:
+    print(f'wm5={wm5[-1]}')
 vszc = re.findall(r'dagu ife\d+ mnds_c .* vsz=(0x[0-9a-f]+)', log)
 if vszc:
     print(f'mnds_c_vsz={vszc[-1]}')
 vstc = re.findall(r'dagu ife\d+ mnds_c .* vst=(0x[0-9a-f]+)', log)
 if vstc:
     print(f'mnds_c_vst={vstc[-1]}')
+vphc = re.findall(r'dagu ife\d+ mnds_c .* vph=(0x[0-9a-f]+)', log)
+if vphc:
+    print(f'mnds_c_vph={vphc[-1]}')
+hstc = re.findall(r'dagu ife\d+ mnds_c .* hst=(0x[0-9a-f]+)', log)
+if hstc:
+    print(f'mnds_c_hst={hstc[-1]}')
+hszc = re.findall(r'dagu ife\d+ mnds_c .* hsz=(0x[0-9a-f]+)', log)
+if hszc:
+    print(f'mnds_c_hsz={hszc[-1]}')
+hphc = re.findall(r'dagu ife\d+ mnds_c .* hph=(0x[0-9a-f]+)', log)
+if hphc:
+    print(f'mnds_c_hph={hphc[-1]}')
+hpdc = re.findall(r'dagu ife\d+ mnds_c .* hpd=(0x[0-9a-f]+)', log)
+if hpdc:
+    print(f'mnds_c_hpd={hpdc[-1]}')
+vpdc = re.findall(r'dagu ife\d+ mnds_c .* vpd=(0x[0-9a-f]+)', log)
+if vpdc:
+    print(f'mnds_c_vpd={vpdc[-1]}')
 irq1 = re.findall(r'dagu ife\d+ camif irq1=(0x[0-9a-f]+)', log)
 if irq1:
     print('camif_irq1', ' '.join(irq1[-8:]))
@@ -242,7 +271,7 @@ if remote 'test -s /tmp/pix.nv12'; then
 from pathlib import Path
 p = Path("$ROOT/out/camera/pix.nv12")
 raw = p.read_bytes()
-w, h = (2320, 1320) if "$PIX_CAM" == "front" else (1920, 1080)
+w, h = (2592, 1952) if "$PIX_CAM" == "front" else (1920, 1080)
 need = w * h * 3 // 2
 n = len(raw) // need
 print(f"nv12 bytes={len(raw)} frames={n} expect={need}")

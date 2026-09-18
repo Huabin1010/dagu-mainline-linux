@@ -86,7 +86,21 @@ flowchart TB
   classDef later fill:#424242,stroke:#bdbdbd,color:#eee
 ```
 
-一句话：**CDSP FastRPC 已钉住；SLPI persist 转换跑完；SEE 给出 accel suid，25 Hz 非零加速度进 uinput。** 不是 MALFORMED，不是再拆 TLV。
+一句话：**CDSP FastRPC 已钉住；SLPI persist 转换跑完；SEE 给出 accel suid，25 Hz 非零加速度进 uinput。** 不是 MALFORMED，不是再拆 TLV。关机拆 **FastRPC（Fast Remote Procedure Call，快速远程过程调用）** 会话必须先放下 in-flight ctx，再释放 `fastrpc_user`。
+
+## 1.1 关机 Oops（2026-09-18 15:58，`#437`）
+
+journal `-b -1`：IFE（Image Front End，图像前端）PIX STREAMON 15:54 正常、15:55 STREAMOFF **无 Oops**。15:58:50 `The system will reboot now!` 停 `dagu-cdsp-rpc` / `hexagonrpcd-sdsp` / `dagu-ssc` 后：
+
+```text
+Unable to handle kernel NULL pointer dereference at 00000000000005e8
+Workqueue: events fastrpc_context_put_wq
+pc : fastrpc_buf_free+0x20
+```
+
+`0x5e8` 是 `cctx->soc_data`。`fastrpc_buf_free` 用 `buf->fl->cctx` 剥 SID，但 `device_release` 已经 `kfree(fl)`。DSP 应答工作队列后到，读到空 `cctx`。`panic_on_oops=0`，reboot 走不完，USB 停在旧 `g_serial`，sshd/getty 已被 shutdown 停掉。日志：`out/camera/ife-hang-420/`。
+
+正路：`fastrpc_user` kref，invoke ctx 持有用户引用直到 `context_free`；`dma_free_coherent` 用分配时记下的 `buf->phys`，不再解 SID。overlay：`scripts/dagu-overlay-fastrpc.py`。
 
 ## 2. SLPI 内部：进门到出样
 

@@ -24,6 +24,18 @@ Windows on ARM / edk2-msm 移植在 [`port/dagu/`](port/dagu/) 和 [`docs/uefi-p
 
 **刷机指南：** [简体中文](docs/zh-CN/flash-guide.md) · [English](docs/flash-guide.md)
 **Rootfs / 桌面镜像：** [简体中文](docs/zh-CN/rootfs-guide.md) · [English](docs/rootfs-guide.md)
+**最新镜像：** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases)（`v0.1.2`）
+
+## 最近更新（`v0.1.2`）
+
+相对 `v0.1.1`（2026-09-16）：
+
+- **内置麦克风：** WCD9385 AMIC5 走 linger 的 PipeWire（管道线）源（S16LE 单声道 48 kHz），不再掉到 Dummy Output（虚拟输出）。模拟增益 16 + TX_DEC0 108，说话能听见。MultiMedia3 若把 Q6（Qualcomm Hexagon Q6 DSP，高通六号数字信号处理器）的 `OPEN_READ_V3` 漏成 `ADSP_EALREADY`，采集会切到 MultiMedia4，再不行才 MultiMedia2。桌面应用「麦克风测试」和腾讯会议走同一条 Pulse 输入，录完从喇叭回放。Slimbus 只关播放，不关 device 3 上的采集。
+- **摄像头：** 前置 imx596 skip 2×2（1296×976）、后置 s5kjn1 skip 4×4（1020×764）仍是产品预览路径（SoftISP（Software Image Signal Processor，软件图像信号处理器））。Snapshot / 会议保持活 mmap。GNOME 方向不再把流 HV 镜像。xcast 仍限制在四个 mmap 槽。Titan 480 的 IFE（Image Front End，图像前端）1 PIX（Pixel path，像素通路）已在 HyperOS dump 上出线性 NV12；Linux 取景器在前置 IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）过门前仍走 SoftISP（Software Image Signal Processor，软件图像信号处理器）。
+- **平板会话：** 磁吸键盘 HID 不再走 `keyd`；长按连发不是 GPIO46 `KEY_WAKEUP`。GNOME 设置里蓝牙配对在 BlueZ `AlreadyExists` 之后能完成。背光和喇叭音量重启后还在。双电量计整包可以显示 100%。
+- **片上总线：** Himax 和 CS35L41 走 per-SE 的 GENI IRAM。KTZ、电量计、键盘、充电泵在 GENI I2C 上。LSM6DSO 从 SLPI SEE 经 FastRPC 出数；FastRPC 会话在重启拆除后仍能活。
+
+预构建账号仍是 `dagu` / `dagu`（第一次进桌面请改掉）。**只刷 B 槽。**
 
 ## 快速开始
 

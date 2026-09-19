@@ -1535,7 +1535,7 @@ if marker3 not in text:
 	 * Parameter); BlueZ maps it to le-connection-abort-by-local
 	 * and the GNOME 未设置 row spins until GDBus times out.
 	 */
-	if (!cp->phys && scan_1m(hdev)) {
+	if (!cp->phys) {
 		cp->phys |= LE_SCAN_PHY_1M;
 		set_ext_conn_params(conn, p);
 		plen += sizeof(*p);

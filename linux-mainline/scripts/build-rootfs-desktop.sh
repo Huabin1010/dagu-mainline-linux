@@ -88,6 +88,7 @@ install -m 755 "$ROOT/scripts/dagu-build-gnome-bt.sh" \
 		"$ROOTFS/tmp/dagu-gnome-bt/dagu-build-gnome-bt.sh"
 chroot "$ROOTFS" env ROOT_PASSWORD="$PASS" SUITE="$SUITE" MIRROR="$MIRROR" \
 	DAGU_PATCH_BLUEZ="${DAGU_PATCH_BLUEZ:-0}" \
+	DAGU_PATCH_GNOMEBT="${DAGU_PATCH_GNOMEBT:-0}" \
 	/bin/bash /tmp/rootfs-desktop-setup.sh
 rm -rf "$ROOTFS/tmp/rootfs-desktop-setup.sh" \
 	"$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback" \

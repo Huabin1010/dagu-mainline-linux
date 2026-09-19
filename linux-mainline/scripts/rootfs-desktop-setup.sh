@@ -158,8 +158,9 @@ if [ -f /tmp/dagu-bluez-hid/dagu-bluez-hid-wait-incoming.py ]; then
 			/usr/local/sbin/dagu-build-bluez-hid.sh || true
 	fi
 fi
-# GNOME 未设置: unnamed LE rows must Pair immediately; Connect after Pair
-# has 25s (DAGU_PATCH_GNOMEBT=1 during image build, or live on the tablet).
+# GNOME 未设置: unnamed LE rows must Pair immediately; AlreadyExists after
+# a CLI pair is success; Connect after Pair has 25s
+# (DAGU_PATCH_GNOMEBT=1 during image build, or live on the tablet).
 if [ -f /tmp/dagu-gnome-bt/dagu-gnome-bt-setup-unnamed.py ]; then
 	install -m 755 /tmp/dagu-gnome-bt/dagu-gnome-bt-setup-unnamed.py \
 		/usr/local/sbin/dagu-gnome-bt-setup-unnamed.py
@@ -188,6 +189,13 @@ bt connectable on
 bt bondable on
 bt fast-conn on
 timeout 2 bluetoothctl pairable on >/dev/null 2>&1 || true
+# GNOME Settings 未设置 is !Paired && !Trusted. bluetoothctl pair leaves
+# Trusted=no; the row stays 未设置 and Device1.Pair returns AlreadyExists.
+# Trust every bonded device so Settings shows Disconnected and Connects.
+timeout 3 bluetoothctl devices Paired 2>/dev/null | awk '{print $2}' | while read -r addr; do
+	[ -n "$addr" ] || continue
+	timeout 2 bluetoothctl trust "$addr" >/dev/null 2>&1 || true
+done
 EOF
 chmod 755 /usr/local/sbin/dagu-bt-hid-host.sh
 mkdir -p /etc/systemd/system/bluetooth.service.d

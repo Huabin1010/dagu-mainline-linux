@@ -3,8 +3,9 @@
  * Leftover empty 0x05 vs real KEY_UP for the Nanosic 803 boot keyboard.
  *
  * Host unit tests compile this with NANOSIC_GHOST_HOST. The driver includes
- * it as-is. Keep leftover evidence (vendor / GPIO / bounce / stale seq)
- * here so Ctrl+C then C-up-while-Ctrl cannot drift from the test.
+ * it as-is. Leftover evidence is vendor / GPIO / bounce / stale seq.
+ * Do not time-debounce empty KEY_UP: a fast tap (ji / baidu) releases
+ * inside 80ms, and dropping it leaves the last letter down.
  */
 #ifndef _NANOSIC_KBD_GHOST_H
 #define _NANOSIC_KBD_GHOST_H
@@ -24,7 +25,6 @@ struct nanosic_ghost_ctx {
 	bool rx_have_prev_seq;
 	s8 rx_seq_delta;
 	bool gpio_pending;
-	bool in_empty_debounce;
 	bool in_vendor_bounce;
 };
 
@@ -47,18 +47,10 @@ static inline bool nanosic_kbd_empty(const u8 *p)
 	return nanosic_keys_zero(p);
 }
 
-/*
- * Modifier-only (keys=00, p[1] set) is the HID boot KEY_UP for the last
- * non-modifier key while Ctrl/Shift/Alt stay held. That is a real C
- * release after Ctrl+C, not leftover. Drop it only with leftover
- * evidence. Do not apply the 80ms empty debounce: a fast chord KEY_UP
- * lands inside that window.
- */
-static inline bool nanosic_ghost_mod_only(const u8 *p, bool seen_vendor,
+/* GENI leftover, not an MCU KEY_UP. */
+static inline bool nanosic_ghost_leftover(bool seen_vendor,
 					  const struct nanosic_ghost_ctx *ctx)
 {
-	if (!nanosic_keys_zero(p) || !p[1])
-		return false;
 	if (seen_vendor)
 		return true;
 	if (ctx->gpio_pending)
@@ -69,6 +61,19 @@ static inline bool nanosic_ghost_mod_only(const u8 *p, bool seen_vendor,
 	    ctx->rx_seq_delta != 1 && ctx->rx_seq_delta != 2)
 		return true;
 	return false;
+}
+
+/*
+ * Modifier-only (keys=00, p[1] set) is the HID boot KEY_UP for the last
+ * non-modifier key while Ctrl/Shift/Alt stay held. That is a real C
+ * release after Ctrl+C, not leftover.
+ */
+static inline bool nanosic_ghost_mod_only(const u8 *p, bool seen_vendor,
+					  const struct nanosic_ghost_ctx *ctx)
+{
+	if (!nanosic_keys_zero(p) || !p[1])
+		return false;
+	return nanosic_ghost_leftover(seen_vendor, ctx);
 }
 
 /* True: GENI leftover empty 0x05, not the MCU KEY_UP. */
@@ -83,16 +88,7 @@ static inline bool nanosic_ghost_empty_ctx(const u8 *p, bool seen_vendor,
 		return true;
 	if (!ctx->have_kbd_down)
 		return false;
-	if (ctx->in_empty_debounce)
-		return true;
-	if (ctx->gpio_pending)
-		return true;
-	if (ctx->in_vendor_bounce)
-		return true;
-	if (ctx->rx_have_prev_seq &&
-	    ctx->rx_seq_delta != 1 && ctx->rx_seq_delta != 2)
-		return true;
-	return false;
+	return nanosic_ghost_leftover(seen_vendor, ctx);
 }
 
 #endif /* _NANOSIC_KBD_GHOST_H */

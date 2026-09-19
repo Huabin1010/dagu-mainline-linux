@@ -76,10 +76,10 @@
  * GPIO83 already high, not the same envelope as 0x22, and not the
  * bounce IRQ that follows a keepalive within 16ms (pulse already
  * consumed; CAF's 22ms extra read is what created leftover).
- * 80ms after KEY_DOWN is leftover; a real tap KEY_UP is later.
+ * Do not time-debounce empty KEY_UP: a fast tap (ji / baidu)
+ * releases in 30–60ms with seq +1 and GPIO83 high.
  */
 #define NANOSIC_VENDOR_GHOST_MS	400
-#define NANOSIC_KBD_EMPTY_DEBOUNCE_MS	80
 #define NANOSIC_VENDOR_BOUNCE_MS	16
 
 struct nanosic_hid_desc {
@@ -113,7 +113,6 @@ struct nanosic_kb {
 	/* Last 0x22/0x23 keepalive. Drain leftover empty 0x05 is ghost. */
 	unsigned long last_vendor_jiffies;
 	bool have_vendor;
-	unsigned long last_kbd_down_jiffies;
 	bool have_kbd_down;
 	bool rx_is_drain;
 	s8 rx_seq_delta;
@@ -451,14 +450,6 @@ static bool nanosic_leftover_window(struct nanosic_kb *kb, bool seen_vendor)
 	       time_before(jiffies, kb->last_vendor_jiffies + win);
 }
 
-static bool nanosic_kbd_empty_debounce(struct nanosic_kb *kb)
-{
-	return kb->have_kbd_down &&
-	       time_before(jiffies,
-			   kb->last_kbd_down_jiffies +
-			   msecs_to_jiffies(NANOSIC_KBD_EMPTY_DEBOUNCE_MS));
-}
-
 static void nanosic_inject_keyboard(struct nanosic_kb *kb, u8 *p)
 {
 	u8 report[9];
@@ -472,12 +463,7 @@ static void nanosic_inject_keyboard(struct nanosic_kb *kb, u8 *p)
 		return;
 	memcpy(kb->last_kbd, report, 9);
 	kb->have_kbd = true;
-	if (!nanosic_kbd_empty(report)) {
-		kb->last_kbd_down_jiffies = jiffies;
-		kb->have_kbd_down = true;
-	} else {
-		kb->have_kbd_down = false;
-	}
+	kb->have_kbd_down = !nanosic_kbd_empty(report);
 	nanosic_inject(kb, NANOSIC_HID_KEYBOARD, report, 9);
 }
 
@@ -553,7 +539,6 @@ static bool nanosic_ghost_empty(struct nanosic_kb *kb, const u8 *p,
 		.rx_have_prev_seq = kb->rx_have_prev_seq,
 		.rx_seq_delta = kb->rx_seq_delta,
 		.gpio_pending = nanosic_data_pending(kb),
-		.in_empty_debounce = nanosic_kbd_empty_debounce(kb),
 		.in_vendor_bounce = kb->have_vendor &&
 			time_before(jiffies,
 				    kb->last_vendor_jiffies + bounce),
@@ -633,10 +618,12 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 			}
 			/* Leftover 0x05 is keys=00. A leftover often has
 			 * garbage p[1]; a real chord KEY_UP is keys=00 with
-			 * the still-held modifier (Ctrl+C then C up). Drop
-			 * only with leftover evidence (vendor / GPIO /
-			 * bounce / stale seq). GPIO83 still low after the
-			 * read means the MCU has another/leftover byte.
+			 * the still-held modifier (Ctrl+C then C up). A
+			 * fast tap KEY_UP is empty with seq +1/+2 and
+			 * GPIO83 already high (board #524: ji I-up at
+			 * +33ms was dropped by the old 80ms debounce).
+			 * Drop only with leftover evidence (vendor / GPIO /
+			 * bounce / stale seq).
 			 */
 			if (nanosic_ghost_empty(kb, p, seen_vendor)) {
 				dev_info(&kb->client->dev,

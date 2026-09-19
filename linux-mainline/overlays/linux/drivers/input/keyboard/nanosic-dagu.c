@@ -19,7 +19,9 @@
  * keepalive, empty 0x05 only on release). Trim after the first record,
  * do not parse a replayed sequence, and do not inject leftover empty
  * 0x05 / pointer after a 0x22 keepalive — mutter 50 cancels compositor
- * hold-repeat on KEY_UP or a seat pointer event.
+ * hold-repeat on KEY_UP or a seat pointer event. Modifier-only
+ * (keys=00, p[1] set) is the real C KEY_UP while Ctrl stays held;
+ * dropping it leaves C down and compositor-repeat fires Ctrl+C.
  */
 
 #include <linux/bits.h>
@@ -40,6 +42,8 @@
 #include <linux/string.h>
 #include <linux/sysfs.h>
 #include <linux/workqueue.h>
+
+#include "nanosic-kbd-ghost.h"
 
 #define NANOSIC_WRITE_LEN	66
 #define NANOSIC_READ_LEN	68
@@ -431,25 +435,6 @@ static bool nanosic_kbd_rollover(const u8 *p)
 	return true;
 }
 
-static bool nanosic_keys_zero(const u8 *p)
-{
-	unsigned int i;
-
-	for (i = 3; i < 9; i++) {
-		if (p[i])
-			return false;
-	}
-	return true;
-}
-
-static bool nanosic_kbd_empty(const u8 *p)
-{
-	/* p[2] is reserved. GENI leftover there is not a held modifier. */
-	if (p[1])
-		return false;
-	return nanosic_keys_zero(p);
-}
-
 static bool nanosic_leftover_window(struct nanosic_kb *kb, bool seen_vendor)
 {
 	unsigned long win = msecs_to_jiffies(NANOSIC_VENDOR_GHOST_MS);
@@ -562,26 +547,19 @@ static bool nanosic_ghost_empty(struct nanosic_kb *kb, const u8 *p,
 				bool seen_vendor)
 {
 	unsigned long bounce = msecs_to_jiffies(NANOSIC_VENDOR_BOUNCE_MS);
+	struct nanosic_ghost_ctx ctx = {
+		.have_kbd_down = kb->have_kbd_down,
+		.have_vendor = kb->have_vendor,
+		.rx_have_prev_seq = kb->rx_have_prev_seq,
+		.rx_seq_delta = kb->rx_seq_delta,
+		.gpio_pending = nanosic_data_pending(kb),
+		.in_empty_debounce = nanosic_kbd_empty_debounce(kb),
+		.in_vendor_bounce = kb->have_vendor &&
+			time_before(jiffies,
+				    kb->last_vendor_jiffies + bounce),
+	};
 
-	if (nanosic_keys_zero(p) && p[1])
-		return true;
-	if (!nanosic_kbd_empty(p))
-		return false;
-	if (seen_vendor)
-		return true;
-	if (!kb->have_kbd_down)
-		return false;
-	if (nanosic_kbd_empty_debounce(kb))
-		return true;
-	if (nanosic_data_pending(kb))
-		return true;
-	if (kb->have_vendor &&
-	    time_before(jiffies, kb->last_vendor_jiffies + bounce))
-		return true;
-	if (kb->rx_have_prev_seq &&
-	    kb->rx_seq_delta != 1 && kb->rx_seq_delta != 2)
-		return true;
-	return false;
+	return nanosic_ghost_empty_ctx(p, seen_vendor, &ctx);
 }
 
 static void nanosic_parse_vendor(struct nanosic_kb *kb, u8 *p, size_t len)
@@ -653,11 +631,12 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 				left -= 9;
 				break;
 			}
-			/* Leftover 0x05 is keys=00, often with garbage p[1].
-			 * GPIO83 still low after the read means the MCU has
-			 * another/leftover byte — not a real release.
-			 * Clean empty after GPIO rises, seq +1/+2, and not
-			 * the 16ms keepalive bounce is the MCU KEY_UP.
+			/* Leftover 0x05 is keys=00. A leftover often has
+			 * garbage p[1]; a real chord KEY_UP is keys=00 with
+			 * the still-held modifier (Ctrl+C then C up). Drop
+			 * only with leftover evidence (vendor / GPIO /
+			 * bounce / stale seq). GPIO83 still low after the
+			 * read means the MCU has another/leftover byte.
 			 */
 			if (nanosic_ghost_empty(kb, p, seen_vendor)) {
 				dev_info(&kb->client->dev,

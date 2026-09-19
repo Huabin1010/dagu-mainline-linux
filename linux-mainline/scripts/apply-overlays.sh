@@ -22,6 +22,17 @@ install_src drivers/video/backlight/ktz8866.c
 install_src drivers/input/touchscreen/himax-dagu.c
 install_src drivers/usb/misc/ps5169-dagu.c
 install_src drivers/input/keyboard/nanosic-dagu.c
+install_src drivers/input/keyboard/nanosic-kbd-ghost.h
+grep -q '#include "nanosic-kbd-ghost.h"' \
+	"$KERNEL_SRC/drivers/input/keyboard/nanosic-dagu.c" || {
+	echo "nanosic: leftover vs KEY_UP must share nanosic-kbd-ghost.h" >&2
+	exit 1
+}
+grep -q 'nanosic_ghost_empty_ctx' \
+	"$KERNEL_SRC/drivers/input/keyboard/nanosic-dagu.c" || {
+	echo "nanosic: driver must call nanosic_ghost_empty_ctx" >&2
+	exit 1
+}
 install_src drivers/power/supply/bq2597x-dagu.c
 install_src drivers/power/supply/pm8150b-charger-dagu.c
 install_src drivers/power/supply/p9418-dagu.c

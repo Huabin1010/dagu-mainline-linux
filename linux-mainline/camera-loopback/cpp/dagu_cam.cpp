@@ -203,11 +203,17 @@ struct Pipe {
 	unsigned w = 0, h = 0, stride = 0;
 	unsigned loop_w = DAGU_WEBCAM_W, loop_h = DAGU_WEBCAM_H;
 	uint32_t fourcc = 0;
-	bool rot180 = false;
+	bool hflip = false;
+	bool vflip = false;
 	/* s5kjn1 GBRG Debayer STORE is B,G,R in the same RG24 mmap where
 	 * imx596 BGGR is R,G,B. RGB pack makes rear Coke/red go blue. */
 	bool bgr = false;
 	bool rear = false;
+	float dg = 1.f;
+	float tone_dg = -1.f;
+	uint8_t tone[256]{};
+	unsigned agc_mean = 0;
+	unsigned agc_clip_pm = 0;
 	std::mutex mu;
 	std::condition_variable cv;
 	std::deque<Request *> done;
@@ -371,29 +377,34 @@ static void rgb24_row_to_yuyv(const uint8_t *s, uint8_t *d, unsigned w, bool bgr
 	}
 }
 
-static const uint8_t *preview_lut(bool rear)
+static void refresh_tone(Pipe *p)
 {
-	/* DebayerCpu dumps near-linear 8-bit (10-bit RAW in the low bits).
-	 * Snapshot GTK stretches it; wemeet now takes RGB24 so indoor Y≈47
-	 * is a black preview. Front skip 2×2 sees 4 photosites/pixel → 4×
-	 * preamp + sRGB. Rear skip 4×4 already averages 16 photosites; the
-	 * same 4× tone curve blows a desk to Y≈207. */
-	static uint8_t t_front[256], t_rear[256];
-	static bool init;
-	if (!init) {
-		for (int s = 0; s < 2; s++) {
-			uint8_t *t = s ? t_rear : t_front;
-			float pre = s ? 1.f : 4.f;
-			for (int i = 0; i < 256; i++) {
-				float x = std::min(1.f, (float)i * pre / 255.f);
-				float y = (x <= 0.0031308f) ? 12.92f * x
-							    : 1.055f * powf(x, 1.f / 2.4f) - 0.055f;
-				t[i] = (uint8_t)std::min(255, (int)(y * 255.f + 0.5f));
-			}
+	/* DebayerCpu Adjust already gamma-encodes. A second sRGB plus a 4×
+	 * preamp clipped indoor desks (Y≈207) and stretched skip/ISO grain.
+	 * Digital gain is AGC leftover after analog/exposure; the knee
+	 * keeps highlights from going pastel-white. */
+	float g = p->dg;
+	if (g < 0.7f)
+		g = 0.7f;
+	if (g > 1.6f)
+		g = 1.6f;
+	g = floorf(g * 20.f + 0.5f) / 20.f;
+	if (g == p->tone_dg)
+		return;
+	p->tone_dg = g;
+	for (int i = 0; i < 256; i++) {
+		float x = std::min(1.f, (float)i * g / 255.f);
+		if (x > 0.78f) {
+			float t01 = (x - 0.78f) / 0.22f;
+			x = 0.78f + 0.22f * (t01 / (1.f + 1.8f * t01));
 		}
-		init = true;
+		x = 0.42f + 1.12f * (x - 0.42f);
+		if (x < 0.f)
+			x = 0.f;
+		if (x > 1.f)
+			x = 1.f;
+		p->tone[i] = (uint8_t)(x * 255.f + 0.5f);
 	}
-	return rear ? t_rear : t_front;
 }
 
 static void yuyv_to_rgb24(const uint8_t *src, uint8_t *dst, unsigned w,
@@ -424,8 +435,8 @@ static void yuyv_to_rgb24(const uint8_t *src, uint8_t *dst, unsigned w,
 
 static void rgb_to_webcam_rgb24(const uint8_t *src, unsigned stride, unsigned sw,
 				unsigned sh, unsigned bpp, int ri, int gi, int bi,
-				uint8_t *dst, unsigned dw, unsigned dh, bool rot180,
-				bool rear)
+				uint8_t *dst, unsigned dw, unsigned dh,
+				bool hflip, bool vflip, const uint8_t *lut)
 {
 	unsigned crop_w, crop_h, x0, y0;
 	if (sw * dh >= sh * dw) {
@@ -444,21 +455,20 @@ static void rgb_to_webcam_rgb24(const uint8_t *src, unsigned stride, unsigned sw
 		y0 = (sh - crop_h) / 2;
 	}
 	crop_w &= ~1u;
-	const uint8_t *lut = preview_lut(rear);
 	thread_local std::vector<uint8_t> rgbrow;
 	rgbrow.resize(dw * 3);
 	for (unsigned dy = 0; dy < dh; dy++) {
 		unsigned sy = y0 + dy * crop_h / dh;
 		if (sy >= sh)
 			sy = sh - 1;
-		if (rot180)
+		if (vflip)
 			sy = sh - 1 - sy;
 		const uint8_t *row = src + sy * stride;
 		for (unsigned dx = 0; dx < dw; dx++) {
 			unsigned sx = x0 + dx * crop_w / dw;
 			if (sx >= sw)
 				sx = sw - 1;
-			if (rot180)
+			if (hflip)
 				sx = sw - 1 - sx;
 			const uint8_t *p = row + sx * bpp;
 			uint8_t *o = rgbrow.data() + dx * 3;
@@ -492,13 +502,13 @@ static void pack_rgb24(Pipe *p, FrameBuffer *buf, uint8_t *dst)
 		scaled.resize(p->loop_w * p->loop_h * 2);
 		for (unsigned dy = 0; dy < p->loop_h; dy++) {
 			unsigned sy = dy * p->h / p->loop_h;
-			if (p->rot180)
+			if (p->vflip)
 				sy = p->h - 1 - sy;
 			const uint8_t *srow = native.data() + sy * p->w * 2;
 			uint8_t *drow = scaled.data() + dy * p->loop_w * 2;
 			for (unsigned dx = 0; dx < p->loop_w; dx += 2) {
 				unsigned sx = (dx * p->w / p->loop_w) & ~1u;
-				if (p->rot180)
+				if (p->hflip)
 					sx = (p->w - 2 - sx) & ~1u;
 				drow[dx * 2] = srow[sx * 2];
 				drow[dx * 2 + 1] = srow[sx * 2 + 1];
@@ -533,8 +543,61 @@ static void pack_rgb24(Pipe *p, FrameBuffer *buf, uint8_t *dst)
 	} else if (p->fourcc == fcc4('R', 'A', '2', '4')) {
 		bpp = 4;
 	}
+	refresh_tone(p);
 	rgb_to_webcam_rgb24(src, p->stride, p->w, p->h, bpp, ri, gi, bi, dst,
-			    p->loop_w, p->loop_h, p->rot180, p->rear);
+			    p->loop_w, p->loop_h, p->hflip, p->vflip, p->tone);
+}
+
+static void yuyv_soften(uint8_t *img, unsigned w, unsigned h)
+{
+	/* Skip 2×2/4×4 keeps one Bayer quad; 1-2-1 is that reconstruction. */
+	for (unsigned y = 0; y < h; y++) {
+		uint8_t *row = img + (size_t)y * w * 2;
+		uint8_t y0 = row[0];
+		for (unsigned x = 2; x + 2 < w * 2; x += 2) {
+			uint8_t y1 = row[x];
+			uint8_t y2 = row[x + 2];
+			row[x] = (uint8_t)((y0 + 2 * y1 + y2) >> 2);
+			y0 = y1;
+		}
+		uint8_t u0 = row[1], v0 = row[3];
+		for (unsigned x = 4; x + 4 < w * 2; x += 4) {
+			uint8_t u1 = row[x + 1], v1 = row[x + 3];
+			uint8_t u2 = row[x + 5], v2 = row[x + 7];
+			row[x + 1] = (uint8_t)((u0 + 2 * u1 + u2) >> 2);
+			row[x + 3] = (uint8_t)((v0 + 2 * v1 + v2) >> 2);
+			u0 = u1;
+			v0 = v1;
+		}
+	}
+}
+
+static void meter_and_agc(Pipe *p, const uint8_t *yuyv)
+{
+	unsigned w = p->loop_w, h = p->loop_h;
+	unsigned long sum = 0;
+	unsigned n = 0, clip = 0;
+	for (unsigned y = 0; y < h; y += 8) {
+		const uint8_t *row = yuyv + (size_t)y * w * 2;
+		for (unsigned x = 0; x < w; x += 8) {
+			unsigned v = row[x * 2];
+			sum += v;
+			n++;
+			if (v > 240)
+				clip++;
+		}
+	}
+	if (!n)
+		return;
+	unsigned mean = (unsigned)(sum / n);
+	p->agc_mean = mean;
+	p->agc_clip_pm = clip * 1000u / n;
+	float dg = p->dg;
+	if (p->agc_clip_pm > 40 || mean > 128)
+		dg = std::max(0.85f, dg * 0.96f);
+	else if (mean < 88)
+		dg = std::min(1.2f, dg * 1.03f);
+	p->dg = dg;
 }
 
 static void apply_preview_ctrls(Pipe *p, Request *req)
@@ -542,24 +605,9 @@ static void apply_preview_ctrls(Pipe *p, Request *req)
 	if (!p->camera)
 		return;
 	const ControlInfoMap &infos = p->camera->controls();
-	/* No sensor helper → IPA AGC does not ramp. Pin per-sensor codes.
-	 * Front imx596: V4L2 analogue 0–960 (0x3c0 = CamX 16×). 8.0 left
-	 * PGA at ~1× and wemeet mmap Y≈47.
-	 * Rear s5kjn1: V4L2 analogue 1–16. The same 960/33000 clamps to
-	 * 16/3142; 4× preview LUT then blows indoor (Y≈207, white desk). */
-	if (infos.find(&controls::AeEnable) != infos.end())
-		req->controls().set(controls::AeEnable, false);
-	if (p->rear) {
-		if (infos.find(&controls::ExposureTime) != infos.end())
-			req->controls().set(controls::ExposureTime, 2000);
-		if (infos.find(&controls::AnalogueGain) != infos.end())
-			req->controls().set(controls::AnalogueGain, 4.0f);
-	} else {
-		if (infos.find(&controls::ExposureTime) != infos.end())
-			req->controls().set(controls::ExposureTime, 33000);
-		if (infos.find(&controls::AnalogueGain) != infos.end())
-			req->controls().set(controls::AnalogueGain, 960.0f);
-	}
+	/* IPA Agc owns analog/exposure. Gray-world AWB stays off. */
+	if (infos.find(&controls::AwbEnable) != infos.end())
+		req->controls().set(controls::AwbEnable, false);
 }
 
 static void on_complete(Pipe *p, Request *req)
@@ -715,6 +763,8 @@ static void pipe_thread(Pipe *p)
 			if (buf && p->loop_fd >= 0) {
 				auto tp = std::chrono::steady_clock::now();
 				pack_rgb24(p, buf, yuyv.data());
+				yuyv_soften(yuyv.data(), p->loop_w, p->loop_h);
+				meter_and_agc(p, yuyv.data());
 				pack_us += (unsigned long)std::chrono::duration_cast<
 					std::chrono::microseconds>(
 					std::chrono::steady_clock::now() - tp)
@@ -731,14 +781,11 @@ static void pipe_thread(Pipe *p)
 				if ((frames % 60) == 0) {
 					auto t1 = std::chrono::steady_clock::now();
 					double s = std::chrono::duration<double>(t1 - t0).count();
-					auto gain = req->metadata().get(controls::AnalogueGain);
-					auto exp = req->metadata().get(controls::ExposureTime);
 					if (s > 0.2)
-						log("%s fps %.1f pack=%.1fms gain=%s exp=%s",
+						log("%s fps %.1f pack=%.1fms meanY=%u clip=%u dg=%.2f",
 						    p->dev.c_str(), 60.0 / s,
 						    pack_us / 60.0 / 1000.0,
-						    gain ? std::to_string(*gain).c_str() : "-",
-						    exp ? std::to_string(*exp).c_str() : "-");
+						    p->agc_mean, p->agc_clip_pm, p->dg);
 					t0 = t1;
 					pack_us = 0;
 				}
@@ -786,9 +833,19 @@ int dagu_pipe_start(int slot, const char *camera_id, const char *loopback_dev,
 	p->id = camera_id;
 	p->dev = loopback_dev;
 	p->stop = false;
-	p->rot180 = (slot == 0); /* imx596: loopback has no V4L2 rotation */
+	/*
+	 * Sensors sit 180° on the glass. HV-flip (rot180) makes the frame
+	 * upright but mirrors left/right. V-only (front pack, rear already
+	 * V in 0x0101) keeps handwriting readable.
+	 */
+	p->vflip = (slot == 0); /* imx596 0x0101=0; pack V only, not HV */
+	p->hflip = (slot == 1); /* s5kjn1 silicon H+V; pack H leaves V */
 	p->bgr = (slot == 1); /* s5kjn1 GBRG: RG24 bytes are B,G,R */
 	p->rear = (slot == 1);
+	p->dg = 1.f;
+	p->tone_dg = -1.f;
+	p->agc_mean = 0;
+	p->agc_clip_pm = 0;
 	/* Take OUTPUT, start the gray pump, then libcamera STREAMON. */
 	if (open_loop(p, DAGU_WEBCAM_W, DAGU_WEBCAM_H) < 0) {
 		pipe_teardown(p);
@@ -799,8 +856,8 @@ int dagu_pipe_start(int slot, const char *camera_id, const char *loopback_dev,
 		pipe_teardown(p);
 		return -1;
 	}
-	log("start slot %d %s -> %s rot180=%d bgr=%d", slot, camera_id,
-	    loopback_dev, p->rot180 ? 1 : 0, p->bgr ? 1 : 0);
+	log("start slot %d %s -> %s hflip=%d vflip=%d bgr=%d", slot, camera_id,
+	    loopback_dev, p->hflip ? 1 : 0, p->vflip ? 1 : 0, p->bgr ? 1 : 0);
 	return 0;
 }
 

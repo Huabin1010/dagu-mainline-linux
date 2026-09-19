@@ -8,13 +8,13 @@ LDFLAGS ?= $(or $(PKG_LIBS),-lcamera -lcamera-base) -lstdc++ -pthread
 
 .PHONY: all install clean test
 
+all: dagu-camera-loopback
+
 test: tests/test_app_v4l2
 	./tests/test_app_v4l2
 
 tests/test_app_v4l2: tests/test_app_v4l2.c
 	$(CC) -O2 -Wall -o $@ $<
-
-all: dagu-camera-loopback
 
 dagu_cam.o: cpp/dagu_cam.cpp cpp/dagu_cam.h
 	$(CXX) $(CXXFLAGS) -O3 -c cpp/dagu_cam.cpp -o dagu_cam.o

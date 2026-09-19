@@ -2030,6 +2030,7 @@ EOF
 # Snapshot already had devices/camera=yes; Chromium/Chrome did not.
 cat >/usr/local/sbin/dagu-camera-portal-perm.py <<'EOF'
 #!/usr/bin/env python3
+"""Grant xdg-desktop-portal Camera to Snapshot / Chromium / Chrome / wemeet."""
 import sys
 try:
     import dbus
@@ -2043,6 +2044,13 @@ APPS = (
     "google-chrome",
     "com.google.Chrome",
     "chromium",
+    "wemeetapp",
+    "WemeetApp",
+    "wemeet",
+    "com.tencent.wemeet",
+    "com.tencent.wemeetapp",
+    "wechat",
+    "com.tencent.wechat",
 )
 bus = dbus.SessionBus()
 store = bus.get_object(
@@ -2052,6 +2060,9 @@ store = bus.get_object(
 iface = dbus.Interface(store, "org.freedesktop.impl.portal.PermissionStore")
 for app in APPS:
     iface.SetPermission("devices", True, "camera", app, ["yes"])
+    print(f"devices/camera {app or '(default)'} = yes")
+lookup = iface.Lookup("devices", "camera")
+print("lookup", lookup)
 EOF
 chmod 755 /usr/local/sbin/dagu-camera-portal-perm.py
 mkdir -p /etc/xdg/autostart
@@ -2306,8 +2317,9 @@ EOF
 cat >/etc/modprobe.d/v4l2loopback.conf <<'EOF'
 # exclusive_caps=1: Chrome V4L2 skips Capture+Output nodes.
 # Watch stamps YUYV 1280x720 so capture is listed before SoftISP STREAMON.
-# max_buffers=8: xcast/webrtc REQBUFS(4). Default 2 → meeting preview black.
-options v4l2loopback devices=2 video_nr=20,21 exclusive_caps=1,1 max_buffers=8 card_label=dagu-front,dagu-rear
+# max_buffers=4: xcast REQBUFS(4) then mmap only those 4 slots.
+# max_buffers=8 granted extra indices; DQBUF 4..7 SIGSEGV on rear→front.
+options v4l2loopback devices=2 video_nr=20,21 exclusive_caps=1,1 max_buffers=4 card_label=dagu-front,dagu-rear
 EOF
 echo v4l2loopback >/etc/modules-load.d/dagu-v4l2loopback.conf
 # Product camera path is the Rust+C++ ELF. Do not cat the lab .sh here.

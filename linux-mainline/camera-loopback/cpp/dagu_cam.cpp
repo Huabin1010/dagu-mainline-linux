@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <array>
+#include <vector>
 #include <cerrno>
 #include <chrono>
 #include <unordered_map>
@@ -34,11 +35,23 @@
 
 using namespace libcamera;
 
-/* Webcam contract for V4L2 apps (wemeet/WeChat/Chrome). SoftISP stays at
- * skip 2×2 / 4×4; pack center-crops to 16:9 and scales here. 1296×976 and
- * 1020×764 are not on xcast's size list, so S_FMT 640×480/1280×720 EBUSY. */
+/* Webcam contract for xcast (wemeet): YUYV fourcc + packed YUYV bytes.
+ * yuyv=1 is the only GL first.draw path. RGB24/I420 fourcc stay black.
+ * Driver G_FMT sizeimage stays packed W*H*2. QUERYBUF/mmap is packed
+ * plus I420 UV at +packed (19:53). W*H*4 mmap completes wrap as
+ * 0x15012 and convert reads an empty 0x15009 plane (20:15 is_bokeh).
+ * write() copies packed pixels; the driver reports bytesused equal
+ * to CONVERT_PAD length. W*H*4 bytesused is the 20:10 smash.
+ * Capture DQBUF index stays in 0..3: xcast mmaps 4 slots (21:12
+ * rear→front SIGSEGV when index 4..7 leaked leftover as plane).
+ * SoftISP stays at skip 2×2 / 4×4; pack center-crops to 16:9 here. */
 static constexpr unsigned DAGU_WEBCAM_W = 1280;
 static constexpr unsigned DAGU_WEBCAM_H = 720;
+
+static unsigned webcam_write_bytes(unsigned w, unsigned h)
+{
+	return w * h * 2;
+}
 
 static void log(const char *fmt, ...)
 {
@@ -106,12 +119,33 @@ static int s_ctrl(int fd, uint32_t id, int value)
 	return ioctl(fd, VIDIOC_S_CTRL, &c);
 }
 
-static int set_loop_yuyv(int fd, uint32_t type, unsigned w, unsigned h)
+/* Mid-gray YUYV. Y=16 is BT.601 black; xcast paints that as a black tile. */
+static void fill_gray_yuyv(uint8_t *z, size_t n)
+{
+	memset(z, 0x80, n);
+}
+
+static int write_gray_yuyv(int fd, unsigned w, unsigned h, unsigned copies)
+{
+	std::vector<uint8_t> z(webcam_write_bytes(w, h));
+	fill_gray_yuyv(z.data(), z.size());
+	int ok = 0;
+	for (unsigned i = 0; i < copies; i++) {
+		if (write(fd, z.data(), z.size()) >= 0)
+			ok++;
+		else
+			log("gray write: %m");
+	}
+	return ok > 0 ? 0 : -1;
+}
+
+static int set_loop_xcast(int fd, uint32_t type, unsigned w, unsigned h)
 {
 	v4l2_format fmt{};
 	fmt.type = type;
 	fmt.fmt.pix.width = w;
 	fmt.fmt.pix.height = h;
+	/* YUYV fourcc (yuyv=1). Driver keeps G_FMT sizeimage packed. */
 	fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
 	fmt.fmt.pix.field = V4L2_FIELD_NONE;
 	fmt.fmt.pix.bytesperline = w * 2;
@@ -129,32 +163,35 @@ int dagu_stamp_loopback(const char *dev, unsigned w, unsigned h)
 	int fd = open(dev, O_RDWR | O_CLOEXEC);
 	if (fd < 0)
 		return -1;
-	/* Previous NV12 keep_format blocks YUYV S_FMT. Drop it first. */
+	/* Previous RGB24/I420 keep_format blocks YUYV S_FMT. Drop it first. */
 	s_ctrl(fd, 0x0098f900, 0);
-	if (set_loop_yuyv(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, w, h) < 0) {
+	if (set_loop_xcast(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, w, h) < 0) {
 		close(fd);
 		return -1;
 	}
-	(void)set_loop_yuyv(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, w, h);
-	/* YUYV mid-gray: Y=16 U=128 V=128 → 0x10 0x80 0x10 0x80 */
-	std::vector<uint8_t> z(w * h * 2);
-	for (size_t i = 0; i + 3 < z.size(); i += 4) {
-		z[i] = 0x10;
-		z[i + 1] = 0x80;
-		z[i + 2] = 0x10;
-		z[i + 3] = 0x80;
+	{
+		struct v4l2_streamparm parm = {};
+
+		parm.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+		parm.parm.output.capability = V4L2_CAP_TIMEPERFRAME;
+		parm.parm.output.timeperframe.numerator = 1;
+		parm.parm.output.timeperframe.denominator = 30;
+		if (ioctl(fd, VIDIOC_S_PARM, &parm) < 0)
+			log("%s S_PARM 30: %m", dev);
 	}
-	if (write(fd, z.data(), z.size()) < 0)
+	/* Several copies so xcast can DQBUF before SoftISP takes OUTPUT. */
+	if (write_gray_yuyv(fd, w, h, 4) < 0)
 		log("%s dummy write: %m", dev);
 	s_ctrl(fd, 0x0098f900, 1); /* keep_format */
-	s_ctrl(fd, 0x0098f902, 400); /* timeout ms */
-	v4l2_format got{};
-	got.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (ioctl(fd, VIDIOC_G_FMT, &got) == 0)
-		log("%s stamped %ux%u fourcc=%.4s keep=1", dev, got.fmt.pix.width,
-		    got.fmt.pix.height, reinterpret_cast<char *>(&got.fmt.pix.pixelformat));
-	close(fd);
-	return 0;
+	/*
+	 * timeout=0: timeout_image is vzalloc zeros (BT.601 black).
+	 * sustain_framerate re-serves the last gray/live buffer when
+	 * this OUTPUT fd closes — xcast must not see an empty queue.
+	 */
+	s_ctrl(fd, 0x0098f902, 0);
+	s_ctrl(fd, 0x0098f901, 1); /* sustain_framerate */
+	log("%s stamped %ux%u YUYV hold-fd=%d", dev, w, h, fd);
+	return fd;
 }
 
 struct Pipe {
@@ -337,7 +374,7 @@ static void rgb24_row_to_yuyv(const uint8_t *s, uint8_t *d, unsigned w, bool bgr
 static const uint8_t *preview_lut(bool rear)
 {
 	/* DebayerCpu dumps near-linear 8-bit (10-bit RAW in the low bits).
-	 * Snapshot GTK stretches it; wemeet paints YUYV as-is so indoor Y≈47
+	 * Snapshot GTK stretches it; wemeet now takes RGB24 so indoor Y≈47
 	 * is a black preview. Front skip 2×2 sees 4 photosites/pixel → 4×
 	 * preamp + sRGB. Rear skip 4×4 already averages 16 photosites; the
 	 * same 4× tone curve blows a desk to Y≈207. */
@@ -359,10 +396,36 @@ static const uint8_t *preview_lut(bool rear)
 	return rear ? t_rear : t_front;
 }
 
-static void rgb_to_webcam_yuyv(const uint8_t *src, unsigned stride, unsigned sw,
-			       unsigned sh, unsigned bpp, int ri, int gi, int bi,
-			       uint8_t *dst, unsigned dw, unsigned dh, bool rot180,
-			       bool rear)
+static void yuyv_to_rgb24(const uint8_t *src, uint8_t *dst, unsigned w,
+			  unsigned h)
+{
+	for (unsigned y = 0; y < h; y++) {
+		const uint8_t *s = src + y * w * 2;
+		uint8_t *d = dst + y * w * 3;
+		for (unsigned x = 0; x < w; x += 2) {
+			int y0 = s[0], u = s[1] - 128, y1 = s[2], v = s[3] - 128;
+			int r0 = y0 + ((359 * v) >> 8);
+			int g0 = y0 - ((88 * u + 183 * v) >> 8);
+			int b0 = y0 + ((454 * u) >> 8);
+			int r1 = y1 + ((359 * v) >> 8);
+			int g1 = y1 - ((88 * u + 183 * v) >> 8);
+			int b1 = y1 + ((454 * u) >> 8);
+			d[0] = (uint8_t)(r0 < 0 ? 0 : r0 > 255 ? 255 : r0);
+			d[1] = (uint8_t)(g0 < 0 ? 0 : g0 > 255 ? 255 : g0);
+			d[2] = (uint8_t)(b0 < 0 ? 0 : b0 > 255 ? 255 : b0);
+			d[3] = (uint8_t)(r1 < 0 ? 0 : r1 > 255 ? 255 : r1);
+			d[4] = (uint8_t)(g1 < 0 ? 0 : g1 > 255 ? 255 : g1);
+			d[5] = (uint8_t)(b1 < 0 ? 0 : b1 > 255 ? 255 : b1);
+			s += 4;
+			d += 6;
+		}
+	}
+}
+
+static void rgb_to_webcam_rgb24(const uint8_t *src, unsigned stride, unsigned sw,
+				unsigned sh, unsigned bpp, int ri, int gi, int bi,
+				uint8_t *dst, unsigned dw, unsigned dh, bool rot180,
+				bool rear)
 {
 	unsigned crop_w, crop_h, x0, y0;
 	if (sw * dh >= sh * dw) {
@@ -407,7 +470,7 @@ static void rgb_to_webcam_yuyv(const uint8_t *src, unsigned stride, unsigned sw,
 	}
 }
 
-static void pack_yuyv(Pipe *p, FrameBuffer *buf, uint8_t *dst)
+static void pack_rgb24(Pipe *p, FrameBuffer *buf, uint8_t *dst)
 {
 	const auto &planes = buf->planes();
 	if (p->fourcc == formats::NV12.fourcc()) {
@@ -424,14 +487,15 @@ static void pack_yuyv(Pipe *p, FrameBuffer *buf, uint8_t *dst)
 				nv12_to_yuyv(y, p->stride, uv, p->stride, p->w, p->h,
 					     native.data());
 		}
-		/* Reuse RGB scaler by treating packed YUYV as fake 2-byte pixels is
-		 * wrong. Sample native YUYV macropixels into webcam. */
+		/* Scale native YUYV macropixels, then emit RGB24. */
+		thread_local std::vector<uint8_t> scaled;
+		scaled.resize(p->loop_w * p->loop_h * 2);
 		for (unsigned dy = 0; dy < p->loop_h; dy++) {
 			unsigned sy = dy * p->h / p->loop_h;
 			if (p->rot180)
 				sy = p->h - 1 - sy;
 			const uint8_t *srow = native.data() + sy * p->w * 2;
-			uint8_t *drow = dst + dy * p->loop_w * 2;
+			uint8_t *drow = scaled.data() + dy * p->loop_w * 2;
 			for (unsigned dx = 0; dx < p->loop_w; dx += 2) {
 				unsigned sx = (dx * p->w / p->loop_w) & ~1u;
 				if (p->rot180)
@@ -442,6 +506,7 @@ static void pack_yuyv(Pipe *p, FrameBuffer *buf, uint8_t *dst)
 				drow[dx * 2 + 3] = srow[sx * 2 + 3];
 			}
 		}
+		memcpy(dst, scaled.data(), p->loop_w * p->loop_h * 2);
 		return;
 	}
 
@@ -468,8 +533,8 @@ static void pack_yuyv(Pipe *p, FrameBuffer *buf, uint8_t *dst)
 	} else if (p->fourcc == fcc4('R', 'A', '2', '4')) {
 		bpp = 4;
 	}
-	rgb_to_webcam_yuyv(src, p->stride, p->w, p->h, bpp, ri, gi, bi, dst,
-			   p->loop_w, p->loop_h, p->rot180, p->rear);
+	rgb_to_webcam_rgb24(src, p->stride, p->w, p->h, bpp, ri, gi, bi, dst,
+			    p->loop_w, p->loop_h, p->rot180, p->rear);
 }
 
 static void apply_preview_ctrls(Pipe *p, Request *req)
@@ -506,7 +571,9 @@ static void on_complete(Pipe *p, Request *req)
 
 static int open_loop(Pipe *p, unsigned w, unsigned h)
 {
-	p->loop_fd = open(p->dev.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
+	/* Blocking write: O_NONBLOCK dropped frames and xcast saw
+	 * EAGAIN-silent holes as a stuck black preview. */
+	p->loop_fd = open(p->dev.c_str(), O_RDWR | O_CLOEXEC);
 	if (p->loop_fd < 0) {
 		log("open %s: %m", p->dev.c_str());
 		return -1;
@@ -515,18 +582,30 @@ static int open_loop(Pipe *p, unsigned w, unsigned h)
 	p->loop_h = h;
 	v4l2_format cap{};
 	cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (ioctl(p->loop_fd, VIDIOC_G_FMT, &cap) == 0 && cap.fmt.pix.width >= 2 &&
-	    cap.fmt.pix.height >= 2 && cap.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV) {
+	bool have_xcast = ioctl(p->loop_fd, VIDIOC_G_FMT, &cap) == 0 &&
+			  cap.fmt.pix.width >= 2 && cap.fmt.pix.height >= 2 &&
+			  cap.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV;
+	if (have_xcast) {
 		p->loop_w = cap.fmt.pix.width;
 		p->loop_h = cap.fmt.pix.height;
-	} else if (set_loop_yuyv(p->loop_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, w, h) < 0) {
+	} else if (set_loop_xcast(p->loop_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, w, h) < 0) {
 		log("S_FMT %s: %m", p->dev.c_str());
 		return -1;
 	}
-	if (set_loop_yuyv(p->loop_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, p->loop_w, p->loop_h) < 0)
-		log("S_FMT output %s %ux%u: %m", p->dev.c_str(), p->loop_w, p->loop_h);
+	/* Never S_FMT while xcast already mmap'd CAPTURE: that tears
+	 * RGB24 and logs fail.create.frame. */
 	s_ctrl(p->loop_fd, 0x0098f900, 1);
-	s_ctrl(p->loop_fd, 0x0098f902, 400);
+	/* Do not arm timeout=400: timeout_image is zeros, xcast goes black
+	 * during libcamera STREAMON. Write gray now; live frames follow. */
+	s_ctrl(p->loop_fd, 0x0098f902, 0);
+	s_ctrl(p->loop_fd, 0x0098f901, 1);
+	if (write_gray_yuyv(p->loop_fd, p->loop_w, p->loop_h, 4) < 0)
+		log("open_loop gray %s: %m", p->dev.c_str());
+	/* After the seed frames: never block in write() if xcast stops
+	 * DQBUF. That D-state plus the /proc walk wedged sshd. */
+	int fl = fcntl(p->loop_fd, F_GETFL, 0);
+	if (fl >= 0)
+		fcntl(p->loop_fd, F_SETFL, fl | O_NONBLOCK);
 	return 0;
 }
 
@@ -607,7 +686,7 @@ static int start_camera(Pipe *p, unsigned want_w, unsigned want_h)
 static void pipe_thread(Pipe *p)
 {
 	dagu_pin_cpu_0_3();
-	std::vector<uint8_t> yuyv(p->loop_w * p->loop_h * 2);
+	std::vector<uint8_t> yuyv(webcam_write_bytes(p->loop_w, p->loop_h));
 	unsigned frames = 0;
 	unsigned long pack_us = 0;
 	auto t0 = std::chrono::steady_clock::now();
@@ -615,12 +694,17 @@ static void pipe_thread(Pipe *p)
 		Request *req = nullptr;
 		{
 			std::unique_lock<std::mutex> lk(p->mu);
-		p->cv.wait_for(lk, std::chrono::milliseconds(500),
+		p->cv.wait_for(lk, std::chrono::milliseconds(33),
 			       [&] { return p->stop || !p->done.empty(); });
 			if (p->stop)
 				break;
-			if (p->done.empty())
+			if (p->done.empty()) {
+				/* libcamera STREAMON still running; keep
+				 * RGB24 flowing so xcast DQBUF never empties. */
+				if (p->loop_fd >= 0)
+					write_gray_yuyv(p->loop_fd, p->loop_w, p->loop_h, 1);
 				continue;
+			}
 			req = p->done.front();
 			p->done.pop_front();
 		}
@@ -630,7 +714,7 @@ static void pipe_thread(Pipe *p)
 			FrameBuffer *buf = req->findBuffer(p->stream);
 			if (buf && p->loop_fd >= 0) {
 				auto tp = std::chrono::steady_clock::now();
-				pack_yuyv(p, buf, yuyv.data());
+				pack_rgb24(p, buf, yuyv.data());
 				pack_us += (unsigned long)std::chrono::duration_cast<
 					std::chrono::microseconds>(
 					std::chrono::steady_clock::now() - tp)
@@ -705,15 +789,16 @@ int dagu_pipe_start(int slot, const char *camera_id, const char *loopback_dev,
 	p->rot180 = (slot == 0); /* imx596: loopback has no V4L2 rotation */
 	p->bgr = (slot == 1); /* s5kjn1 GBRG: RG24 bytes are B,G,R */
 	p->rear = (slot == 1);
-	if (start_camera(p, w, h) < 0) {
-		pipe_teardown(p);
-		return -1;
-	}
+	/* Take OUTPUT, start the gray pump, then libcamera STREAMON. */
 	if (open_loop(p, DAGU_WEBCAM_W, DAGU_WEBCAM_H) < 0) {
 		pipe_teardown(p);
 		return -1;
 	}
 	p->th = std::thread(pipe_thread, p);
+	if (start_camera(p, w, h) < 0) {
+		pipe_teardown(p);
+		return -1;
+	}
 	log("start slot %d %s -> %s rot180=%d bgr=%d", slot, camera_id,
 	    loopback_dev, p->rot180 ? 1 : 0, p->bgr ? 1 : 0);
 	return 0;

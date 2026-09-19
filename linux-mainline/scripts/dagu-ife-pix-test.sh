@@ -167,6 +167,13 @@ if recrop:
     print('sof_recrop=%s/%s meas=%s/%s n=%d' % (*recrop[-1], len(recrop)))
 else:
     print('sof_recrop=False')
+reload = re.findall(
+    r'dagu ife\d+ pix wm_update en-reload wm=(\d+) addr=(0x[0-9a-f]+) cfg0=(0x[0-9a-f]+) incr=(0x[0-9a-f]+)',
+    log)
+if reload:
+    print('en_reload wm=%s addr=%s cfg0=%s incr=%s n=%d' % (*reload[-1], len(reload)))
+else:
+    print('en_reload=False')
 burst5 = re.findall(r'dagu ife\d+ pix stop .* burst5=(0x[0-9a-f]+)', log)
 if burst5:
     print(f'burst5={burst5[-1]}')
@@ -194,6 +201,9 @@ if vphc:
 hsty = re.findall(r'dagu ife\d+ mnds_y .* hst=(0x[0-9a-f]+)', log)
 if hsty:
     print(f'mnds_y_hst={hsty[-1]}')
+vszy = re.findall(r'dagu ife\d+ mnds_y .* vsz=(0x[0-9a-f]+)', log)
+if vszy:
+    print(f'mnds_y_vsz={vszy[-1]}')
 vphy = re.findall(r'dagu ife\d+ mnds_y .* vph=(0x[0-9a-f]+)', log)
 if vphy:
     print(f'mnds_y_vph={vphy[-1]}')

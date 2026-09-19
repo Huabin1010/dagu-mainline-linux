@@ -34,6 +34,61 @@ install_src drivers/media/i2c/s5kjn1-dagu-regs.h
 install_src drivers/media/platform/qcom/camss/camss-vfe-480.c
 install_src drivers/media/platform/qcom/camss/camss-video.c
 install_src drivers/media/v4l2loopback-dagu/v4l2loopback.c
+grep -q 'xcast / webrtc v4l2.c memset' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: xcast memory=0 must be treated as MMAP" >&2
+	exit 1
+}
+grep -q 'found.size fps field' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: ENUM_FRAMEINTERVALS must stay Discrete 30" >&2
+	exit 1
+}
+grep -q 'requestbuffers; memory=0 is MMAP' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: REQBUFS memory=0 must be treated as MMAP" >&2
+	exit 1
+}
+grep -q 'xcast yuyv=1 needs YUYV fourcc' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: fourcc must stay YUYV so xcast yuyv=1 / first.draw" >&2
+	exit 1
+}
+grep -q 'wraps the mmap as format 0x15012' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: YUYV wrap is xcast 0x15012; mmap must not be W*H*4" >&2
+	exit 1
+}
+grep -q '20:15 SIGSEGV, src pointer ASCII' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: W*H*4 mmap is the 20:15 is_bokeh convert crash" >&2
+	exit 1
+}
+grep -q '19:53 SIGSEGV when length was packed' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: QUERYBUF.length must cover convert UV on mmap" >&2
+	exit 1
+}
+grep -q 'SoftISP write() while xcast has mmap' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: REQBUFS must not rebuild a mapped capture queue" >&2
+	exit 1
+}
+grep -q 'O_NONBLOCK used to return EAGAIN without' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: O_NONBLOCK DQBUF must sustain last frame" >&2
+	exit 1
+}
+grep -q 'DAGU_XCAST_MMAP_SLOTS' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: capture DQBUF index must stay in xcast mmap slots 0..3" >&2
+	exit 1
+}
+grep -q 'Stamp / SoftISP OUTPUT STREAMOFF while xcast still' \
+	"$KERNEL_SRC/drivers/media/v4l2loopback-dagu/v4l2loopback.c" || {
+	echo "v4l2loopback: OUTPUT STREAMOFF must not tear a mapped capture queue" >&2
+	exit 1
+}
 install_src drivers/media/v4l2loopback-dagu/v4l2loopback.h
 install_src drivers/media/v4l2loopback-dagu/v4l2loopback_formats.h
 install_src drivers/media/v4l2loopback-dagu/Makefile
@@ -5967,6 +6022,10 @@ if "wm == DISP_C_WM && width == 2320 && height == 660)\n\t\t\twritel_relaxed(PAC
     raise SystemExit("camss-vfe-480.c: #402 front WM5 packer 3 must stay reverted")
 if "0x0293016f" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #403 front MNDS_C V_SIZE 0x0293016f missing")
+if "writel_relaxed(0x0293016f" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #507 must not keep MNDS_C V 368→660 after Y src 1472")
+if "writel_relaxed(0x029302df" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #507 MNDS_C V src must be 736")
 if "CLC_MNDS_C + MNDS_V_SIZE" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #403 MNDS_C V_SIZE write missing")
 if "vsz=0x293016f still 4591616" not in vfe480:
@@ -6019,8 +6078,8 @@ if "hst=0x90f0000 stuck" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #466 MNDS Y H_STRIPE still 4591616 must stay falsified")
 if "Do not retry MNDS Y H_STRIPE as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #466 must not retry MNDS Y H_STRIPE as the chroma gap")
-if "writel_relaxed(0x0011d7a9,\n\t\t\t       vfe->base + CLC_MNDS_Y + MNDS_V_PHASE)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #467 MNDS Y V_PHASE 0x0011d7a9 missing")
+if "writel_relaxed(0x0023b0d2,\n\t\t\t       vfe->base + CLC_MNDS_Y + MNDS_V_PHASE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #506 MNDS Y V_PHASE must be 1472/1320 not #467 736/1320")
 if "Do not retry MNDS Y V_PHASE as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #467 must not retry MNDS Y V_PHASE as the chroma gap")
 if "#467 on #492: vph=0x1117a9 stuck" not in vfe480:
@@ -6391,6 +6450,14 @@ if "dagu csid ipp eof resume" in csidgen:
     raise SystemExit("camss-csid-gen2.c: #503 IPP EOF resume meas=0/0xfff still 1 COMP — do not keep")
 if "dagu csid ipp sof recrop" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #504 must re-arm IPP crop on SOF")
+if "dagu ife%d pix wm_update en-reload" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #505 must rewrite cfg_0/incr/EN like CAF update_wm")
+if "if (cfg & (1 << WM_CFG_EN)) {\n\t\twmb();\n\t\treturn;" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #505 ADDR-only early return left as3 unused")
+if "writel_relaxed(0x052702df" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #506 MNDS_Y V 736→1320 is upscale, not a down scaler")
+if "writel_relaxed(0x052705bf" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #506 MNDS_Y V src must be CSID 1472")
 if "pix_store=" not in pix_test:
     raise SystemExit("dagu-ife-pix-test.sh: #396 pix_store probe missing")
 if "mnds_c_vph=" not in pix_test:
@@ -6399,6 +6466,8 @@ if "mnds_c_hst=" not in pix_test:
     raise SystemExit("dagu-ife-pix-test.sh: #406 MNDS_C H_STRIPE probe missing")
 if "mnds_c_hpd=" not in pix_test:
     raise SystemExit("dagu-ife-pix-test.sh: #411 MNDS_C H_PAD probe missing")
+if "mnds_y_vsz=" not in pix_test:
+    raise SystemExit("dagu-ife-pix-test.sh: #506 MNDS_Y V_SIZE probe missing")
 if "in_w == 2592 && in_h == 1952" not in vfe480:
     raise SystemExit("camss-vfe-480.c: front 2592x1952 live Crop gate missing")
 if "0x09016c7d" not in vfe480:

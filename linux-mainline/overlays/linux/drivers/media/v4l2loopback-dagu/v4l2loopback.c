@@ -177,12 +177,21 @@ typedef unsigned __poll_t;
 #define MAX_BUFFERS 32
 #endif
 
+/*
+ * libxcast video_capture_linux.c REQBUFS count=4, then mmap only
+ * those 4 slots even if the driver granted 8 (cmp w9,#5). Capture
+ * DQBUF index 4..7 reads past calloc(4,16); wrap then convert ld2
+ * from leftover (20:48 x0=0x100000001, 20:58 0xc800000001, 21:12
+ * UTF-16 "ages" on rear→front switch SIGSEGV).
+ */
+#define DAGU_XCAST_MMAP_SLOTS 4
+
 /* module parameters */
 static int debug = 0;
 module_param(debug, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "debugging level (higher values == more verbose)");
 
-#define V4L2LOOPBACK_DEFAULT_MAX_BUFFERS 8
+#define V4L2LOOPBACK_DEFAULT_MAX_BUFFERS DAGU_XCAST_MMAP_SLOTS
 static int max_buffers = V4L2LOOPBACK_DEFAULT_MAX_BUFFERS;
 module_param(max_buffers, int, S_IRUGO);
 MODULE_PARM_DESC(max_buffers,
@@ -1027,15 +1036,20 @@ static int vidioc_enum_frameintervals(struct file *file, void *fh,
 	if (argp->index)
 		return -EINVAL;
 
+	/* xcast / webrtc video_capture_linux found.size fps field:
+	 * CONTINUOUS type=3 is logged as fps.3 then wemeetapp aborts.
+	 * Success path is fps.30 Discrete. Never advertise continuous. */
+	argp->type = V4L2_FRMIVAL_TYPE_DISCRETE;
 	if (dev->keep_format || has_other_owners(opener, dev)) {
-		/* keep_format also locks the frame rate */
 		if (argp->width != dev->pix_format.width ||
 		    argp->height != dev->pix_format.height ||
 		    argp->pixel_format != dev->pix_format.pixelformat)
 			return -EINVAL;
-
-		argp->type = V4L2_FRMIVAL_TYPE_DISCRETE;
 		argp->discrete = dev->capture_param.timeperframe;
+		if (!argp->discrete.numerator || !argp->discrete.denominator) {
+			argp->discrete.numerator = 1;
+			argp->discrete.denominator = V4L2LOOPBACK_FPS_DEFAULT;
+		}
 	} else {
 		if (argp->width < dev->min_width ||
 		    argp->width > dev->max_width ||
@@ -1043,14 +1057,8 @@ static int vidioc_enum_frameintervals(struct file *file, void *fh,
 		    argp->height > dev->max_height ||
 		    !format_by_fourcc(argp->pixel_format))
 			return -EINVAL;
-
-		argp->type = V4L2_FRMIVAL_TYPE_CONTINUOUS;
-		argp->stepwise.min.numerator = 1;
-		argp->stepwise.min.denominator = V4L2LOOPBACK_FPS_MAX;
-		argp->stepwise.max.numerator = V4L2LOOPBACK_FRAME_INTERVAL_MAX;
-		argp->stepwise.max.denominator = 1;
-		argp->stepwise.step.numerator = 1;
-		argp->stepwise.step.denominator = 1;
+		argp->discrete.numerator = 1;
+		argp->discrete.denominator = V4L2LOOPBACK_FPS_DEFAULT;
 	}
 
 	return 0;
@@ -1611,6 +1619,15 @@ static void put_buffer(struct v4l2l_buffer *buf)
 		buf->buffer.flags &= ~V4L2_BUF_FLAG_MAPPED;
 }
 
+static u32 dagu_xcast_slots(const struct v4l2_loopback_device *dev)
+{
+	u32 n = dev->used_buffer_count;
+
+	if (n > DAGU_XCAST_MMAP_SLOTS)
+		n = DAGU_XCAST_MMAP_SLOTS;
+	return n;
+}
+
 static void prepare_buffer_queue(struct v4l2_loopback_device *dev, int count)
 {
 	struct v4l2l_buffer *bufd, *n;
@@ -1670,7 +1687,12 @@ static int vidioc_reqbufs(struct file *file, void *fh,
 
 	if (req_count > dev->buffer_count)
 		req_count = dev->buffer_count;
+	if (req_count > DAGU_XCAST_MMAP_SLOTS)
+		req_count = DAGU_XCAST_MMAP_SLOTS;
 
+	/* xcast / webrtc v4l2.c memset requestbuffers; memory=0 is MMAP. */
+	if (reqbuf->memory == 0)
+		reqbuf->memory = V4L2_MEMORY_MMAP;
 	switch (reqbuf->memory) {
 	case V4L2_MEMORY_MMAP:
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)
@@ -1736,9 +1758,23 @@ static int vidioc_reqbufs(struct file *file, void *fh,
 	if (result < 0)
 		goto exit_reqbufs_unlock;
 
+	if (has_other_owners(opener, dev) && any_mapped_buffer(dev) &&
+	    dev->used_buffer_count > 0) {
+		/* SoftISP write() while xcast has mmap: do not rebuild
+		 * the queue. prepare_buffer_queue() unsets QUEUED/DONE
+		 * and xcast then logs "Not enough buffer", copies
+		 * sizeimage into a heap buffer and SIGSEGV in YUYV→I420.
+		 */
+		acquire_token(dev, opener, format, token);
+		opener->io_method = V4L2L_IO_MMAP;
+		if (dev->used_buffer_count > DAGU_XCAST_MMAP_SLOTS)
+			dev->used_buffer_count = DAGU_XCAST_MMAP_SLOTS;
+		opener->buffer_count = dagu_xcast_slots(dev);
+		goto exit_reqbufs_unlock;
+	}
 	if (has_other_owners(opener, dev) && dev->used_buffer_count > 0) {
 		/* allow 'allocation' of existing number of buffers */
-		req_count = dev->used_buffer_count;
+		req_count = dagu_xcast_slots(dev);
 	} else if (any_mapped_buffer(dev)) {
 		/* do not allow re-allocation if buffers are mapped */
 		result = -EBUSY;
@@ -1814,6 +1850,14 @@ static int vidioc_querybuf(struct file *file, void *fh, struct v4l2_buffer *buf)
 			set_queued(buf->flags);
 		}
 	}
+	/*
+	 * QUERYBUF.length is the mmap size. Convert writes I420 UV on
+	 * that mmap at +packed (19:53 SIGSEGV when length was packed).
+	 * Do not force packed here. G_FMT sizeimage stays packed so
+	 * Create(YUYV) can still see W*H*2. Do not report W*H*4: that
+	 * completes xcast wrap as format 0x15012 and convert then
+	 * reads an empty 0x15009 plane (20:15 SIGSEGV, src=is_bokeh).
+	 */
 	dprintkrw("QUERYBUF(%s, index=%u) -> " BUFFER_DEBUG_FMT_STR,
 		  V4L2_TYPE_IS_CAPTURE(type) ? "CAPTURE" : "OUTPUT", index,
 		  BUFFER_DEBUG_FMT_ARGS(buf));
@@ -1828,13 +1872,14 @@ static void buffer_written(struct v4l2_loopback_device *dev,
 
 	mutex_lock(&dev->image_mutex);
 	if (dev->used_buffer_count != 0) {
+		u32 slots = dagu_xcast_slots(dev);
+
 		spin_lock_bh(&dev->list_lock);
 		list_move_tail(&buf->list_head, &dev->outbufs_list);
 		spin_unlock_bh(&dev->list_lock);
 
 		spin_lock_bh(&dev->lock);
-		dev->bufpos2index[v4l2l_mod64(dev->write_position,
-					      dev->used_buffer_count)] =
+		dev->bufpos2index[v4l2l_mod64(dev->write_position, slots)] =
 			buf->buffer.index;
 
 		++dev->write_position;
@@ -1863,6 +1908,14 @@ static int vidioc_qbuf(struct file *file, void *fh, struct v4l2_buffer *buf)
 		return -EINVAL;
 	bufd = &dev->buffers[index];
 
+	/*
+	 * xcast / webrtc v4l2.c memset the buffer and set type+index
+	 * only. memory=0 is MMAP on this device (REQBUFS already
+	 * allocated MMAP). Rejecting it returns EINVAL forever and
+	 * wemeet paints a black preview ("Not enough buffer").
+	 */
+	if (buf->memory == 0)
+		buf->memory = V4L2_MEMORY_MMAP;
 	switch (buf->memory) {
 	case V4L2_MEMORY_MMAP:
 		if (!(bufd->buffer.flags & V4L2_BUF_FLAG_MAPPED))
@@ -1950,38 +2003,58 @@ static int get_capture_buffer(struct file *file)
 	int pos, timeout_happened;
 	u32 index;
 
-	if ((file->f_flags & O_NONBLOCK) &&
-	    (dev->write_position <= opener->read_position &&
-	     dev->reread_count <= opener->reread_count &&
-	     !dev->timeout_happened))
-		return -EAGAIN;
-	wait_event_interruptible(dev->read_event, can_read(dev, opener));
+	if ((file->f_flags & O_NONBLOCK) && !can_read(dev, opener)) {
+		/*
+		 * xcast v4l2.c: any DQBUF errno except EINTR is
+		 * "Not enough buffer", then fail.create.frame.fmt
+		 * (20:34 green/normal flicker, delayed death).
+		 * O_NONBLOCK used to return EAGAIN without
+		 * check_timers(), so sustain never armed while stamp
+		 * OUTPUT closed and SoftISP was still opening.
+		 */
+		spin_lock_bh(&dev->lock);
+		check_timers(dev);
+		if (dev->sustain_framerate && dev->write_position > 0 &&
+		    dagu_xcast_slots(dev) > 0 &&
+		    dev->reread_count <= opener->reread_count)
+			dev->reread_count = opener->reread_count + 1;
+		spin_unlock_bh(&dev->lock);
+		if (!can_read(dev, opener))
+			return -EAGAIN;
+	}
+	if (!(file->f_flags & O_NONBLOCK))
+		wait_event_interruptible(dev->read_event, can_read(dev, opener));
 
 	mutex_lock(&dev->image_mutex);
-	if (!dev->image || dev->used_buffer_count == 0) {
+	if (!dev->image || dagu_xcast_slots(dev) == 0) {
 		mutex_unlock(&dev->image_mutex);
 		return -EINVAL;
 	}
 	spin_lock_bh(&dev->lock);
-	if (dev->write_position == opener->read_position) {
-		if (dev->reread_count > opener->reread_count + 2)
-			opener->reread_count = dev->reread_count - 1;
-		++opener->reread_count;
-		pos = v4l2l_mod64(opener->read_position +
-					  dev->used_buffer_count - 1,
-				  dev->used_buffer_count);
-	} else {
-		opener->reread_count = 0;
-		if (dev->write_position >
-		    opener->read_position + dev->used_buffer_count)
-			opener->read_position = dev->write_position - 1;
-		pos = v4l2l_mod64(opener->read_position,
-				  dev->used_buffer_count);
-		++opener->read_position;
+	{
+		u32 slots = dagu_xcast_slots(dev);
+
+		if (dev->write_position == opener->read_position) {
+			if (dev->reread_count > opener->reread_count + 2)
+				opener->reread_count = dev->reread_count - 1;
+			++opener->reread_count;
+			pos = v4l2l_mod64(opener->read_position + slots - 1,
+					  slots);
+		} else {
+			opener->reread_count = 0;
+			if (dev->write_position >
+			    opener->read_position + slots)
+				opener->read_position = dev->write_position - 1;
+			pos = v4l2l_mod64(opener->read_position, slots);
+			++opener->read_position;
+		}
+		timeout_happened =
+			dev->timeout_happened && (dev->timeout_jiffies > 0);
+		dev->timeout_happened = 0;
+		index = dev->bufpos2index[pos];
+		if (index >= slots)
+			index = v4l2l_mod64(index, slots);
 	}
-	timeout_happened = dev->timeout_happened && (dev->timeout_jiffies > 0);
-	dev->timeout_happened = 0;
-	index = dev->bufpos2index[pos];
 	if (timeout_happened)
 		get_buffer(&dev->buffers[index]);
 
@@ -2010,6 +2083,8 @@ static int vidioc_dqbuf(struct file *file, void *fh, struct v4l2_buffer *buf)
 	int index;
 	struct v4l2l_buffer *bufd;
 
+	if (buf->memory == 0)
+		buf->memory = V4L2_MEMORY_MMAP;
 	if (buf->memory != V4L2_MEMORY_MMAP)
 		return -EINVAL;
 	if (opener->format_token & V4L2L_TOKEN_TIMEOUT) {
@@ -2117,9 +2192,17 @@ static int vidioc_streamoff(struct file *file, void *fh,
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
 		if (opener->stream_token & token)
 			release_token(dev, opener, stream);
-		/* reset output queue */
-		if (dev->used_buffer_count > 0)
-			prepare_buffer_queue(dev, dev->used_buffer_count);
+		/*
+		 * Stamp / SoftISP OUTPUT STREAMOFF while xcast still
+		 * has CAPTURE mmap: prepare_buffer_queue() unsets
+		 * QUEUED/DONE. xcast then logs "Not enough buffer"
+		 * and fail.create.frame.fmt.0x56595559 (flicker), or
+		 * heap-copies sizeimage and SIGSEGV on camera switch.
+		 */
+		if (dev->used_buffer_count > 0 && !any_mapped_buffer(dev))
+			prepare_buffer_queue(dev, dagu_xcast_slots(dev));
+		else if (dev->sustain_framerate)
+			check_timers(dev);
 		return 0;
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
 		if (opener->stream_token & token) {
@@ -2430,9 +2513,11 @@ static int start_fileio(struct file *file, void *fh, enum v4l2_buf_type type)
 {
 	struct v4l2_loopback_device *dev = v4l2loopback_getdevice(file);
 	struct v4l2_loopback_opener *opener = v4l2l_f_to_opener(file, fh);
-	struct v4l2_requestbuffers reqbuf = { .count = dev->buffer_count,
-					      .memory = V4L2_MEMORY_MMAP,
-					      .type = type };
+	struct v4l2_requestbuffers reqbuf = {
+		.count = DAGU_XCAST_MMAP_SLOTS,
+		.memory = V4L2_MEMORY_MMAP,
+		.type = type
+	};
 	int token = token_from_type(type);
 	int result;
 
@@ -2515,11 +2600,11 @@ static ssize_t v4l2_loopback_write(struct file *file, const char __user *buf,
 		count = dev->buffer_size;
 
 	mutex_lock(&dev->image_mutex);
-	if (!dev->image || dev->used_buffer_count == 0) {
+	if (!dev->image || dagu_xcast_slots(dev) == 0) {
 		mutex_unlock(&dev->image_mutex);
 		return -EINVAL;
 	}
-	index = v4l2l_mod64(dev->write_position, dev->used_buffer_count);
+	index = v4l2l_mod64(dev->write_position, dagu_xcast_slots(dev));
 	get_buffer(&dev->buffers[index]);
 	mutex_unlock(&dev->image_mutex);
 
@@ -2531,8 +2616,21 @@ static ssize_t v4l2_loopback_write(struct file *file, const char __user *buf,
 		put_buffer(&dev->buffers[index]);
 		return -EFAULT;
 	}
+	/* Packed YUYV write leaves CONVERT_PAD tail. Uninitialized
+	 * vmalloc there is green/purple chroma when convert writes
+	 * UV at +packed (20:34 flicker). Neutral 0x80 chroma. */
+	if (count < dev->buffer_size)
+		memset((u8 *)dev->image + b->m.offset + count, 0x80,
+		       dev->buffer_size - count);
 	put_buffer(&dev->buffers[index]);
-	b->bytesused = count;
+	/*
+	 * xcast wrap fills plane+8 only when bytesused==length
+	 * (20:48 core ld2 x0=0x100000001, 20:15 src=is_bokeh).
+	 * Packed bytesused with CONVERT_PAD length is that mismatch.
+	 * W*H*4 bytesused was the 20:10 memcpy smash — length stays
+	 * CONVERT_PAD, never RGBA.
+	 */
+	b->bytesused = dev->buffer_size;
 
 	v4l2l_get_timestamp(b);
 	b->sequence = dev->write_position;
@@ -2585,13 +2683,42 @@ static void free_timeout_buffer(struct v4l2_loopback_device *dev)
 static int allocate_buffers(struct v4l2_loopback_device *dev,
 			    struct v4l2_pix_format *pix_format)
 {
-	u32 buffer_size = PAGE_ALIGN(pix_format->sizeimage);
-	unsigned long image_size =
+	u32 packed = pix_format->sizeimage;
+	u32 buffer_size = PAGE_ALIGN(packed);
+	unsigned long image_size;
+
+	/*
+	 * xcast yuyv=1 needs YUYV fourcc. G_FMT sizeimage stays packed
+	 * so Create sees W*H*2 (W*H*3 sizeimage is fail.create, 19:48).
+	 * After Create it wraps the mmap as format 0x15012, which
+	 * libxcast 3133fc sizes as W*H*4. Mapping W*H*4 lets that wrap
+	 * complete; convert 0x15009→0x15012 then reads plane+8 from an
+	 * empty realloc frame (20:15 SIGSEGV, src pointer ASCII
+	 * is_bokeh). Keep mmap at packed+UV (CONVERT_PAD): 19:53 UV
+	 * write at +packed fits, 20:02 encoded frames. write() copies
+	 * packed pixels; bytesused follows CONVERT_PAD length so wrap
+	 * fills plane+8 (20:48 empty-plane SIGSEGV). W*H*4 length is
+	 * the 20:10 smash. Packed QUERYBUF was the 19:53 SIGSEGV.
+	 */
+	if (pix_format->pixelformat == V4L2_PIX_FMT_YUYV &&
+	    pix_format->width && pix_format->height) {
+		u64 yuyv = (u64)pix_format->width * pix_format->height * 2;
+		u64 need = yuyv + ((u64)pix_format->width *
+				   pix_format->height / 2);
+
+		if (yuyv && yuyv <= 0xffffffffu) {
+			packed = (u32)yuyv;
+			pix_format->sizeimage = (u32)yuyv;
+		}
+		if (need && need <= 0xffffffffu)
+			buffer_size = PAGE_ALIGN((u32)need);
+	}
+	image_size =
 		(unsigned long)buffer_size * (unsigned long)dev->buffer_count;
 	/* vfree on close file operation in case no open handles left */
 
 	if (buffer_size == 0 || dev->buffer_count == 0 ||
-	    buffer_size < pix_format->sizeimage)
+	    buffer_size < packed)
 		return -EINVAL;
 
 	if ((__LONG_MAX__ / buffer_size) < dev->buffer_count)
@@ -2614,12 +2741,12 @@ static int allocate_buffers(struct v4l2_loopback_device *dev,
 	}
 
 	/* FIXME: set buffers to 0 */
-	dev->image = vmalloc(image_size);
+	dev->image = vzalloc(image_size);
 	if (dev->image == NULL) {
 		dev->buffer_size = dev->image_size = 0;
 		return -ENOMEM;
 	}
-	init_buffers(dev, pix_format->sizeimage, buffer_size);
+	init_buffers(dev, buffer_size, buffer_size);
 	dev->buffer_size = buffer_size;
 	dev->image_size = image_size;
 	dprintk("allocate_buffers() -> vmalloc'd %lubytes\n", dev->image_size);

@@ -11,8 +11,11 @@ extern "C" {
 void dagu_pin_cpu_0_3(void);
 void dagu_pin_all_threads(void);
 
-/* Stamp YUYV + keep_format + timeout so spa.v4l2 does not EnumFormat
- * NV12 2x1 (EINVAL) and STREAMON does not EIO before SoftISP. No sensor. */
+/* Stamp YUYV + keep_format + sustain_framerate, write gray frames, and
+ * return the OUTPUT fd still open. keep_format keeps ENUM_FMT after
+ * this fd closes; sustain re-serves the last gray so xcast DQBUF does
+ * not fail while SoftISP opens. Caller close()s before SoftISP takes
+ * OUTPUT. -1 on error. */
 int dagu_stamp_loopback(const char *dev, unsigned w, unsigned h);
 
 /* One slot per camera. 0 = front, 1 = rear. */

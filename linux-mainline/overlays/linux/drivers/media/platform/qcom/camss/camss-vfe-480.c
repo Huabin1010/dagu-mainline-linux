@@ -1471,30 +1471,49 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 	 * Do not retry MID 480×640 as the identity stall.
 	 */
 	if (in_w == 2592 && in_h == 1952) {
-		/* Display Full 2ppc: dest 1320 / src 736. Identity
-		 * 0x079f03cf / 0x03cf01e7 stays in comments.
+		/*
+		 * #506: MNDS is an MN Down Scaler. Display Full Y
+		 * was dest 1320 / src 736 (0x052702df) — V upscale.
+		 * CamX Display Full is CSID last 0x05bf → 1472 pixel
+		 * lines → 1314, pad 1320. 2ppc pipe_h=736 is the
+		 * CAMIF beat count, not the scaler source. First
+		 * 8110080 then CAMIF second SOF without epoch is
+		 * the upscale leftover. One contract: Y V src=1472
+		 * dest=1320. #506 left C at 368→660. #507 pairs
+		 * C V src to 736 (1472/2). Do not ALIGN_UP.
+		 * Do not retry 736→1320.
+		 * Identity 0x079f03cf / 0x03cf01e7 stays in comments.
 		 */
-		writel_relaxed(0x052702df,
+		writel_relaxed(0x052705bf,
 			       vfe->base + CLC_MNDS_Y + MNDS_V_SIZE);
 		writel_relaxed(0x05270000,
 			       vfe->base + CLC_MNDS_Y + MNDS_V_STRIPE);
 		/*
-		 * #467 MNDS Y V_PHASE 0x0011d7a9: same (src<<21)/dest
-		 * as #405 MNDS_C (KEEP, 736/1320 = 368/660). Pack /
-		 * previous restore left Y at 0x00100000. Not H_PHASE.
-		 * Not H_SIZE dest. One variable: Y vertical phase.
-		 * #467 on #492: vph=0x1117a9 stuck (HW drops
-		 * phase[15:14]), still 4591616 UV 659.145
-		 * last_partial=336. Not the chroma gap. Keep.
-		 * Do not retry MNDS Y V_PHASE as the chroma gap.
+		 * Phase follows the same src/dest as V_SIZE
+		 * (1472<<21)/1320. #467 on #492: vph=0x1117a9 stuck
+		 * (0x0011d7a9 = 736/1320) still 4591616 — not the
+		 * chroma gap. Do not retry MNDS Y V_PHASE as the chroma gap.
+		 * #506 replaces it for V downscale.
 		 */
-		writel_relaxed(0x0011d7a9,
+		writel_relaxed(0x0023b0d2,
 			       vfe->base + CLC_MNDS_Y + MNDS_V_PHASE);
-		writel_relaxed(0x0293016f,
+		/*
+		 * #507: pair C V with Y pixel 1472. #403 KEEP
+		 * 0x0293016f (660/368) was not the chroma gap
+		 * (vsz=0x293016f still 4591616). After #506 Y
+		 * src=1472, C still 368→660 is half of the old
+		 * 2ppc 736, not half of 1472. Dest stays 660.
+		 * Phase (736<<21)/660. STREAMON #507: vsz=0x29302df
+		 * stuck, still 1×8110080, camif irq1 0x1 0xc 0x2 0x1.
+		 * Not the second-frame cut. Keep the 736→660 chroma
+		 * contract. Do not retry 368→660. Do not retry C V
+		 * src as the second-frame cut.
+		 */
+		writel_relaxed(0x029302df,
 			       vfe->base + CLC_MNDS_C + MNDS_V_SIZE);
 		writel_relaxed(0x02930000,
 			       vfe->base + CLC_MNDS_C + MNDS_V_STRIPE);
-		writel_relaxed(0x0011d7a9,
+		writel_relaxed(0x0023b0d2,
 			       vfe->base + CLC_MNDS_C + MNDS_V_PHASE);
 		/*
 		 * #465 MNDS Y H_PHASE 0xc023d82c on #489:
@@ -2939,15 +2958,25 @@ static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
 	if (wm != DISP_Y_WM && wm != DISP_C_WM)
 		return;
 	/*
-	 * CAF start: IMAGE_ADDR, EN, RUP, CAMIF. Later frames are
-	 * IMAGE_ADDR + RUP only. #501 front stride 4096 completed
-	 * one NV12 then as3 held the next IOVA unused (as0 stayed
-	 * on frame 0). Rewriting sidecar + EN every COMP_DONE is
-	 * not that hot path. First update still EN+sidecar.
+	 * CAF cam_vfe_bus_ver3_update_wm every frame: image_cfg_0,
+	 * frame_incr, cfg=en_cfg (0x1). ADDR-only (#501/#504) left
+	 * as3 with the next IOVA and as0 on the first 8110080.
+	 * First call still does sidecar then EN. Do not ALIGN_UP.
+	 * Do not rewrite UBWC sidecar on later frames.
 	 */
 	cfg = readl_relaxed(vfe->base + VFE_BUS_WM_CFG(wm));
 	if (cfg & (1 << WM_CFG_EN)) {
+		u32 cfg0 = readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_CFG_0(wm));
+		u32 incr = readl_relaxed(vfe->base + VFE_BUS_WM_FRAME_INCR(wm));
+
+		writel_relaxed(cfg0, vfe->base + VFE_BUS_WM_IMAGE_CFG_0(wm));
+		writel_relaxed(incr, vfe->base + VFE_BUS_WM_FRAME_INCR(wm));
 		wmb();
+		writel_relaxed(1 << WM_CFG_EN | MODE_QCOM_PLAIN << WM_CFG_MODE,
+			       vfe->base + VFE_BUS_WM_CFG(wm));
+		dev_info_ratelimited(vfe->camss->dev,
+				     "dagu ife%d pix wm_update en-reload wm=%u addr=0x%x cfg0=0x%x incr=0x%x\n",
+				     vfe->id, wm, addr, cfg0, incr);
 		return;
 	}
 	vfe_480_wm_sidecar_linear(vfe, wm);

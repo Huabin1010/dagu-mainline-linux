@@ -6,7 +6,13 @@ PKG_LIBS := $(shell pkg-config --libs libcamera 2>/dev/null)
 CXXFLAGS ?= -O2 -std=c++17 -fPIC -pthread $(or $(PKG_CFLAGS),-I/usr/include/libcamera)
 LDFLAGS ?= $(or $(PKG_LIBS),-lcamera -lcamera-base) -lstdc++ -pthread
 
-.PHONY: all install clean
+.PHONY: all install clean test
+
+test: tests/test_app_v4l2
+	./tests/test_app_v4l2
+
+tests/test_app_v4l2: tests/test_app_v4l2.c
+	$(CC) -O2 -Wall -o $@ $<
 
 all: dagu-camera-loopback
 

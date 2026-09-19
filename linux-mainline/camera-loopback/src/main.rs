@@ -2,7 +2,8 @@
 //! SoftISP stays on CPU 0–3. No GStreamer. No spa-libcamera.
 
 use std::ffi::{c_char, CString};
-use std::fs;
+use std::fs::{self, File};
+use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -52,30 +53,73 @@ fn comm(pid: &str) -> String {
 }
 
 fn skip_fd_scan(name: &str) -> bool {
-    /* Producer holds OUTPUT on the same node. Cursor's fd table is huge
-     * and walking it at poll rate froze mutter. Everyone else (wemeetapp,
-     * wechat, pipewire, snapshot) is a real consumer. */
-    name.starts_with("dagu-camera") || name.starts_with("cursor") || name.starts_with("Cursor")
+    /* These never hold /dev/video20/21 as a V4L2 capture client, but
+     * their fd tables are huge. Walking gnome-shell/Xwayland every
+     * tick was 69% CPU idle and starved sshd into a wedged session. */
+    name.starts_with("dagu-camera")
+        || name.starts_with("cursor")
+        || name.starts_with("Cursor")
+        || name == "gnome-shell"
+        || name.starts_with("mutter")
+        || name.starts_with("Xwayland")
+        || name == "Xorg"
+        || name.starts_with("sshd")
+        || name.starts_with("systemd")
+        || name.starts_with("dbus-")
+        || name == "gjs"
 }
 
-fn pid_holds(pid: &str, dev: &str) -> bool {
+fn pid_holds_any(pid: &str, front: bool, rear: bool) -> (bool, bool) {
+    if !front && !rear {
+        return (false, false);
+    }
     let fd_dir = format!("/proc/{pid}/fd");
     let Ok(fds) = fs::read_dir(&fd_dir) else {
-        return false;
+        return (false, false);
     };
+    let mut got_f = false;
+    let mut got_r = false;
     for fd in fds.flatten() {
-        if let Ok(target) = fs::read_link(fd.path()) {
-            if target.as_os_str().as_bytes() == dev.as_bytes() {
-                return true;
-            }
+        let Ok(target) = fs::read_link(fd.path()) else { continue };
+        let b = target.as_os_str().as_bytes();
+        if front && !got_f && b == FRONT_DEV.as_bytes() {
+            got_f = true;
+        }
+        if rear && !got_r && b == REAR_DEV.as_bytes() {
+            got_r = true;
+        }
+        if got_f == front && got_r == rear {
+            break;
         }
     }
-    false
+    (got_f, got_r)
 }
 
-fn holds(dev: &str, skip_pid: u32) -> bool {
+/* One /proc walk for both nodes. Previous code scanned twice. */
+fn client_holds(skip_pid: u32, cached: &[(String, String)]) -> (bool, bool) {
+    let mut want_f = false;
+    let mut want_r = false;
+    for (pid, name) in cached {
+        if want_f && want_r {
+            break;
+        }
+        if pid.parse::<u32>().ok() == Some(skip_pid) {
+            continue;
+        }
+        if skip_fd_scan(name) {
+            continue;
+        }
+        let (f, r) = pid_holds_any(pid, !want_f, !want_r);
+        want_f |= f;
+        want_r |= r;
+    }
+    (want_f, want_r)
+}
+
+fn refresh_user_pids() -> Vec<(String, String)> {
+    let mut out = Vec::new();
     let Ok(procs) = fs::read_dir("/proc") else {
-        return false;
+        return out;
     };
     for ent in procs.flatten() {
         let pid = ent.file_name();
@@ -83,18 +127,16 @@ fn holds(dev: &str, skip_pid: u32) -> bool {
         if !pid.as_bytes().iter().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        if pid.parse::<u32>().ok() == Some(skip_pid) {
+        if fs::read_link(format!("/proc/{pid}/exe")).is_err() {
             continue;
         }
         let name = comm(pid);
         if skip_fd_scan(&name) {
             continue;
         }
-        if pid_holds(pid, dev) {
-            return true;
-        }
+        out.push((pid.to_string(), name));
     }
-    false
+    out
 }
 
 fn camss_reset() {
@@ -103,11 +145,26 @@ fn camss_reset() {
     }
 }
 
-fn stamp(dev: &str, w: u32, h: u32) {
+fn stamp_hold(dev: &str, w: u32, h: u32) -> Option<File> {
     let d = cstr(dev);
-    unsafe {
-        dagu_stamp_loopback(d.as_ptr(), w, h);
+    let fd = unsafe { dagu_stamp_loopback(d.as_ptr(), w, h) };
+    if fd < 0 {
+        eprintln!("dagu-camera-loopback: stamp {dev} failed");
+        None
+    } else {
+        /* SAFETY: dagu_stamp_loopback returns a new open fd or -1. */
+        Some(unsafe { File::from_raw_fd(fd) })
     }
+}
+
+fn restamp(holds: &mut [Option<File>; 2], slot: usize) {
+    holds[slot] = None;
+    let (dev, w, h) = if slot == 0 {
+        (FRONT_DEV, LOOP_W, LOOP_H)
+    } else {
+        (REAR_DEV, LOOP_W, LOOP_H)
+    };
+    holds[slot] = stamp_hold(dev, w, h);
 }
 
 fn child_alive(kid: &mut Option<Child>) -> bool {
@@ -159,22 +216,29 @@ fn spawn_slot(slot: i32) -> Option<Child> {
     }
 }
 
-fn ensure_slot(slot: i32, kids: &mut [Option<Child>; 2]) {
+fn ensure_slot(
+    slot: i32,
+    kids: &mut [Option<Child>; 2],
+    holds: &mut [Option<File>; 2],
+    other_held: bool,
+) {
     let other = 1 - slot as usize;
     let me = slot as usize;
     if child_alive(&mut kids[other]) {
         kill_child(&mut kids[other]);
         camss_reset();
-        if slot == 0 {
-            stamp(REAR_DEV, LOOP_W, LOOP_H);
-        } else {
-            stamp(FRONT_DEV, LOOP_W, LOOP_H);
+        /* xcast keeps the outgoing node mmap'd during an in-app
+         * switch. restamp S_FMT would EBUSY or tear that queue. */
+        if !other_held {
+            restamp(holds, other);
         }
     }
     if child_alive(&mut kids[me]) {
         return;
     }
-    camss_reset();
+    /* Drop gray hold then spawn. Child open_loop writes gray before
+     * libcamera STREAMON; camss_reset here would starve xcast DQBUF. */
+    holds[me] = None;
     kids[me] = spawn_slot(slot);
 }
 
@@ -184,26 +248,49 @@ fn watch() -> ! {
         dagu_pin_cpu_0_3();
     }
     /* Do not restart WirePlumber here. Killing it drops Snapshot's PW target. */
-    stamp(FRONT_DEV, LOOP_W, LOOP_H);
-    stamp(REAR_DEV, LOOP_W, LOOP_H);
-    eprintln!("dagu-camera-loopback: rust watch YUYV {LOOP_W}x{LOOP_H} (SoftISP child, SIGKILL on idle)");
+    let mut hold_fds: [Option<File>; 2] = [None, None];
+    restamp(&mut hold_fds, 0);
+    restamp(&mut hold_fds, 1);
+    eprintln!("dagu-camera-loopback: rust watch YUYV {LOOP_W}x{LOOP_H} hold-fd (SoftISP child, SIGKILL on idle)");
 
     let mut kids: [Option<Child>; 2] = [None, None];
     let mut idle_since: Option<Instant> = None;
     let idle = Duration::from_millis(800);
     let mut hw = false;
+    let mut prev_front = false;
+    let mut prev_rear = false;
+    let mut pid_cache: Vec<(String, String)> = Vec::new();
+    let mut pid_cache_at = Instant::now() - Duration::from_secs(8);
 
     loop {
-        let want_front = holds(FRONT_DEV, self_pid);
-        let want_rear = holds(REAR_DEV, self_pid);
+        if pid_cache_at.elapsed() >= Duration::from_secs(2) {
+            pid_cache = refresh_user_pids();
+            pid_cache_at = Instant::now();
+        }
+        let (want_front, want_rear) = client_holds(self_pid, &pid_cache);
 
-        if want_rear {
+        if want_front || want_rear {
             idle_since = None;
-            ensure_slot(1, &mut kids);
-            hw = true;
-        } else if want_front {
-            idle_since = None;
-            ensure_slot(0, &mut kids);
+            /* In-app switch opens the new node before closing the
+             * old one. Prefer the newly appeared fd so front is not
+             * starved while rear is still held. */
+            let slot = if want_front && want_rear {
+                if want_front && !prev_front {
+                    0
+                } else if want_rear && !prev_rear {
+                    1
+                } else if child_alive(&mut kids[0]) {
+                    0
+                } else {
+                    1
+                }
+            } else if want_rear {
+                1
+            } else {
+                0
+            };
+            let other_held = if slot == 0 { want_rear } else { want_front };
+            ensure_slot(slot, &mut kids, &mut hold_fds, other_held);
             hw = true;
         } else {
             if idle_since.is_none() {
@@ -215,13 +302,15 @@ fn watch() -> ! {
                 kill_child(&mut kids[1]);
                 if had || hw {
                     camss_reset();
-                    stamp(FRONT_DEV, LOOP_W, LOOP_H);
-                    stamp(REAR_DEV, LOOP_W, LOOP_H);
+                    restamp(&mut hold_fds, 0);
+                    restamp(&mut hold_fds, 1);
                     eprintln!("dagu-camera-loopback: idle, CAMSS graph reset");
                     hw = false;
                 }
             }
         }
+        prev_front = want_front;
+        prev_rear = want_rear;
         /* Do not walk /proc/self/task every tick: idle watch was ~25% CPU
          * and the fd scan races Cursor's thousands of fds. SoftISP child
          * pins itself. */

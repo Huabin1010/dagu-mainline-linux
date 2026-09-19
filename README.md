@@ -32,7 +32,7 @@ Since `v0.1.1` (16 Sep 2026):
 
 - **Built-in mic:** WCD9385 AMIC5 is a linger PipeWire source (S16LE mono 48 kHz), not Dummy Output. Analog 16 + TX_DEC0 108 makeup so speech is audible. If MultiMedia3 leaks Q6 `OPEN_READ_V3` (`ADSP_EALREADY`), capture fails over to MultiMedia4 then MultiMedia2. The desktop app **麦克风测试** records through the same Pulse path as Tencent Meeting and plays back on the speakers. Slimbus playback stays disabled without turning off capture on device 3.
 - **Cameras:** Front imx596 skip 2×2 (1296×976) and rear s5kjn1 skip 4×4 (1020×764) stay the product preview path (SoftISP). Snapshot / Meeting keep a live mmap. GNOME orientation no longer HV-mirrors the stream. xcast stays inside four mmap slots. Titan 480 IFE1 PIX has landed linear NV12 on HyperOS dumps; Linux viewfinder is still SoftISP until the front IFE PIX gate.
-- **Tablet session:** Folio keyboard HID is off `keyd`; hold-repeat is not GPIO46 `KEY_WAKEUP`. GNOME Settings Bluetooth pair finishes after BlueZ `AlreadyExists`. Backlight and speaker volume persist across reboot. Dual fuel-gauge pack can show 100%.
+- **Tablet session:** Folio keyboard HID is off `keyd`; hold-repeat is not GPIO46 `KEY_WAKEUP`. Ctrl+C injects a modifier-only `KEY_UP` so copy does not stick. GNOME Settings Bluetooth pair finishes after BlueZ `AlreadyExists`. Backlight and speaker volume persist across reboot. Dual fuel-gauge pack can show 100%.
 - **On-chip buses:** Himax and CS35L41 run on per-SE GENI IRAM. KTZ, fuel gauge, keyboard, and charge pumps sit on GENI I2C. LSM6DSO streams from SLPI SEE over FastRPC; FastRPC sessions survive reboot teardown.
 
 Prebuilt login is unchanged: `dagu` / `dagu` (change it on first boot). Only flash **slot B**.

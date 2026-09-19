@@ -2,8 +2,8 @@
 """Built-in microphone record / playback for dagu.
 
 Uses PipeWire (管道线) pulse (the same path Tencent Meeting captures).
-WCD9385 AMIC5 → MultiMedia3 hw:0,2 → dagu-builtin-mic. Not a Dummy
-source and not a CPU loopback.
+WCD9385 AMIC5 → MultiMedia3 hw:0,2 S16LE mono → dagu-builtin-mic.
+Q6 S24_LE is not spa S24_32LE (that was the 电流声). Not Dummy, not CPU loopback.
 """
 from __future__ import annotations
 
@@ -14,6 +14,15 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dagu_mic_lib import (  # noqa: E402
+    AUDIBLE_PEAK_MIN,
+    EMPTY_PEAK_MAX,
+    RATE,
+    peak_from_db,
+    wav_peak_s16,
+)
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -23,21 +32,12 @@ from gi.repository import Gio, GLib, Gst, Gtk
 APP_ID = "org.dagu.MicTest"
 SOURCE = "dagu-builtin-mic"
 SINK = "alsa_output.platform-sound.HiFi__Speaker__sink"
-RATE = 48000
 
 
 def wav_path() -> Path:
     d = Path.home() / "录音"
     d.mkdir(parents=True, exist_ok=True)
     return d / "mic-test.wav"
-
-
-def peak_from_db(peaks) -> float:
-    if not peaks:
-        return 0.0
-    db = max(float(x) for x in peaks)
-    lin = 10.0 ** (db / 20.0)
-    return max(0.0, min(1.0, lin))
 
 
 class Meter(Gtk.DrawingArea):
@@ -206,13 +206,20 @@ class MicTest(Gtk.ApplicationWindow):
         self.btn_rec.set_label("开始录音")
         self.btn_play.set_sensitive(True)
         n = self.wav.stat().st_size if self.wav.exists() else 0
-        if n < 1024:
+        pk = wav_peak_s16(self.wav)
+        if n < 1024 or pk < EMPTY_PEAK_MAX:
             self._set_status("录音几乎是空的，麦克风没有进数据")
             self.meter.set_level(0)
             self.peak_l.set_text("峰值 0")
             return
         sec = max(0, (n - 44) / (RATE * 2))
-        self._set_status(f"已录 {sec:.1f} 秒，{n} 字节。点播放听自己。")
+        self.peak_l.set_text(f"峰值 {pk}")
+        if pk < AUDIBLE_PEAK_MIN:
+            self._set_status(
+                f"已录 {sec:.1f} 秒，峰值 {pk}，太轻。靠近底边麦克风再录一次。"
+            )
+        else:
+            self._set_status(f"已录 {sec:.1f} 秒，峰值 {pk}。点播放听自己。")
 
     def _start_play(self):
         if not self.wav.exists() or self.wav.stat().st_size < 1024:

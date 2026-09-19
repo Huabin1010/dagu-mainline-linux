@@ -2,7 +2,7 @@
 # Bring desktop audio back after the CS35L41 card exists.
 # Do NOT put hw:0,0 in pipewire context.objects: a missing card makes
 # PipeWire exit 234, systemd hits start-limit, and the session stays silent.
-# Mic is MultiMedia2 hw:0,1. ACP (ALSA Card Profile) probes every UCM
+# Mic is MultiMedia3 hw:0,2. ACP (ALSA Card Profile) probes every UCM
 # device while Speaker PCM is held; Mic hw_params then EINVAL and HiFi
 # is dropped (Dummy, no speakers, no mic). HiFi is Speaker-only; this
 # script publishes the capture PCM as a linger PipeWire source.
@@ -96,12 +96,12 @@ publish_mic() {
 		sleep 0.25
 	done
 	# SPA JSON: commas in hw:0,2 must be quoted. object.linger keeps
-	# the node after pw-cli exits. No audio.format: spa picks the
-	# native 24-bit slot; pinning packed S24_LE silenced Meeting S16.
-	# hw:0,2 is MultiMedia3 — MM2 ASM session leaks on suspend until
-	# the q6asm close() patch is on the running kernel. Never suspend
-	# this node (timeout 0) so OPEN_READ is not issued twice.
-	pw-cli create-node adapter "{ factory.name=api.alsa.pcm.source node.name=dagu-builtin-mic node.nick=Microphone node.description=Microphone media.class=Audio/Source api.alsa.path=\"hw:${CARD},2\" audio.rate=48000 audio.channels=2 alsa.resolution_bits=24 object.linger=true priority.session=2000 api.alsa.disable-tsched=true session.suspend-timeout-seconds=0 }" \
+	# the node after pw-cli exits. Pin spa S16LE: Q6 S24_LE is not
+	# spa S24_32LE (8-bit left shift) — that path was ~48 dB hot with
+	# a 5.3 kHz carrier (破音 / 电流声). arecord S16 on this PCM is
+	# clean. One channel: only AMIC5; FR was digital zero.
+	# hw:0,2 is MultiMedia3. Never suspend (timeout 0).
+	pw-cli create-node adapter "{ factory.name=api.alsa.pcm.source node.name=dagu-builtin-mic node.nick=Microphone node.description=Microphone media.class=Audio/Source api.alsa.path=\"hw:${CARD},2\" audio.rate=48000 audio.channels=1 audio.format=S16LE alsa.resolution_bits=16 object.linger=true priority.session=2000 api.alsa.disable-tsched=true session.suspend-timeout-seconds=0 }" \
 		>/tmp/dagu-mic-pw-node.log 2>&1 || {
 		echo "dagu-audio-up: pw-cli create-node mic failed" >&2
 		cat /tmp/dagu-mic-pw-node.log >&2 || true

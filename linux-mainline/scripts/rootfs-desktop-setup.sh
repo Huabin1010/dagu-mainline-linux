@@ -1703,7 +1703,7 @@ SectionDevice."Speaker" {
 }
 # Mic CapturePCM is not in this verb. ACP probes every UCM device while
 # Speaker PCM is held; Mic hw_params EINVAL drops the whole HiFi profile
-# (Dummy, no speakers, no mic). Capture is MultiMedia2 hw:0,1 published
+# (Dummy, no speakers, no mic). Capture is MultiMedia3 hw:0,2 published
 # by dagu-audio-up.sh after the card exists.
 EOF
 cat >/usr/local/sbin/dagu-speaker-route.sh <<'EOF'
@@ -1778,9 +1778,10 @@ cset "TX_AIF1_CAP Mixer DEC0" 1
 cset "ADC4_MIXER Switch" 1
 cset "ADC4 MUX" INP5
 cset "ADC4 Switch" 1
-cset "TX3 MODE" ADC_NORMAL
-cset "ADC4 Volume" 12
-cset "TX_DEC0 Volume" 84
+cset "TX3 MODE" ADC_HIFI
+cset "DEC0 MODE" ADC_HIGH_PERF
+cset "ADC4 Volume" 16
+cset "TX_DEC0 Volume" 108
 cset "Fluence AEC NS" Off
 exit 0
 EOF
@@ -1889,10 +1890,11 @@ monitor.alsa.rules = [
     ]
     actions = {
       update-props = {
-        audio.channels = 2
+        audio.channels = 1
         audio.rate = 48000
-        alsa.resolution_bits = 24
-        audio.position = [ FL FR ]
+        audio.format = "S16LE"
+        alsa.resolution_bits = 16
+        audio.position = [ MONO ]
         api.alsa.soft-mixer = true
         api.alsa.disable-tsched = true
         session.suspend-timeout-seconds = 0
@@ -2405,7 +2407,7 @@ rm -f /etc/pipewire/pipewire.conf.d/50-dagu-alsa-sink.conf
 install -m755 /usr/local/sbin/dagu-audio-up.sh /usr/local/sbin/dagu-audio-up.sh 2>/dev/null || true
 cat >/usr/local/sbin/dagu-audio-up.sh <<'EOF'
 #!/bin/sh
-# Mic is MultiMedia2 hw:0,1. ACP probes every UCM device while Speaker
+# Mic is MultiMedia3 hw:0,2. ACP probes every UCM device while Speaker
 # PCM is held; Mic hw_params EINVAL drops HiFi. HiFi is Speaker-only;
 # this script publishes the capture PCM as a linger PipeWire source.
 set -eu
@@ -2467,7 +2469,7 @@ publish_mic() {
 		[ "$n" -gt 20 ] && { echo "dagu-audio-up: no $MICPCM" >&2; return 1; }
 		sleep 0.25
 	done
-	pw-cli create-node adapter "{ factory.name=api.alsa.pcm.source node.name=dagu-builtin-mic node.nick=Microphone node.description=Microphone media.class=Audio/Source api.alsa.path=\"hw:${CARD},2\" audio.rate=48000 audio.channels=2 alsa.resolution_bits=24 object.linger=true priority.session=2000 api.alsa.disable-tsched=true session.suspend-timeout-seconds=0 }" \
+	pw-cli create-node adapter "{ factory.name=api.alsa.pcm.source node.name=dagu-builtin-mic node.nick=Microphone node.description=Microphone media.class=Audio/Source api.alsa.path=\"hw:${CARD},2\" audio.rate=48000 audio.channels=1 audio.format=S16LE alsa.resolution_bits=16 object.linger=true priority.session=2000 api.alsa.disable-tsched=true session.suspend-timeout-seconds=0 }" \
 		>/tmp/dagu-mic-pw-node.log 2>&1 || {
 		echo "dagu-audio-up: pw-cli create-node mic failed" >&2
 		cat /tmp/dagu-mic-pw-node.log >&2 || true

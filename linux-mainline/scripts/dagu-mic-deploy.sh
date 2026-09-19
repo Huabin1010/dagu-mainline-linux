@@ -49,6 +49,9 @@ copy_ssh() {
 		"$ROOT/scripts/dagu-mic-test.py" \
 		"root@$HOST:/usr/local/bin/dagu-mic-test"
 	"${SCP[@]}" \
+		"$ROOT/scripts/dagu_mic_lib.py" \
+		"root@$HOST:/usr/local/bin/dagu_mic_lib.py"
+	"${SCP[@]}" \
 		"$ROOT/alsa/org.dagu.MicTest.desktop" \
 		"root@$HOST:/usr/share/applications/org.dagu.MicTest.desktop"
 	"${SSH[@]}" 'set -e

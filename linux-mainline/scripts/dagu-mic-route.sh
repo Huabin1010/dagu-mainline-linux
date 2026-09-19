@@ -42,10 +42,14 @@ cset "TX_AIF1_CAP Mixer DEC0" 1 || true
 cset "ADC4_MIXER Switch" 1 || true
 cset "ADC4 MUX" INP5 || true
 cset "ADC4 Switch" 1 || true
-cset "TX3 MODE" ADC_NORMAL || true
-# Analog 12 without Fluence: analog 6 is below Meeting's gate. TX_DEC0
-# 84 is 0 dB digital. 16-bit soft-mixer (not analog 12) was the 破音.
-cset_any 12 "ADC4 Volume" || true
-cset_any 84 "TX_DEC0 Volume" "DEC0 Volume" || true
+cset "TX3 MODE" ADC_HIFI || true
+cset "DEC0 MODE" ADC_HIGH_PERF || true
+# Analog 12 + TX_DEC0 84 (0 dB) is the Fluence path. Without AEC_NS,
+# native S16 speech peak is ~170 — inaudible on playback / Meeting.
+# ADC4 16 = 24 dB analog (TLV 0..30 dB, 1.5 dB/step). TX_DEC0 108 =
+# +24 dB (TLV -84..+40, 84 = 0 dB). Makeup for Fluence Off, not
+# spa S24_32LE (that was the 破音 / 电流声).
+cset_any 16 "ADC4 Volume" || true
+cset_any 108 "TX_DEC0 Volume" "DEC0 Volume" || true
 cset "Fluence AEC NS" Off || true
 exit 0

@@ -1,5 +1,5 @@
 [Unit]
-Description=dagu: start PipeWire Speakers after ALSA pcm exists
+Description=dagu: start PipeWire Speakers after ALSA mixer exists
 After=pipewire.service pipewire-pulse.service wireplumber.service
 Wants=pipewire.service
 
@@ -7,6 +7,11 @@ Wants=pipewire.service
 Type=oneshot
 ExecStart=/usr/local/sbin/dagu-audio-up.sh
 RemainAfterExit=yes
+TimeoutStartSec=180
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=12
+StartLimitIntervalSec=240
 
 [Install]
 WantedBy=graphical-session.target

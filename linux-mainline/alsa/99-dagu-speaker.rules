@@ -1,2 +1,5 @@
-# Re-apply TERT_TDM_RX_0 mixer when the sm8250 card appears.
+# Re-apply speaker TDM and AMIC5 mixer when the sm8250 card appears.
+# controlC0 can show up before WCD widgets; the scripts cset-fail then,
+# and dagu-audio-up waits on ADC4 before publishing the linger source.
 ACTION=="add", SUBSYSTEM=="sound", KERNEL=="controlC0", RUN+="/usr/local/sbin/dagu-speaker-route.sh"
+ACTION=="add", SUBSYSTEM=="sound", KERNEL=="controlC0", RUN+="/bin/sh -c 'DAGU_MIC_PROBE=0 /usr/local/sbin/dagu-mic-route.sh'"

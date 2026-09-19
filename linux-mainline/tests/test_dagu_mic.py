@@ -26,7 +26,9 @@ from dagu_mic_lib import (  # noqa: E402
     ADC4_ANALOG,
     ALSA_FORMAT,
     AUDIBLE_PEAK_MIN,
+    CAPTURE_FE_TRY_ORDER,
     CAPTURE_PCM,
+    CAPTURE_PROBE_MIN_BYTES,
     CHANNELS,
     EMPTY_PEAK_MAX,
     FLUENCE_OFF_S16_SPEECH_PEAK,
@@ -37,9 +39,11 @@ from dagu_mic_lib import (  # noqa: E402
     TX_DEC0_DIGITAL,
     TX_DEC0_ZERO_DB,
     peak_from_db,
+    pick_capture_fe,
     s24_32le_misread_peak,
     s24_false_gain_db,
     wav_peak_s16,
+    write_wav_s16,
 )
 
 MIC_ROUTE = SCRIPTS / "dagu-mic-route.sh"
@@ -97,14 +101,20 @@ def _create_node_line(text: str) -> str:
 
 
 def _write_s16_wav(path: Path, samples: list[int], rate: int = RATE) -> None:
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(b"".join(int(s).to_bytes(2, "little", signed=True) for s in samples))
+    write_wav_s16(
+        path,
+        b"".join(int(s).to_bytes(2, "little", signed=True) for s in samples),
+        rate,
+    )
 
 
 class WavPeakTests(unittest.TestCase):
+    def test_write_wav_roundtrip_peak(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "t.wav"
+            write_wav_s16(p, (1234).to_bytes(2, "little", signed=True) * 64, RATE)
+            self.assertEqual(wav_peak_s16(p), 1234)
+
     def test_empty_and_missing(self) -> None:
         self.assertEqual(wav_peak_s16(Path("/no/such/mic-test.wav")), 0)
         with tempfile.TemporaryDirectory() as td:
@@ -167,8 +177,9 @@ class MixerContractTests(unittest.TestCase):
         self.assertNotIn(f'cset_any {TX_DEC0_ZERO_DB} "TX_DEC0 Volume"', live)
         self.assertIn('cset "Fluence AEC NS" Off', live)
         self.assertNotIn("AEC_NS", live)
-        self.assertIn('cset "MultiMedia2 Mixer TX_CODEC_DMA_TX_3" off', live)
-        self.assertIn('cset "MultiMedia3 Mixer TX_CODEC_DMA_TX_3" on', live)
+        self.assertIn("probe_fe 2 3 || probe_fe 3 4 || probe_fe 1 2", live)
+        self.assertIn("timeout -s INT", live)
+        self.assertIn('DAGU_MIC_PROBE:-0', _text(MIC_ROUTE))
         self.assertIn('cset "ADC4 MUX" INP5', live)
         self.assertIn('cset "TX SMIC MUX0" ADC3', live)
         self.assertIn('cset "TX DEC0 MUX" SWR_MIC', live)
@@ -176,13 +187,13 @@ class MixerContractTests(unittest.TestCase):
     def test_rootfs_mic_route_matches(self) -> None:
         body = _heredoc(_text(ROOTFS), "/usr/local/sbin/dagu-mic-route.sh")
         live = "\n".join(_live_lines(body))
-        self.assertIn(f'cset "ADC4 Volume" {ADC4_ANALOG}', live)
-        self.assertIn(f'cset "TX_DEC0 Volume" {TX_DEC0_DIGITAL}', live)
-        self.assertNotIn('cset "ADC4 Volume" 12', live)
-        self.assertNotIn(f'cset "TX_DEC0 Volume" {TX_DEC0_ZERO_DB}', live)
+        self.assertIn(f'cset_any {ADC4_ANALOG} "ADC4 Volume"', live)
+        self.assertIn(f'cset_any {TX_DEC0_DIGITAL} "TX_DEC0 Volume"', live)
+        self.assertNotIn(f'cset_any 12 "ADC4 Volume"', live)
+        self.assertNotIn(f'cset_any {TX_DEC0_ZERO_DB} "TX_DEC0 Volume"', live)
         self.assertIn('cset "Fluence AEC NS" Off', live)
-        self.assertIn('cset "MultiMedia3 Mixer TX_CODEC_DMA_TX_3" on', live)
-        self.assertIn('cset "MultiMedia2 Mixer TX_CODEC_DMA_TX_3" off', live)
+        self.assertIn("probe_fe 2 3 || probe_fe 3 4 || probe_fe 1 2", live)
+        self.assertIn("DAGU_MIC_PROBE", body)
 
 
 class CaptureFormatContractTests(unittest.TestCase):
@@ -192,6 +203,7 @@ class CaptureFormatContractTests(unittest.TestCase):
         self.assertIn(f'audio.format = "{SPA_FORMAT}"', props)
         self.assertIn(f"alsa.resolution_bits = {RESOLUTION_BITS}", props)
         self.assertIn("audio.position = [ MONO ]", props)
+        self.assertIn("node.always-process = true", props)
         self.assertNotIn("S24_32LE", props)
         self.assertNotIn(f'audio.format = "{ALSA_FORMAT}"', props)
         self.assertNotIn("audio.channels = 2", props)
@@ -203,23 +215,41 @@ class CaptureFormatContractTests(unittest.TestCase):
         self.assertNotIn("S24_32LE", props)
         self.assertNotIn(f'audio.format = "{ALSA_FORMAT}"', props)
 
-    def test_linger_node_is_mm3_s16le(self) -> None:
+    def test_linger_node_follows_live_fe(self) -> None:
         for src in (_text(AUDIO_UP), _text(ROOTFS)):
             line = _create_node_line(src)
             self.assertIn(f"audio.format={SPA_FORMAT}", line)
             self.assertIn("audio.channels=1", line)
             self.assertIn("alsa.resolution_bits=16", line)
-            self.assertIn(f'api.alsa.path=\\"hw:${{CARD}},{CAPTURE_PCM}\\"', line)
+            self.assertIn('api.alsa.path=\\"hw:${CARD},${MICDEV}\\"', line)
+            self.assertIn("node.always-process=true", line)
             self.assertNotIn("S24_32LE", line)
             self.assertNotIn(f"audio.format={ALSA_FORMAT}", line)
-            self.assertNotIn("hw:${CARD},1", line)
+            self.assertNotIn('api.alsa.path=\\"hw:${CARD},1\\"', line)
             self.assertNotIn("hw:0,1", line)
 
-    def test_audio_up_waits_on_pcm2c(self) -> None:
+    def test_audio_up_waits_on_any_capture_pcm(self) -> None:
         up = _text(AUDIO_UP)
-        self.assertIn('MICPCM="/dev/snd/pcmC${CARD}D2c"', up)
-        self.assertNotIn('MICPCM="/dev/snd/pcmC${CARD}D1c"', up)
+        self.assertIn('pcmC${CARD}D2c', up)
+        self.assertIn('pcmC${CARD}D3c', up)
         self.assertIn('pcmC${CARD}D0p', up)
+        self.assertIn("${RUNDIR}/mic-pcm", up)
+        self.assertIn("destroy_mic", up)
+        self.assertIn("sleep 0.4", up)
+        self.assertIn("DAGU_MIC_PROBE=1", up)
+        self.assertIn("--repair", up)
+        self.assertIn("虚拟输出", up)
+        self.assertIn("is_dummy", up)
+
+    def test_audio_up_waits_for_adc4_mixer(self) -> None:
+        up = _text(AUDIO_UP)
+        self.assertIn('cget name="ADC4 Volume"', up)
+        self.assertIn("mixer_ready", up)
+        self.assertIn("Microphone source missing", up)
+        rootfs = _text(ROOTFS)
+        self.assertIn('cget name="ADC4 Volume"', rootfs)
+        self.assertIn("mixer_ready", rootfs)
+        self.assertIn("Microphone source missing", rootfs)
 
     def test_speaker_stays_s24_le_stereo(self) -> None:
         text = _text(WP_CONF)
@@ -241,6 +271,25 @@ class HifiDummyContractTests(unittest.TestCase):
         self.assertNotIn("hw:${CardId},3", text)
         self.assertIn('PlaybackPCM "hw:${CardId},0"', text)
 
+    def test_acp_does_not_auto_port_slim(self) -> None:
+        for src in (_text(WP_CONF), _text(ROOTFS)):
+            self.assertIn("api.acp.auto-port = false", src)
+            self.assertNotIn("api.acp.auto-port = true", src)
+            self.assertIn('alsa.device = "3"', src)
+            self.assertIn(
+                '{ media.class = "Audio/Sink", alsa.device = "3" }', src
+            )
+            self.assertNotIn('{ media.class = "Audio/Sink" }', src)
+            self.assertIn("node.disabled = true", src)
+
+    def test_audio_up_service_retries_after_mixer(self) -> None:
+        unit = _text(ROOT / "systemd" / "dagu-audio-up.service")
+        self.assertIn("TimeoutStartSec=180", unit)
+        self.assertIn("Restart=on-failure", unit)
+        rootfs = _text(ROOTFS)
+        self.assertIn("TimeoutStartSec=180", rootfs)
+        self.assertIn("Restart=on-failure", rootfs)
+
 
 class TesterAppContractTests(unittest.TestCase):
     def test_app_uses_pulse_s16_mono_and_peak_gate(self) -> None:
@@ -250,9 +299,18 @@ class TesterAppContractTests(unittest.TestCase):
         self.assertIn("pulsesink", text)
         self.assertIn("channels=1,format=S16LE", text)
         self.assertIn("AUDIBLE_PEAK_MIN", text)
-        self.assertIn("wav_peak_s16", text)
-        self.assertNotIn("format=S24_32LE", text)
+        self.assertIn("appsink", text)
+        self.assertIn("sync=false", text)
+        self.assertIn("async=false", text)
+        self.assertIn("--repair", text)
+        self.assertIn("_kick_repair", text)
+        self.assertIn("_prep_mixer", text)
+        self.assertNotIn("CLOCK_TIME_NONE", text)
+        self.assertIn("300 * Gst.MSECOND", text)
+        self.assertIn("write_wav_s16", text)
+        self.assertNotIn("wavenc", text)
         self.assertNotIn("alsasrc", text)
+        self.assertNotIn("drop=true", text)
 
     def test_deploy_installs_lib(self) -> None:
         text = _text(DEPLOY)
@@ -267,7 +325,30 @@ class ImportSanityTests(unittest.TestCase):
         self.assertEqual(ADC4_ANALOG, 16)
         self.assertEqual(TX_DEC0_DIGITAL, 108)
         self.assertEqual(CAPTURE_PCM, 2)
+        self.assertEqual(CAPTURE_FE_TRY_ORDER, ((2, 3), (3, 4), (1, 2)))
         self.assertGreater(AUDIBLE_PEAK_MIN, FLUENCE_OFF_S16_SPEECH_PEAK)
+
+
+class CaptureFeFailoverTests(unittest.TestCase):
+    def test_pick_prefers_mm3(self) -> None:
+        self.assertEqual(pick_capture_fe({2: 96044, 3: 96044, 1: 96044}), 2)
+
+    def test_pick_skips_leaked_mm3(self) -> None:
+        # Live board: MM3 hw_params EINVAL (0 bytes), MM4 96044 peak 1175.
+        self.assertEqual(pick_capture_fe({2: 0, 3: 96044, 1: 19244}), 3)
+
+    def test_pick_falls_to_mm2_last(self) -> None:
+        self.assertEqual(pick_capture_fe({2: 44, 3: 44, 1: 96044}), 1)
+
+    def test_pick_none_when_all_silent(self) -> None:
+        self.assertIsNone(pick_capture_fe({2: 44, 3: 44, 1: 44}))
+        self.assertGreater(CAPTURE_PROBE_MIN_BYTES, 44)
+
+    def test_udev_does_not_arecord_on_control_add(self) -> None:
+        rules = _text(ROOT / "alsa" / "99-dagu-speaker.rules")
+        self.assertIn("DAGU_MIC_PROBE=0", rules)
+        rootfs = _heredoc(_text(ROOTFS), "/etc/udev/rules.d/99-dagu-speaker.rules")
+        self.assertIn("DAGU_MIC_PROBE=0", rootfs)
 
 
 def main() -> int:

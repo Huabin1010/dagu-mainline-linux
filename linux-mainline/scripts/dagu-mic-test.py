@@ -2,7 +2,8 @@
 """Built-in microphone record / playback for dagu.
 
 Uses PipeWire (管道线) pulse (the same path Tencent Meeting captures).
-WCD9385 AMIC5 → MultiMedia3 hw:0,2 S16LE mono → dagu-builtin-mic.
+WCD9385 AMIC5 → live Q6 capture FE S16LE mono → dagu-builtin-mic.
+Prefer MultiMedia3 hw:0,2; after ASM leak, MultiMedia4 hw:0,3.
 Q6 S24_LE is not spa S24_32LE (that was the 电流声). Not Dummy, not CPU loopback.
 """
 from __future__ import annotations
@@ -11,6 +12,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from dagu_mic_lib import (  # noqa: E402
     RATE,
     peak_from_db,
     wav_peak_s16,
+    write_wav_s16,
 )
 
 import gi
@@ -74,6 +77,9 @@ class MicTest(Gtk.ApplicationWindow):
         self.play = None
         self.t0 = 0.0
         self.wav = wav_path()
+        self._rec_buf = bytearray()
+        self._rec_lock = threading.Lock()
+        self._stopping = False
         self._build()
         GLib.timeout_add(200, self._tick)
         self.connect("close-request", self._on_close)
@@ -143,17 +149,21 @@ class MicTest(Gtk.ApplicationWindow):
     def _stop_pipe(self, pipe, send_eos: bool):
         if pipe is None:
             return
+        # Live pulsesrc never EOS. Infinite get_state blocked the GTK
+        # thread → GNOME「麦克风测试无响应」. Cap both waits.
         if send_eos:
             pipe.send_event(Gst.Event.new_eos())
             bus = pipe.get_bus()
             bus.timed_pop_filtered(
-                2 * Gst.SECOND,
+                Gst.SECOND // 3,
                 Gst.MessageType.EOS | Gst.MessageType.ERROR,
             )
         pipe.set_state(Gst.State.NULL)
-        pipe.get_state(Gst.CLOCK_TIME_NONE)
+        pipe.get_state(300 * Gst.MSECOND)
 
     def _toggle_rec(self, _btn):
+        if self._stopping:
+            return
         if self.rec:
             self._stop_rec()
             return
@@ -162,12 +172,28 @@ class MicTest(Gtk.ApplicationWindow):
         self._start_rec()
 
     def _toggle_play(self, _btn):
+        if self._stopping:
+            return
         if self.play:
             self._stop_play()
             return
         if self.rec:
             self._stop_rec()
         self._start_play()
+
+    def _on_sample(self, sink):
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return Gst.FlowReturn.OK
+        buf = sample.get_buffer()
+        if buf is None:
+            return Gst.FlowReturn.OK
+        ok, mapped = buf.map(Gst.MapFlags.READ)
+        if ok:
+            with self._rec_lock:
+                self._rec_buf.extend(mapped.data)
+            buf.unmap(mapped)
+        return Gst.FlowReturn.OK
 
     def _start_rec(self):
         self._prep_mixer()
@@ -177,22 +203,31 @@ class MicTest(Gtk.ApplicationWindow):
         except TypeError:
             if path.exists():
                 path.unlink()
+        with self._rec_lock:
+            self._rec_buf = bytearray()
         desc = (
-            f'pulsesrc client-name="麦克风测试" ! '
+            f'pulsesrc client-name="麦克风测试" device="{SOURCE}" provide-clock=false ! '
+            f"audio/x-raw,rate={RATE},channels=1,format=S16LE ! "
+            f"queue max-size-buffers=16 max-size-time=0 max-size-bytes=0 ! "
             f"audioconvert ! audioresample ! "
             f"audio/x-raw,rate={RATE},channels=1,format=S16LE ! "
             f"tee name=t "
-            f"t. ! queue ! wavenc ! filesink location=\"{path}\" "
-            f"t. ! queue ! level interval=50000000 post-messages=true ! "
-            f"fakesink sync=false"
+            f"t. ! queue max-size-buffers=32 ! "
+            f"appsink name=rec emit-signals=true sync=false async=false "
+            f"max-buffers=32 drop=false "
+            f"t. ! queue leaky=2 ! level interval=50000000 post-messages=true ! "
+            f"fakesink sync=false async=false"
         )
         pipe = Gst.parse_launch(desc)
+        sink = pipe.get_by_name("rec")
+        sink.connect("new-sample", self._on_sample)
         bus = pipe.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_bus, "rec")
         if pipe.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             self._set_status("打不开麦克风（PipeWire 源失败）")
             pipe.set_state(Gst.State.NULL)
+            pipe.get_state(300 * Gst.MSECOND)
             return
         self.rec = pipe
         self.t0 = time.monotonic()
@@ -201,25 +236,37 @@ class MicTest(Gtk.ApplicationWindow):
         self._set_status("正在录音…对着麦克风说话")
 
     def _stop_rec(self):
-        self._stop_pipe(self.rec, send_eos=True)
-        self.rec = None
-        self.btn_rec.set_label("开始录音")
-        self.btn_play.set_sensitive(True)
-        n = self.wav.stat().st_size if self.wav.exists() else 0
-        pk = wav_peak_s16(self.wav)
-        if n < 1024 or pk < EMPTY_PEAK_MAX:
-            self._set_status("录音几乎是空的，麦克风没有进数据")
-            self.meter.set_level(0)
-            self.peak_l.set_text("峰值 0")
+        if self._stopping:
             return
-        sec = max(0, (n - 44) / (RATE * 2))
-        self.peak_l.set_text(f"峰值 {pk}")
-        if pk < AUDIBLE_PEAK_MIN:
-            self._set_status(
-                f"已录 {sec:.1f} 秒，峰值 {pk}，太轻。靠近底边麦克风再录一次。"
-            )
-        else:
-            self._set_status(f"已录 {sec:.1f} 秒，峰值 {pk}。点播放听自己。")
+        self._stopping = True
+        try:
+            self._stop_pipe(self.rec, send_eos=False)
+            self.rec = None
+            self.btn_rec.set_label("开始录音")
+            self.btn_play.set_sensitive(True)
+            with self._rec_lock:
+                pcm = bytes(self._rec_buf)
+                self._rec_buf = bytearray()
+            if pcm:
+                write_wav_s16(self.wav, pcm, RATE)
+            n = self.wav.stat().st_size if self.wav.exists() else 0
+            pk = wav_peak_s16(self.wav)
+            if n < 1024 or pk < EMPTY_PEAK_MAX:
+                self._set_status("录音几乎是空的，正在恢复麦克风…")
+                self._kick_repair()
+                self.meter.set_level(0)
+                self.peak_l.set_text("峰值 0")
+                return
+            sec = max(0, (n - 44) / (RATE * 2))
+            self.peak_l.set_text(f"峰值 {pk}")
+            if pk < AUDIBLE_PEAK_MIN:
+                self._set_status(
+                    f"已录 {sec:.1f} 秒，峰值 {pk}，太轻。靠近底边麦克风再录一次。"
+                )
+            else:
+                self._set_status(f"已录 {sec:.1f} 秒，峰值 {pk}。点播放听自己。")
+        finally:
+            self._stopping = False
 
     def _start_play(self):
         if not self.wav.exists() or self.wav.stat().st_size < 1024:
@@ -228,7 +275,7 @@ class MicTest(Gtk.ApplicationWindow):
         desc = (
             f'filesrc location="{self.wav}" ! wavparse ! '
             f"audioconvert ! audioresample ! "
-            f'pulsesink client-name="麦克风测试回放"'
+            f'pulsesink client-name="麦克风测试回放" sync=true'
         )
         pipe = Gst.parse_launch(desc)
         bus = pipe.get_bus()
@@ -237,6 +284,7 @@ class MicTest(Gtk.ApplicationWindow):
         if pipe.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             self._set_status("打不开喇叭")
             pipe.set_state(Gst.State.NULL)
+            pipe.get_state(300 * Gst.MSECOND)
             return
         self.play = pipe
         self.t0 = time.monotonic()
@@ -245,19 +293,23 @@ class MicTest(Gtk.ApplicationWindow):
         self._set_status("正在从喇叭回放…")
 
     def _stop_play(self):
-        self._stop_pipe(self.play, send_eos=False)
-        self.play = None
-        self.btn_play.set_label("播放录音")
-        self.btn_rec.set_sensitive(True)
-        self._set_status("回放结束。听得到自己 = 麦克风正常。")
-        self.meter.set_level(0)
+        if self._stopping:
+            return
+        self._stopping = True
+        try:
+            self._stop_pipe(self.play, send_eos=False)
+            self.play = None
+            self.btn_play.set_label("播放录音")
+            self.btn_rec.set_sensitive(True)
+            self._set_status("回放结束。听得到自己 = 麦克风正常。")
+            self.meter.set_level(0)
+        finally:
+            self._stopping = False
 
     def _on_bus(self, _bus, msg, kind: str):
         if msg.type == Gst.MessageType.EOS:
             if kind == "play":
                 GLib.idle_add(self._stop_play)
-            elif kind == "rec":
-                GLib.idle_add(self._stop_rec)
             return
         if msg.type == Gst.MessageType.ERROR:
             err, dbg = msg.parse_error()
@@ -300,13 +352,41 @@ class MicTest(Gtk.ApplicationWindow):
             self._set_status(f"正在回放 {dt:.0f} 秒…")
         return True
 
+    def _kick_repair(self):
+        """Destroy a wedged linger and republish on a live capture FE."""
+        up = "/usr/local/sbin/dagu-audio-up.sh"
+        if not os.access(up, os.X_OK):
+            self._prep_mixer()
+            return
+        try:
+            subprocess.run(
+                [up, "--repair"],
+                check=False,
+                capture_output=True,
+                timeout=25,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+
     def _prep_mixer(self):
         route = "/usr/local/sbin/dagu-mic-route.sh"
-        if os.access(route, os.X_OK):
-            subprocess.run([route], check=False, capture_output=True)
+        if not os.access(route, os.X_OK):
+            return
+        env = os.environ.copy()
+        env["DAGU_MIC_PROBE"] = "0"
+        try:
+            subprocess.run(
+                [route],
+                check=False,
+                capture_output=True,
+                timeout=8,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            pass
 
     def _on_close(self, *_a):
-        self._stop_pipe(self.rec, send_eos=True)
+        self._stop_pipe(self.rec, send_eos=False)
         self._stop_pipe(self.play, send_eos=False)
         self.rec = None
         self.play = None

@@ -21,6 +21,8 @@ copy_ssh() {
 		/usr/share/alsa/ucm2/conf.d/sm8250 \
 		/usr/share/alsa/ucm2/conf.d/snd-sm8250 \
 		/etc/wireplumber/wireplumber.conf.d \
+		/etc/udev/rules.d \
+		/etc/systemd/user \
 		/usr/local/sbin /usr/local/bin /usr/share/applications'
 	"${SCP[@]}" \
 		"$ROOT/alsa/ucm2/Xiaomi-dagu/HiFi.conf" \
@@ -34,6 +36,12 @@ copy_ssh() {
 	"${SCP[@]}" \
 		"$ROOT/alsa/50-dagu-speaker.conf" \
 		"root@$HOST:/etc/wireplumber/wireplumber.conf.d/50-dagu-speaker.conf"
+	"${SCP[@]}" \
+		"$ROOT/alsa/99-dagu-speaker.rules" \
+		"root@$HOST:/etc/udev/rules.d/99-dagu-speaker.rules"
+	"${SCP[@]}" \
+		"$ROOT/systemd/dagu-audio-up.service" \
+		"root@$HOST:/etc/systemd/user/dagu-audio-up.service"
 	"${SCP[@]}" \
 		"$ROOT/scripts/dagu-mic-route.sh" \
 		"$ROOT/scripts/dagu-speaker-route.sh" \
@@ -63,9 +71,13 @@ copy_ssh() {
 			/usr/local/sbin/dagu-adsp-voice-test.sh \
 			/usr/local/bin/dagu-mic-test
 		update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+		udevadm control --reload-rules 2>/dev/null || true
 		alsaucm -c hw:0 reload 2>/dev/null || true
 		/usr/local/sbin/dagu-mic-route.sh || true
 		if [ -d /run/user/1001 ]; then
+			sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 \
+				DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \
+				systemctl --user daemon-reload || true
 			sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 \
 				DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \
 				systemctl --user try-restart \

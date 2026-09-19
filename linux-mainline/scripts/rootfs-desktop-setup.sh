@@ -1764,25 +1764,127 @@ EOF
 chmod 755 /usr/local/sbin/dagu-speaker-route.sh
 cat >/usr/local/sbin/dagu-mic-route.sh <<'EOF'
 #!/bin/sh
-# Android overlay_static speaker-mic: AMIC5 / ADC4 INP5 / TX SMIC ADC3.
+# Match stock Android speaker-mic (mixer_paths_overlay_static.xml):
+#   TX DEC0=SWR_MIC, SMIC MUX0=ADC3, ADC4 MIXER, ADC4 MUX=INP5.
+#   That is WCD9385 AMIC5 on MIC BIAS3, SoundWire TX_CODEC_DMA_TX_3.
+#   Headset is AMIC2; do not steal that path.
+# Android analog 6 assumes Fluence. Analog 12 (18 dB). AEC_NS without
+# speaker RX is digital zero; desktop leaves Fluence Off. Meeting AEC
+# is in-app. Not CPU echo cancellation.
+# Mainline extra vs CAF tinymix: ADC4 Switch + TX3 MODE open the
+# WCD938x SoundWire ADC port (Android audio kernel does this inside
+# the codec driver, not the XML).
+# Capture FE: prefer MultiMedia3 (hw:0,2). Q6 ASM OPEN_READ_V3 0x10db4
+# returns ADSP_EALREADY (9) if the previous session leaked (kernel
+# close skips CMD_CLOSE unless RUNNING). Then probe MM4 (hw:0,3), MM2
+# (hw:0,1). Speaker stays MM1 playback.
 set -eu
 CARD="${DAGU_ALSA_CARD:-0}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1001}"
+RUNDIR="${DAGU_RUNDIR:-$XDG_RUNTIME_DIR}"
+# udev RUN must stay widgets-only. arecord probe needs a free PCM;
+# audio-up --repair sets DAGU_MIC_PROBE=1 after destroying linger.
+PROBE="${DAGU_MIC_PROBE:-0}"
+if [ ! -d "$RUNDIR" ]; then
+	if [ "$(id -u)" -eq 0 ]; then
+		RUNDIR=/tmp
+	else
+		mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR=/tmp
+	fi
+fi
+PCMFILE="${RUNDIR}/mic-pcm"
+
 cset() {
-	amixer -c "$CARD" cset "name=$1" "$2" >/dev/null 2>&1 || true
+	if ! amixer -c "$CARD" cset "name=$1" "$2" >/dev/null 2>&1; then
+		echo "dagu-mic-route: cset FAIL '$1'=$2" >&2
+		return 1
+	fi
+	return 0
 }
-cset "MultiMedia2 Mixer TX_CODEC_DMA_TX_3" off
-cset "MultiMedia3 Mixer TX_CODEC_DMA_TX_3" on
-cset "TX DEC0 MUX" SWR_MIC
-cset "TX SMIC MUX0" ADC3
-cset "TX_AIF1_CAP Mixer DEC0" 1
-cset "ADC4_MIXER Switch" 1
-cset "ADC4 MUX" INP5
-cset "ADC4 Switch" 1
-cset "TX3 MODE" ADC_HIFI
-cset "DEC0 MODE" ADC_HIGH_PERF
-cset "ADC4 Volume" 16
-cset "TX_DEC0 Volume" 108
-cset "Fluence AEC NS" Off
+
+cset_any() {
+	val=$1
+	shift
+	for n in "$@"; do
+		if amixer -c "$CARD" cset "name=$n" "$val" >/dev/null 2>&1; then
+			return 0
+		fi
+	done
+	echo "dagu-mic-route: cset_any FAIL $* = $val" >&2
+	return 1
+}
+
+mm_off_all() {
+	n=1
+	while [ "$n" -le 8 ]; do
+		cset "MultiMedia${n} Mixer TX_CODEC_DMA_TX_3" off || true
+		n=$((n + 1))
+	done
+}
+
+probe_fe() {
+	dev=$1
+	mm=$2
+	wav=/tmp/dagu-mic-probe.wav
+	rm -f "$wav"
+	cset "MultiMedia${mm} Mixer TX_CODEC_DMA_TX_3" on || true
+	timeout 1.2 arecord -D "hw:${CARD},${dev}" -c 1 -r 48000 -f S16_LE \
+		-d 1 "$wav" >/dev/null 2>&1 || true
+	sz=0
+	if [ -f "$wav" ]; then
+		sz=$(wc -c <"$wav")
+	fi
+	if [ "$sz" -gt 2000 ]; then
+		echo "$dev" >"$PCMFILE" 2>/dev/null || echo "$dev" >/tmp/dagu-mic-pcm
+		echo "dagu-mic-route: capture hw:${CARD},${dev} MultiMedia${mm} (${sz} bytes)" >&2
+		rm -f "$wav"
+		return 0
+	fi
+	cset "MultiMedia${mm} Mixer TX_CODEC_DMA_TX_3" off || true
+	rm -f "$wav"
+	return 1
+}
+
+cset "TX DEC0 MUX" SWR_MIC || true
+cset "TX SMIC MUX0" ADC3 || true
+cset "TX_AIF1_CAP Mixer DEC0" 1 || true
+cset "ADC4_MIXER Switch" 1 || true
+cset "ADC4 MUX" INP5 || true
+cset "ADC4 Switch" 1 || true
+cset "TX3 MODE" ADC_HIFI || true
+cset "DEC0 MODE" ADC_HIGH_PERF || true
+# Analog 12 + TX_DEC0 84 (0 dB) is the Fluence path. Without AEC_NS,
+# native S16 speech peak is ~170 — inaudible on playback / Meeting.
+# ADC4 16 = 24 dB analog (TLV 0..30 dB, 1.5 dB/step). TX_DEC0 108 =
+# +24 dB (TLV -84..+40, 84 = 0 dB). Makeup for Fluence Off, not
+# spa S24_32LE (that was the 破音 / 电流声).
+cset_any 16 "ADC4 Volume" || true
+cset_any 108 "TX_DEC0 Volume" "DEC0 Volume" || true
+cset "Fluence AEC NS" Off || true
+
+if [ "$PROBE" = "1" ]; then
+	mm_off_all
+	# MM3 first (product default). MM4 if OPEN_READ leaked. MM2 last.
+	if probe_fe 2 3 || probe_fe 3 4 || probe_fe 1 2; then
+		exit 0
+	fi
+	echo "dagu-mic-route: no live capture FE, leave MultiMedia3 armed" >&2
+	cset "MultiMedia3 Mixer TX_CODEC_DMA_TX_3" on || true
+	echo 2 >"$PCMFILE" 2>/dev/null || echo 2 >/tmp/dagu-mic-pcm || true
+	exit 0
+fi
+
+# Widgets only: do not mm_off_all (that mutes a live linger). Arm the
+# last known FE, or MultiMedia3 on first boot.
+dev=2
+if [ -f "$PCMFILE" ]; then
+	dev=$(cat "$PCMFILE")
+elif [ -f /tmp/dagu-mic-pcm ]; then
+	dev=$(cat /tmp/dagu-mic-pcm)
+fi
+mm=$((dev + 1))
+cset "MultiMedia${mm} Mixer TX_CODEC_DMA_TX_3" on || true
+echo "$dev" >"$PCMFILE" 2>/dev/null || echo "$dev" >/tmp/dagu-mic-pcm || true
 exit 0
 EOF
 chmod 755 /usr/local/sbin/dagu-mic-route.sh
@@ -1847,9 +1949,20 @@ ln -sf /etc/systemd/system/dagu-speaker-route.service \
 	/etc/systemd/system/multi-user.target.wants/dagu-speaker-route.service
 cat >/etc/udev/rules.d/99-dagu-speaker.rules <<'EOF'
 ACTION=="add", SUBSYSTEM=="sound", KERNEL=="controlC0", RUN+="/usr/local/sbin/dagu-speaker-route.sh"
+ACTION=="add", SUBSYSTEM=="sound", KERNEL=="controlC0", RUN+="/bin/sh -c 'DAGU_MIC_PROBE=0 /usr/local/sbin/dagu-mic-route.sh'"
 EOF
 cat >/etc/wireplumber/wireplumber.conf.d/50-dagu-speaker.conf <<'EOF'
 monitor.alsa.rules = [
+  {
+    matches = [
+      { media.class = "Audio/Sink", alsa.device = "3" }
+    ]
+    actions = {
+      update-props = {
+        node.disabled = true
+      }
+    }
+  }
   {
     matches = [
       { device.name = "~alsa_card.platform-sound" }
@@ -1858,7 +1971,7 @@ monitor.alsa.rules = [
       update-props = {
         api.alsa.use-ucm = true
         api.acp.auto-profile = true
-        api.acp.auto-port = true
+        api.acp.auto-port = false
         api.alsa.disable-pro-audio = true
         api.alsa.split-enable = false
         device.profile = "HiFi"
@@ -1898,6 +2011,7 @@ monitor.alsa.rules = [
         api.alsa.soft-mixer = true
         api.alsa.disable-tsched = true
         session.suspend-timeout-seconds = 0
+        node.always-process = true
         node.nick = "Microphone"
         node.description = "Built-in Microphone"
         priority.session = 2000
@@ -2407,48 +2521,107 @@ rm -f /etc/pipewire/pipewire.conf.d/50-dagu-alsa-sink.conf
 install -m755 /usr/local/sbin/dagu-audio-up.sh /usr/local/sbin/dagu-audio-up.sh 2>/dev/null || true
 cat >/usr/local/sbin/dagu-audio-up.sh <<'EOF'
 #!/bin/sh
-# Mic is MultiMedia3 hw:0,2. ACP probes every UCM device while Speaker
-# PCM is held; Mic hw_params EINVAL drops HiFi. HiFi is Speaker-only;
-# this script publishes the capture PCM as a linger PipeWire source.
+# Bring desktop audio back after the CS35L41 card exists.
+# Do NOT put hw:0,0 in pipewire context.objects: a missing card makes
+# PipeWire exit 234, systemd hits start-limit, and the session stays silent.
+# Mic linger is a PipeWire source on a live Q6 capture FE. Prefer
+# MultiMedia3 hw:0,2. If OPEN_READ_V3 0x10db4 returns ADSP_EALREADY (9),
+# that session leaked (kernel close skips CMD_CLOSE unless RUNNING) and
+# spa.alsa stays SETUP / prepare EINVAL. Destroy linger, probe MM4 then
+# MM2, republish. ACP (ALSA Card Profile) must not auto-port Slimbus.
+# HiFi is Speaker-only.
+#
+# pcmC0D0p can exist tens of seconds before WCD mixer widgets. Wait for
+# ADC4, then retry publish. --repair skips the long mixer wait and the
+# Dummy PipeWire restart; the tester calls it when capture goes silent.
 set -eu
 CARD="${DAGU_ALSA_CARD:-0}"
 PCM="/dev/snd/pcmC${CARD}D0p"
-MICPCM="/dev/snd/pcmC${CARD}D2c"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1001}"
-export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+export XDG_RUNTIME_DIR=/run/user/1001
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+RUNDIR="${DAGU_RUNDIR:-$XDG_RUNTIME_DIR}"
+MICDEV="${DAGU_MIC_PCM:-}"
+
+REPAIR=0
+[ "${1:-}" = "--repair" ] && REPAIR=1
+
+LOCK="${XDG_RUNTIME_DIR}/dagu-audio-up.lock"
+mkdir -p "$XDG_RUNTIME_DIR"
+exec 9>"$LOCK"
+flock 9
+
+mixer_ready() {
+	[ -e "$PCM" ] || return 1
+	[ -e "/dev/snd/pcmC${CARD}D2c" ] || \
+		[ -e "/dev/snd/pcmC${CARD}D3c" ] || \
+		[ -e "/dev/snd/pcmC${CARD}D1c" ] || return 1
+	amixer -c "$CARD" cget name="ADC4 Volume" >/dev/null 2>&1 || return 1
+	amixer -c "$CARD" cget name="MultiMedia3 Mixer TX_CODEC_DMA_TX_3" >/dev/null 2>&1 || return 1
+}
+
+load_micdev() {
+	if [ -z "${MICDEV}" ] && [ -f "${RUNDIR}/mic-pcm" ]; then
+		MICDEV=$(cat "${RUNDIR}/mic-pcm")
+	fi
+	if [ -z "${MICDEV}" ] && [ -f /tmp/dagu-mic-pcm ]; then
+		MICDEV=$(cat /tmp/dagu-mic-pcm)
+	fi
+	MICDEV="${MICDEV:-2}"
+	MICPCM="/dev/snd/pcmC${CARD}D${MICDEV}c"
+}
+
+is_dummy() {
+	wpctl status 2>/dev/null | grep -Eq 'Dummy Output|虚拟输出'
+}
+
 i=0
-while [ ! -e "$PCM" ]; do
+limit=180
+[ "$REPAIR" = "1" ] && limit=8
+while ! mixer_ready; do
 	i=$((i + 1))
-	[ "$i" -gt 60 ] && { echo "dagu-audio-up: no $PCM" >&2; exit 1; }
+	[ "$i" -gt "$limit" ] && {
+		echo "dagu-audio-up: no mixer (pcm=$PCM)" >&2
+		exit 1
+	}
 	sleep 0.5
 done
-[ -x /usr/local/sbin/dagu-speaker-route.sh ] && /usr/local/sbin/dagu-speaker-route.sh || true
-[ -x /usr/local/sbin/dagu-mic-route.sh ] && /usr/local/sbin/dagu-mic-route.sh || true
+
+if [ -x /usr/local/sbin/dagu-speaker-route.sh ]; then
+	/usr/local/sbin/dagu-speaker-route.sh || true
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
-	exec sudo -u dagu env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+	mkdir -p /run/dagu
+	chown dagu:dagu /run/dagu 2>/dev/null || true
+	chmod 775 /run/dagu 2>/dev/null || true
+	exec sudo -u dagu env \
+		XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
 		DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
-		HOME=/home/dagu USER=dagu LOGNAME=dagu "$0" "$@"
+		HOME=/home/dagu USER=dagu LOGNAME=dagu \
+		"$0" "$@"
 fi
-systemctl --user reset-failed pipewire.service pipewire.socket \
-	pipewire-pulse.service pipewire-pulse.socket wireplumber.service >/dev/null 2>&1 || true
-systemctl --user start pipewire.socket pipewire.service \
-	pipewire-pulse.socket pipewire-pulse.service wireplumber.service
-j=0
-while [ "$j" -lt 28 ]; do
-	wpctl status >/dev/null 2>&1 && break
-	j=$((j + 1)); sleep 0.25
-done
-if wpctl status 2>/dev/null | grep -q 'Dummy Output'; then
-	systemctl --user try-restart \
-		pipewire.service pipewire-pulse.service wireplumber.service \
-		>/dev/null 2>&1 || true
-	k=0
-	while [ "$k" -lt 28 ]; do
-		wpctl status >/dev/null 2>&1 && \
-			! wpctl status 2>/dev/null | grep -q 'Dummy Output' && break
-		k=$((k + 1)); sleep 0.25
+
+destroy_mic() {
+	ids=$(pw-dump 2>/dev/null | python3 -c '
+import json, sys
+try:
+    objs = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for o in objs:
+    info = o.get("info") or {}
+    props = info.get("props") or {}
+    if props.get("node.name") == "dagu-builtin-mic":
+        i = o.get("id")
+        if i is not None:
+            print(i)
+' 2>/dev/null || true)
+	for id in $ids; do
+		echo "dagu-audio-up: destroy linger node $id" >&2
+		pw-cli destroy "$id" >/dev/null 2>&1 || true
 	done
-fi
+}
+
 mic_listed() {
 	wpctl status 2>/dev/null | awk '
 		$0 ~ /Sources:/{s=1}
@@ -2459,17 +2632,63 @@ mic_listed() {
 		END { exit found ? 0 : 1 }
 	'
 }
-publish_mic() {
-	if mic_listed; then
-		return 0
+
+if [ "$REPAIR" != "1" ]; then
+	systemctl --user reset-failed \
+		pipewire.service pipewire.socket \
+		pipewire-pulse.service pipewire-pulse.socket \
+		wireplumber.service >/dev/null 2>&1 || true
+	systemctl --user start \
+		pipewire.socket pipewire.service \
+		pipewire-pulse.socket pipewire-pulse.service \
+		wireplumber.service
+fi
+
+j=0
+while [ "$j" -lt 28 ]; do
+	if wpctl status >/dev/null 2>&1; then
+		break
 	fi
-	n=0
-	while [ ! -e "$MICPCM" ]; do
-		n=$((n + 1))
-		[ "$n" -gt 20 ] && { echo "dagu-audio-up: no $MICPCM" >&2; return 1; }
+	j=$((j + 1))
+	sleep 0.25
+done
+
+# Dummy means ACP rejected HiFi. Restart PW+WP together so Speaker-only
+# HiFi can probe with no leftover SETUP on pcm1c.
+if [ "$REPAIR" != "1" ] && is_dummy; then
+	systemctl --user try-restart \
+		pipewire.service pipewire-pulse.service wireplumber.service \
+		>/dev/null 2>&1 || true
+	k=0
+	while [ "$k" -lt 28 ]; do
+		wpctl status >/dev/null 2>&1 && ! is_dummy && break
+		k=$((k + 1))
 		sleep 0.25
 	done
-	pw-cli create-node adapter "{ factory.name=api.alsa.pcm.source node.name=dagu-builtin-mic node.nick=Microphone node.description=Microphone media.class=Audio/Source api.alsa.path=\"hw:${CARD},2\" audio.rate=48000 audio.channels=1 audio.format=S16LE alsa.resolution_bits=16 object.linger=true priority.session=2000 api.alsa.disable-tsched=true session.suspend-timeout-seconds=0 }" \
+fi
+
+# Linger holds the PCM in SETUP forever (suspend-timeout 0). arecord
+# cannot probe a live FE until that node is gone. Give Q6 a beat after
+# destroy or MM4 still looks busy and the probe falls through to MM2.
+destroy_mic
+sleep 0.4
+if [ -x /usr/local/sbin/dagu-mic-route.sh ]; then
+	DAGU_MIC_PROBE=1 /usr/local/sbin/dagu-mic-route.sh || true
+fi
+load_micdev
+
+publish_mic() {
+	if [ ! -e "$MICPCM" ]; then
+		echo "dagu-audio-up: no $MICPCM" >&2
+		return 1
+	fi
+	# SPA JSON: commas in hw:0,N must be quoted. object.linger keeps
+	# the node after pw-cli exits. Pin spa S16LE: Q6 S24_LE is not
+	# spa S24_32LE (8-bit left shift) — that path was ~48 dB hot with
+	# a 5.3 kHz carrier (破音 / 电流声). arecord S16 on this PCM is
+	# clean. One channel: only AMIC5; FR was digital zero.
+	# Never suspend (timeout 0). MICDEV is the live FE from /run/dagu/mic-pcm.
+	pw-cli create-node adapter "{ factory.name=api.alsa.pcm.source node.name=dagu-builtin-mic node.nick=Microphone node.description=Microphone media.class=Audio/Source api.alsa.path=\"hw:${CARD},${MICDEV}\" audio.rate=48000 audio.channels=1 audio.format=S16LE alsa.resolution_bits=16 object.linger=true node.always-process=true priority.session=2000 api.alsa.disable-tsched=true session.suspend-timeout-seconds=0 }" \
 		>/tmp/dagu-mic-pw-node.log 2>&1 || {
 		echo "dagu-audio-up: pw-cli create-node mic failed" >&2
 		cat /tmp/dagu-mic-pw-node.log >&2 || true
@@ -2478,23 +2697,49 @@ publish_mic() {
 	m=0
 	while [ "$m" -lt 20 ]; do
 		mic_listed && return 0
-		m=$((m + 1)); sleep 0.25
+		m=$((m + 1))
+		sleep 0.25
 	done
 	echo "dagu-audio-up: mic node not in wpctl after create-node" >&2
 	return 1
 }
-publish_mic || true
+
+p=0
+while [ "$p" -lt 15 ]; do
+	publish_mic && break
+	p=$((p + 1))
+	sleep 2
+done
+
+# No pactl on this rootfs. UCM HiFi Speakers appear once PipeWire starts
+# after /dev/snd/pcmC0D0p exists (do not use context.objects).
 id=$(wpctl status 2>/dev/null | awk '
 	$0 ~ /Sinks:/{s=1}
 	s && /Audio\/Source/{exit}
-	s && /\*/ && /Speakers|Speaker/{
+	s && /\*/ && /Speakers|Speaker|扬声器/{
 		for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/) {print $i; exit}
 	}
-	s && /Speakers|Speaker/ && $1 ~ /^[0-9]+/{print $1; exit}
+	s && /Speakers|Speaker|扬声器/ && $1 ~ /^[0-9]+/{print $1; exit}
 ')
+if [ -z "${id:-}" ]; then
+	id=$(pw-dump 2>/dev/null | python3 -c '
+import json, sys
+try:
+    objs = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for o in objs:
+    props = (o.get("info") or {}).get("props") or {}
+    if props.get("node.name") == "alsa_output.platform-sound.HiFi__Speaker__sink":
+        print(o.get("id", ""))
+        break
+' 2>/dev/null || true)
+fi
 if [ -n "${id:-}" ]; then
 	wpctl set-default "$id" >/dev/null 2>&1 || true
+	# Volume/mute live in WirePlumber default-routes. Do not slam 100%.
 fi
+
 src=$(wpctl status 2>/dev/null | awk '
 	$0 ~ /Sources:/{s=1}
 	s && /Filters:/{exit}
@@ -2509,7 +2754,13 @@ if [ -n "${src:-}" ]; then
 	wpctl set-default "$src" >/dev/null 2>&1 || true
 	wpctl set-mute "$src" 0 >/dev/null 2>&1 || true
 fi
+
 wpctl status 2>/dev/null | sed -n '/Audio/,/Video/p' || true
+
+if ! mic_listed; then
+	echo "dagu-audio-up: Microphone source missing" >&2
+	exit 1
+fi
 exit 0
 EOF
 chmod 755 /usr/local/sbin/dagu-audio-up.sh
@@ -2537,7 +2788,7 @@ StartLimitIntervalSec=180
 EOF
 cat >/etc/systemd/user/dagu-audio-up.service <<'EOF'
 [Unit]
-Description=dagu: start PipeWire Speakers after ALSA pcm exists
+Description=dagu: start PipeWire Speakers after ALSA mixer exists
 After=pipewire.service pipewire-pulse.service wireplumber.service
 Wants=pipewire.service
 
@@ -2545,6 +2796,11 @@ Wants=pipewire.service
 Type=oneshot
 ExecStart=/usr/local/sbin/dagu-audio-up.sh
 RemainAfterExit=yes
+TimeoutStartSec=180
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=12
+StartLimitIntervalSec=240
 
 [Install]
 WantedBy=graphical-session.target

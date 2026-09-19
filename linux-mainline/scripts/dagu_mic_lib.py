@@ -22,8 +22,20 @@ ALSA_FORMAT = "S16_LE"
 CHANNELS = 1
 RATE = 48000
 RESOLUTION_BITS = 16
-# MultiMedia3. MultiMedia2 leaks Q6 ASM on failed prepare (ADSP_EALREADY).
+# Preferred MultiMedia3. MultiMedia2 leaked Q6 ASM (ADSP_EALREADY).
+# After MM3 leak, OPEN_READ_V3 0x10db4 returns 9; probe MM4 then MM2.
 CAPTURE_PCM = 2
+CAPTURE_FE_TRY_ORDER = ((2, 3), (3, 4), (1, 2))  # (alsa device, MultiMedia N)
+CAPTURE_PROBE_MIN_BYTES = 2000
+RUNDIR = "/run/user/1001"
+
+
+def pick_capture_fe(sizes: dict[int, int], min_bytes: int = CAPTURE_PROBE_MIN_BYTES) -> int | None:
+    """First FE in product order whose arecord wav is larger than silence."""
+    for dev, _mm in CAPTURE_FE_TRY_ORDER:
+        if int(sizes.get(dev, 0)) > min_bytes:
+            return dev
+    return None
 
 # S16 peak below this is "too quiet" in the tester (analog12+0dB speech).
 AUDIBLE_PEAK_MIN = 800
@@ -32,6 +44,15 @@ EMPTY_PEAK_MAX = 8
 FLUENCE_OFF_S16_SPEECH_PEAK = 170
 # Hardware wrote left-justified 24-bit; spa read S24_32LE right-justified.
 S24_FALSE_SHIFT = 8
+
+
+def write_wav_s16(path: Path, pcm: bytes, rate: int = RATE) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(CHANNELS)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
 
 
 def wav_peak_s16(path: Path) -> int:

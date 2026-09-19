@@ -1,0 +1,270 @@
+--- a/v4l2-utils.c
++++ b/v4l2-utils.c
+@@ -2,8 +2,12 @@
+ /* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+ /* SPDX-License-Identifier: MIT */
+ 
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE
++#endif
+ #include <linux/videodev2.h>
+ #include <stdio.h>
++#include <stdint.h>
+ #include <string.h>
+ #include <unistd.h>
+ #include <sched.h>
+@@ -11,6 +15,7 @@
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <poll.h>
++#include <time.h>
+ 
+ #include <spa/pod/dynamic.h>
+ #include <spa/utils/cleanup.h>
+@@ -27,6 +32,50 @@
+ 	return err;
+ }
+ 
++static int is_v4l2_loopback(const struct spa_v4l2_device *dev)
++{
++	return strncmp((const char *)dev->cap.driver, "v4l2 loopback", 13) == 0;
++}
++
++static int is_dagu_rear_loopback(const struct spa_v4l2_device *dev)
++{
++	return is_v4l2_loopback(dev) &&
++	       strcmp(dev->path, "/dev/video21") == 0;
++}
++
++/* GNOME Snapshot gtk4paintablesink H-mirrors every camera. Meeting mmap
++ * does not. Rear: YUYV pair reverse so GNOME matches Meeting. Front:
++ * identity copy so that gtk H-mirror is the selfie preview. */
++static void loopback_copy_hflip_yuyv(uint8_t *dst, const uint8_t *src,
++				     uint32_t width, uint32_t height,
++				     uint32_t stride, uint32_t nbytes)
++{
++	uint32_t y, x;
++
++	if (!dst || !src || width < 2 || (width & 1u) ||
++	    stride < width * 2 || nbytes < stride) {
++		if (dst && src && nbytes)
++			memcpy(dst, src, nbytes);
++		return;
++	}
++	if (height > nbytes / stride)
++		height = nbytes / stride;
++	for (y = 0; y < height; y++) {
++		const uint8_t *s = src + (size_t)y * stride;
++		uint8_t *d = dst + (size_t)y * stride;
++		for (x = 0; x < width; x += 2) {
++			const uint8_t *sp = s + (width - 2 - x) * 2;
++			uint8_t *dp = d + x * 2;
++			dp[0] = sp[2];
++			dp[1] = sp[1];
++			dp[2] = sp[0];
++			dp[3] = sp[3];
++		}
++		if (stride > width * 2)
++			memcpy(d + width * 2, s + width * 2, stride - width * 2);
++	}
++}
++
+ int spa_v4l2_open(struct spa_v4l2_device *dev, const char *path)
+ {
+ 	struct stat st;
+@@ -696,7 +745,14 @@
+ 		if ((res = spa_format_parse(filter, &filter_media_type, &filter_media_subtype)) < 0)
+ 			return res;
+ 	}
+-	with_modifier = !filter || spa_pod_find_prop(filter, NULL, SPA_FORMAT_VIDEO_modifier);
++	/* v4l2loopback has no VIDIOC_EXPBUF. Advertising modifier=0 makes
++	 * gtk4paintablesink pick DMABuf; alloc then returns ENOTSUP and
++	 * GNOME Snapshot stutters while renegotiating. Meeting uses V4L2
++	 * mmap directly and never hits this path. */
++	if (is_v4l2_loopback(dev))
++		with_modifier = false;
++	else
++		with_modifier = !filter || spa_pod_find_prop(filter, NULL, SPA_FORMAT_VIDEO_modifier);
+ 
+ 	if (false) {
+ 	      next_fmtdesc:
+@@ -1653,7 +1709,14 @@
+ 	}
+ 
+ 	pts = SPA_TIMEVAL_TO_NSEC(&buf.timestamp);
+-
++	if (is_v4l2_loopback(dev)) {
++		/* write() stamps on v4l2loopback are 0 / stuck. Using them
++		 * as pipewireclock0 froze GNOME Snapshot on the first gray
++		 * frame. Meeting mmap never reads this clock. */
++		struct timespec ts;
++		clock_gettime(CLOCK_MONOTONIC, &ts);
++		pts = (int64_t)ts.tv_sec * SPA_NSEC_PER_SEC + ts.tv_nsec;
++	}
+ 
+ 	if (this->clock) {
+ 		double target = (double)port->info.rate.num / port->info.rate.denom;
+@@ -1705,8 +1768,16 @@
+ 	if (buf.flags & V4L2_BUF_FLAG_ERROR)
+ 		d[0].chunk->flags |= SPA_CHUNK_FLAG_CORRUPTED;
+ 
+-	if (b->mmap_ptr && b->ptr)
+-		memcpy(b->ptr, b->mmap_ptr, d[0].chunk->size);
++	if (b->mmap_ptr && b->ptr) {
++		if (is_dagu_rear_loopback(dev))
++			loopback_copy_hflip_yuyv(b->ptr, b->mmap_ptr,
++					port->fmt.fmt.pix.width,
++					port->fmt.fmt.pix.height,
++					port->fmt.fmt.pix.bytesperline,
++					d[0].chunk->size);
++		else
++			memcpy(b->ptr, b->mmap_ptr, d[0].chunk->size);
++	}
+ 
+ 	spa_list_append(&port->queue, &b->link);
+ 	return 0;
+@@ -1721,11 +1792,15 @@
+ 	int res;
+ 
+ 	if (source->rmask & SPA_IO_ERR) {
+-		struct port *port = &this->out_ports[0];
+-		spa_log_error(this->log, "'%p' error %08x", this->props.device, source->rmask);
+-		if (port->source.loop)
+-			spa_loop_remove_source(this->data_loop, &port->source);
+-		return;
++		if (is_v4l2_loopback(&port->dev)) {
++			spa_log_warn(this->log, "'%s' loopback POLLERR %08x (keep source)",
++					this->props.device, source->rmask);
++		} else {
++			spa_log_error(this->log, "'%p' error %08x", this->props.device, source->rmask);
++			if (port->source.loop)
++				spa_loop_remove_source(this->data_loop, &port->source);
++			return;
++		}
+ 	}
+ 
+ 	if (!(source->rmask & SPA_IO_IN)) {
+@@ -1811,9 +1886,13 @@
+ 	}
+ 	spa_log_debug(this->log, "got %d buffers", reqbuf.count);
+ 	if (reqbuf.count < n_buffers) {
+-		spa_log_error(this->log, "'%s' can't allocate enough buffers %d < %d",
++		if (!is_v4l2_loopback(dev) || reqbuf.count < 2) {
++			spa_log_error(this->log, "'%s' can't allocate enough buffers %d < %d",
++					this->props.device, reqbuf.count, n_buffers);
++			return -ENOMEM;
++		}
++		spa_log_info(this->log, "'%s' loopback granted %d of %d buffers",
+ 				this->props.device, reqbuf.count, n_buffers);
+-		return -ENOMEM;
+ 	}
+ 
+ 	for (i = 0; i < reqbuf.count; i++) {
+@@ -1919,9 +1998,14 @@
+ 	spa_log_debug(this->log, "got %d buffers", reqbuf.count);
+ 
+ 	if (reqbuf.count < n_buffers) {
+-		spa_log_error(this->log, "'%s' can't allocate enough buffers (%d < %d)",
++		if (!is_v4l2_loopback(dev) || reqbuf.count < 2) {
++			spa_log_error(this->log, "'%s' can't allocate enough buffers (%d < %d)",
++					this->props.device, reqbuf.count, n_buffers);
++			return -ENOMEM;
++		}
++		spa_log_info(this->log, "'%s' loopback granted %d of %d buffers",
+ 				this->props.device, reqbuf.count, n_buffers);
+-		return -ENOMEM;
++		n_buffers = reqbuf.count;
+ 	}
+ 
+ 	for (i = 0; i < n_buffers; i++) {
+@@ -1952,10 +2036,12 @@
+ 		}
+ 
+ 		if (b->v4l2_buffer.flags & V4L2_BUF_FLAG_QUEUED) {
+-			/* some drivers can give us an already queued buffer. */
+-			spa_log_warn(this->log, "buffer %d was already queued", i);
+-			n_buffers = i;
+-			break;
++			if (!is_v4l2_loopback(dev)) {
++				/* some drivers can give us an already queued buffer. */
++				spa_log_warn(this->log, "buffer %d was already queued", i);
++				n_buffers = i;
++				break;
++			}
+ 		}
+ 
+ 		d = buffers[i]->datas;
+@@ -2002,15 +2088,43 @@
+ 			d[0].type = SPA_DATA_MemPtr;
+ 			d[0].flags = SPA_DATA_FLAG_READABLE;
+ 			d[0].fd = -1;
+-			d[0].mapoffset = b->v4l2_buffer.m.offset;
+-			d[0].data = mmap(NULL,
+-					b->v4l2_buffer.length,
+-					PROT_READ, MAP_SHARED,
+-					dev->fd,
+-					b->v4l2_buffer.m.offset);
+-			if (d[0].data == MAP_FAILED) {
+-				spa_log_error(this->log, "'%s' mmap: %m", this->props.device);
+-				return -errno;
++			if (is_v4l2_loopback(dev)) {
++				/* Kernel mmap is unflipped (Meeting). Snapshot
++				 * gtk4paintablesink H-mirrors every camera.
++				 * Keep a private copy so mmap_read can reverse
++				 * YUYV pairs; spa data must not be the kernel map. */
++				b->mmap_ptr = mmap(NULL,
++						b->v4l2_buffer.length,
++						PROT_READ, MAP_SHARED,
++						dev->fd,
++						b->v4l2_buffer.m.offset);
++				if (b->mmap_ptr == MAP_FAILED) {
++					spa_log_error(this->log, "'%s' mmap: %m", this->props.device);
++					return -errno;
++				}
++				d[0].mapoffset = 0;
++				d[0].data = mmap(NULL,
++						b->v4l2_buffer.length,
++						PROT_READ | PROT_WRITE,
++						MAP_PRIVATE | MAP_ANONYMOUS,
++						-1, 0);
++				if (d[0].data == MAP_FAILED) {
++					munmap(b->mmap_ptr, b->v4l2_buffer.length);
++					b->mmap_ptr = NULL;
++					spa_log_error(this->log, "'%s' anon mmap: %m", this->props.device);
++					return -errno;
++				}
++			} else {
++				d[0].mapoffset = b->v4l2_buffer.m.offset;
++				d[0].data = mmap(NULL,
++						b->v4l2_buffer.length,
++						PROT_READ, MAP_SHARED,
++						dev->fd,
++						b->v4l2_buffer.m.offset);
++				if (d[0].data == MAP_FAILED) {
++					spa_log_error(this->log, "'%s' mmap: %m", this->props.device);
++					return -errno;
++				}
+ 			}
+ 			b->ptr = d[0].data;
+ 			SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
+@@ -2087,13 +2201,18 @@
+ 
+ 	spa_log_debug(this->log, "starting");
+ 
+-	if (port->current_format.media_subtype == SPA_MEDIA_SUBTYPE_raw ||
++	if (is_v4l2_loopback(dev))
++		port->first_buffer = false;
++	else if (port->current_format.media_subtype == SPA_MEDIA_SUBTYPE_raw ||
+ 	    port->current_format.media_subtype == SPA_MEDIA_SUBTYPE_mjpg ||
+ 	    port->current_format.media_subtype == SPA_MEDIA_SUBTYPE_jpeg)
+ 		port->first_buffer = true;
+ 	else
+ 		port->first_buffer = false;
+-	mmap_read(this);
++	/* Loopback keep_format can DQBUF before STREAMON; that plus
++	 * dropping the first buffer leaves Snapshot on one gray stamp. */
++	if (!is_v4l2_loopback(dev))
++		mmap_read(this);
+ 
+ 	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+ 	if (xioctl(dev->fd, VIDIOC_STREAMON, &type) < 0) {

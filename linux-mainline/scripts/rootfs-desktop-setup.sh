@@ -2002,10 +2002,11 @@ monitor.v4l2.rules = [
       update-props = {
         node.description = "dagu Front Camera"
         media.role = "Camera"
-        api.libcamera.location = "front"
+        api.libcamera.location = "external"
         priority.session = 810
         node.always-process = false
-        session.suspend-timeout-seconds = 3
+        node.want-driver = false
+        session.suspend-timeout-seconds = 0
       }
     }
   }
@@ -2020,7 +2021,8 @@ monitor.v4l2.rules = [
         api.libcamera.location = "back"
         priority.session = 800
         node.always-process = false
-        session.suspend-timeout-seconds = 3
+        node.want-driver = false
+        session.suspend-timeout-seconds = 0
       }
     }
   }
@@ -2086,6 +2088,82 @@ media-ctl -d "$MC" -r >/dev/null 2>&1 || true
 exit 0
 EOF
 chmod 755 /usr/local/sbin/dagu-camss-graph-reset.sh
+cat >/usr/local/sbin/dagu-camera-pw-kick.sh <<'EOF'
+#!/bin/sh
+# After loopback stamp, exclusive_caps+keep_format reports VIDEO_CAPTURE.
+# WirePlumber spa-v4l2 caches QUERYCAP from before stamp (OUTPUT) and
+# never creates Video/Source. GNOME Snapshot then shows No Camera Found.
+# Restart the user session manager only when those sources are missing.
+wait_capture() {
+	dev=$1
+	n=0
+	while [ "$n" -lt 25 ]; do
+		if v4l2-ctl -d "$dev" --all 2>/dev/null | grep -q "Video Capture"; then
+			return 0
+		fi
+		n=$((n + 1))
+		sleep 0.2
+	done
+	return 1
+}
+wait_capture /dev/video20 || exit 0
+wait_capture /dev/video21 || exit 0
+have_sources() {
+	runtime=$1
+	name=$2
+	runuser -u "$name" -- env XDG_RUNTIME_DIR="$runtime" pw-dump 2>/dev/null |
+		python3 -c '
+import json, sys
+try:
+    dump = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+got = set()
+lib = 0
+for obj in dump:
+    props = (obj.get("info") or {}).get("props") or {}
+    if props.get("media.class") != "Video/Source":
+        continue
+    fac = props.get("factory.name") or ""
+    if "libcamera" in fac:
+        lib += 1
+        continue
+    path = props.get("api.v4l2.path")
+    if path:
+        got.add(path)
+sys.exit(0 if ("/dev/video20" in got and "/dev/video21" in got and lib == 0) else 1)
+'
+}
+for runtime in /run/user/*; do
+	[ -d "$runtime" ] || continue
+	uid=${runtime#/run/user/}
+	case $uid in
+	*[!0-9]*) continue ;;
+	esac
+	[ -S "$runtime/pipewire-0" ] || continue
+	name=$(getent passwd "$uid" | cut -d: -f1)
+	[ -n "$name" ] || continue
+	if have_sources "$runtime" "$name"; then
+		continue
+	fi
+	runuser -u "$name" -- env XDG_RUNTIME_DIR="$runtime" \
+		DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+		systemctl --user try-restart wireplumber.service >/dev/null 2>&1 ||
+		systemctl --machine="${name}@" --user try-restart wireplumber.service >/dev/null 2>&1 ||
+		true
+done
+exit 0
+EOF
+chmod 755 /usr/local/sbin/dagu-camera-pw-kick.sh
+if is_elf /usr/local/share/dagu/libspa-v4l2.so; then
+	mkdir -p /usr/lib/aarch64-linux-gnu/spa-0.2/v4l2
+	if [ ! -f /usr/lib/aarch64-linux-gnu/spa-0.2/v4l2/libspa-v4l2.so.dist ]; then
+		cp -a /usr/lib/aarch64-linux-gnu/spa-0.2/v4l2/libspa-v4l2.so \
+			/usr/lib/aarch64-linux-gnu/spa-0.2/v4l2/libspa-v4l2.so.dist 2>/dev/null || true
+	fi
+	install -m755 /usr/local/share/dagu/libspa-v4l2.so \
+		/usr/lib/aarch64-linux-gnu/spa-0.2/v4l2/libspa-v4l2.so
+fi
 mkdir -p /etc/systemd/user/pipewire.service.d \
 	/etc/systemd/user/wireplumber.service.d
 cat >/etc/systemd/user/pipewire.service.d/dagu-camss-reset.conf <<'EOF'
@@ -2095,6 +2173,10 @@ EOF
 cat >/etc/systemd/user/wireplumber.service.d/dagu-camss-reset.conf <<'EOF'
 [Service]
 ExecStartPre=/usr/local/sbin/dagu-camss-graph-reset.sh
+EOF
+cat >/etc/systemd/user/wireplumber.service.d/dagu-camera-after-watch.conf <<'EOF'
+[Unit]
+After=dagu-camera-loopback-watch.service
 EOF
 rm -f /etc/systemd/user/dagu-camera-pw-source.service \
 	/etc/systemd/user/default.target.wants/dagu-camera-pw-source.service
@@ -2349,6 +2431,7 @@ After=systemd-modules-load.service
 [Service]
 Type=simple
 ExecStart=/usr/local/sbin/dagu-camera-loopback watch
+ExecStartPost=/usr/local/sbin/dagu-camera-pw-kick.sh
 ExecStopPost=/usr/local/sbin/dagu-camss-graph-reset.sh
 CPUAffinity=0-5
 Restart=always

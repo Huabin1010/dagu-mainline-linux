@@ -49,6 +49,7 @@ copy_ssh() {
 		"$ROOT/scripts/dagu-himax-irq-affinity.sh" \
 		"$ROOT/scripts/dagu-libcamera-softisp.sh" \
 		"$ROOT/scripts/dagu-camss-graph-reset.sh" \
+		"$ROOT/scripts/dagu-camera-pw-kick.sh" \
 		"root@$HOST:/usr/local/sbin/"
 	"${SCP[@]}" \
 		"$ROOT/systemd/dagu-camera-loopback.service" \
@@ -67,6 +68,8 @@ copy_ssh() {
 		"root@$HOST:/etc/systemd/user/pipewire.service.d/dagu-camss-reset.conf"
 	"${SCP[@]}" "$ROOT/systemd/dagu-camss-reset.conf" \
 		"root@$HOST:/etc/systemd/user/wireplumber.service.d/dagu-camss-reset.conf"
+	"${SCP[@]}" "$ROOT/systemd/dagu-camera-after-watch.conf" \
+		"root@$HOST:/etc/systemd/user/wireplumber.service.d/dagu-camera-after-watch.conf"
 	"${SCP[@]}" "$ROOT/systemd/60-dagu-camera.conf" \
 		"root@$HOST:/etc/wireplumber/wireplumber.conf.d/60-dagu-camera.conf"
 	"${SCP[@]}" "$ROOT/systemd/90-dagu-v4l2loopback.rules" \
@@ -85,6 +88,10 @@ copy_ssh() {
 		"${SCP[@]}" "$ROOT/out/v4l2loopback.ko" \
 			"root@$HOST:/tmp/v4l2loopback.ko"
 	fi
+	if [ -f "$ROOT/out/libspa-v4l2.so" ]; then
+		"${SCP[@]}" "$ROOT/out/libspa-v4l2.so" \
+			"root@$HOST:/tmp/libspa-v4l2.so"
+	fi
 	"${SCP[@]}" "$ROOT/libcamera/dagu-viewfinder-bin.patch" \
 		"root@$HOST:/usr/local/share/dagu/dagu-viewfinder-bin.patch" || true
 	"${SSH[@]}" 'set -e
@@ -97,7 +104,8 @@ copy_ssh() {
 			/usr/local/sbin/dagu-power-button \
 			/usr/local/sbin/dagu-himax-irq-affinity.sh \
 			/usr/local/sbin/dagu-libcamera-softisp.sh \
-			/usr/local/sbin/dagu-camss-graph-reset.sh
+			/usr/local/sbin/dagu-camss-graph-reset.sh \
+			/usr/local/sbin/dagu-camera-pw-kick.sh
 		rm -f /usr/local/sbin/dagu-camera-loopback.sh \
 			/usr/local/sbin/dagu-touch-boost.py \
 			/usr/local/sbin/dagu-power-button.py \
@@ -144,6 +152,17 @@ copy_ssh() {
 				/lib/modules/$(uname -r)/updates/v4l2loopback.ko
 			depmod -a 2>/dev/null || true
 		fi
+		if [ -f /tmp/libspa-v4l2.so ]; then
+			mkdir -p /usr/lib/aarch64-linux-gnu/spa-0.2/v4l2 /usr/local/share/dagu
+			if [ ! -f /usr/lib/aarch64-linux-gnu/spa-0.2/v4l2/libspa-v4l2.so.dist ]; then
+				cp -a /usr/lib/aarch64-linux-gnu/spa-0.2/v4l2/libspa-v4l2.so \
+					/usr/lib/aarch64-linux-gnu/spa-0.2/v4l2/libspa-v4l2.so.dist
+			fi
+			install -m755 /tmp/libspa-v4l2.so \
+				/usr/lib/aarch64-linux-gnu/spa-0.2/v4l2/libspa-v4l2.so
+			install -m755 /tmp/libspa-v4l2.so \
+				/usr/local/share/dagu/libspa-v4l2.so
+		fi
 		udevadm control --reload || true
 		udevadm trigger --subsystem-match=video4linux || true
 		systemctl daemon-reload
@@ -179,8 +198,10 @@ copy_serial() {
 	"${CONSOLE[@]}" put "$ROOT/dconf/locks-dagu-power" /etc/dconf/db/local.d/locks/dagu-power
 	"${CONSOLE[@]}" put "$ROOT/scripts/dagu-himax-irq-affinity.sh" /usr/local/sbin/dagu-himax-irq-affinity.sh
 	"${CONSOLE[@]}" put "$ROOT/scripts/dagu-camss-graph-reset.sh" /usr/local/sbin/dagu-camss-graph-reset.sh
+	"${CONSOLE[@]}" put "$ROOT/scripts/dagu-camera-pw-kick.sh" /usr/local/sbin/dagu-camera-pw-kick.sh
 	"${CONSOLE[@]}" put "$ROOT/systemd/dagu-camss-reset.conf" /etc/systemd/user/pipewire.service.d/dagu-camss-reset.conf
 	"${CONSOLE[@]}" put "$ROOT/systemd/dagu-camss-reset.conf" /etc/systemd/user/wireplumber.service.d/dagu-camss-reset.conf
+	"${CONSOLE[@]}" put "$ROOT/systemd/dagu-camera-after-watch.conf" /etc/systemd/user/wireplumber.service.d/dagu-camera-after-watch.conf
 	"${CONSOLE[@]}" put "$ROOT/systemd/dagu-camera-loopback.service" /etc/systemd/system/dagu-camera-loopback.service
 	"${CONSOLE[@]}" put "$ROOT/systemd/dagu-camera-loopback-watch.service" /etc/systemd/system/dagu-camera-loopback-watch.service
 	"${CONSOLE[@]}" put "$ROOT/systemd/dagu-himax-irq-affinity.service" /etc/systemd/system/dagu-himax-irq-affinity.service
@@ -189,7 +210,7 @@ copy_serial() {
 	"${CONSOLE[@]}" put "$ROOT/systemd/60-dagu-camera.conf" /etc/wireplumber/wireplumber.conf.d/60-dagu-camera.conf
 	"${CONSOLE[@]}" put "$ROOT/systemd/90-dagu-v4l2loopback.rules" /etc/udev/rules.d/90-dagu-v4l2loopback.rules
 	"${CONSOLE[@]}" put "$ROOT/systemd/v4l2loopback.conf" /etc/modprobe.d/v4l2loopback.conf
-	"${CONSOLE[@]}" run 'chmod 755 /usr/local/sbin/dagu-camera-loopback /usr/local/sbin/dagu-touch-boost /usr/local/sbin/dagu-power-button /usr/local/sbin/dagu-himax-irq-affinity.sh /usr/local/sbin/dagu-camss-graph-reset.sh; rm -f /usr/local/sbin/dagu-camera-loopback.sh /usr/local/sbin/dagu-touch-boost.py /usr/local/sbin/dagu-power-button.py; mkdir -p /etc/systemd/user/pipewire.service.d /etc/systemd/user/wireplumber.service.d; ln -sfn libcamera.so.0.7.0 /usr/lib/aarch64-linux-gnu/libcamera.so.0.7; ln -sfn libcamera-base.so.0.7.0 /usr/lib/aarch64-linux-gnu/libcamera-base.so.0.7; ldconfig; /usr/local/sbin/dagu-camss-graph-reset.sh; systemctl stop dagu-camera-loopback.service; systemctl disable dagu-camera-loopback.service; rm -f /etc/systemd/system/multi-user.target.wants/dagu-camera-loopback.service; systemctl daemon-reload; systemctl enable --now dagu-camera-loopback-watch.service; systemctl enable --now dagu-himax-irq-affinity.service; systemctl enable --now dagu-touch-boost.service; /usr/local/sbin/dagu-himax-irq-affinity.sh; echo DAGU_TOUCH_DEPLOY_OK'
+	"${CONSOLE[@]}" run 'chmod 755 /usr/local/sbin/dagu-camera-loopback /usr/local/sbin/dagu-touch-boost /usr/local/sbin/dagu-power-button /usr/local/sbin/dagu-himax-irq-affinity.sh /usr/local/sbin/dagu-camss-graph-reset.sh /usr/local/sbin/dagu-camera-pw-kick.sh; rm -f /usr/local/sbin/dagu-camera-loopback.sh /usr/local/sbin/dagu-touch-boost.py /usr/local/sbin/dagu-power-button.py; mkdir -p /etc/systemd/user/pipewire.service.d /etc/systemd/user/wireplumber.service.d; ln -sfn libcamera.so.0.7.0 /usr/lib/aarch64-linux-gnu/libcamera.so.0.7; ln -sfn libcamera-base.so.0.7.0 /usr/lib/aarch64-linux-gnu/libcamera-base.so.0.7; ldconfig; /usr/local/sbin/dagu-camss-graph-reset.sh; systemctl stop dagu-camera-loopback.service; systemctl disable dagu-camera-loopback.service; rm -f /etc/systemd/system/multi-user.target.wants/dagu-camera-loopback.service; systemctl daemon-reload; systemctl enable --now dagu-camera-loopback-watch.service; systemctl enable --now dagu-himax-irq-affinity.service; systemctl enable --now dagu-touch-boost.service; /usr/local/sbin/dagu-himax-irq-affinity.sh; echo DAGU_TOUCH_DEPLOY_OK'
 }
 
 if have_ssh; then

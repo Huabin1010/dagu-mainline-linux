@@ -3,7 +3,7 @@
 
 use std::ffi::{c_char, CString};
 use std::fs::{self, File};
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -30,6 +30,8 @@ extern "C" {
     fn dagu_pin_cpu_0_3();
     fn dagu_pin_all_threads();
     fn dagu_stamp_loopback(dev: *const c_char, w: u32, h: u32) -> i32;
+    fn dagu_clear_cloexec(fd: i32) -> i32;
+    fn dagu_set_cloexec(fd: i32) -> i32;
     fn dagu_pipe_start(
         slot: i32,
         camera_id: *const c_char,
@@ -196,15 +198,33 @@ fn kill_child(kid: &mut Option<Child>) {
     }
 }
 
-fn spawn_slot(slot: i32) -> Option<Child> {
+fn spawn_slot(slot: i32, hold: Option<&File>) -> Option<Child> {
     let arg = if slot == 0 { "front" } else { "rear" };
-    match Command::new(BIN)
-        .arg(arg)
+    let mut cmd = Command::new(BIN);
+    cmd.arg(arg)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
+        .stderr(Stdio::inherit());
+    /* Inherit the stamp OUTPUT fd. Closing it while PipeWire has
+     * CAPTURE STREAMON posts POLLERR; spa-v4l2 then drops the source
+     * and GNOME Snapshot freezes on the gray stamp. Meeting mmap
+     * never uses spa-v4l2. */
+    if let Some(f) = hold {
+        let fd = f.as_raw_fd();
+        unsafe {
+            if dagu_clear_cloexec(fd) != 0 {
+                eprintln!("dagu-camera-loopback: clear CLOEXEC fd {fd} failed");
+            }
+        }
+        cmd.env("DAGU_LOOP_FD", fd.to_string());
+    }
+    let spawned = cmd.spawn();
+    if let Some(f) = hold {
+        unsafe {
+            let _ = dagu_set_cloexec(f.as_raw_fd());
+        }
+    }
+    match spawned {
         Ok(c) => {
             eprintln!("dagu-camera-loopback: spawn {arg} pid {}", c.id());
             Some(c)
@@ -236,10 +256,9 @@ fn ensure_slot(
     if child_alive(&mut kids[me]) {
         return;
     }
-    /* Drop gray hold then spawn. Child open_loop writes gray before
-     * libcamera STREAMON; camss_reset here would starve xcast DQBUF. */
-    holds[me] = None;
-    kids[me] = spawn_slot(slot);
+    /* Keep the gray OUTPUT hold. Child adopts it via DAGU_LOOP_FD so
+     * PipeWire CAPTURE never sees OUTPUT close (POLLERR / gray freeze). */
+    kids[me] = spawn_slot(slot, holds[me].as_ref());
 }
 
 fn watch() -> ! {

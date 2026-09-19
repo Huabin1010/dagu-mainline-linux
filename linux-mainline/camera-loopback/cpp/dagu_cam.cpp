@@ -194,6 +194,24 @@ int dagu_stamp_loopback(const char *dev, unsigned w, unsigned h)
 	return fd;
 }
 
+int dagu_clear_cloexec(int fd)
+{
+	int fl = fcntl(fd, F_GETFD);
+
+	if (fl < 0)
+		return -1;
+	return fcntl(fd, F_SETFD, fl & ~FD_CLOEXEC);
+}
+
+int dagu_set_cloexec(int fd)
+{
+	int fl = fcntl(fd, F_GETFD);
+
+	if (fl < 0)
+		return -1;
+	return fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+}
+
 struct Pipe {
 	std::shared_ptr<Camera> camera;
 	std::unique_ptr<CameraConfiguration> config;
@@ -456,7 +474,17 @@ static void rgb_to_webcam_rgb24(const uint8_t *src, unsigned stride, unsigned sw
 	}
 	crop_w &= ~1u;
 	thread_local std::vector<uint8_t> rgbrow;
+	thread_local std::vector<unsigned> xmap;
 	rgbrow.resize(dw * 3);
+	xmap.resize(dw);
+	for (unsigned dx = 0; dx < dw; dx++) {
+		unsigned sx = x0 + dx * crop_w / dw;
+		if (sx >= sw)
+			sx = sw - 1;
+		if (hflip)
+			sx = sw - 1 - sx;
+		xmap[dx] = sx;
+	}
 	for (unsigned dy = 0; dy < dh; dy++) {
 		unsigned sy = y0 + dy * crop_h / dh;
 		if (sy >= sh)
@@ -465,12 +493,7 @@ static void rgb_to_webcam_rgb24(const uint8_t *src, unsigned stride, unsigned sw
 			sy = sh - 1 - sy;
 		const uint8_t *row = src + sy * stride;
 		for (unsigned dx = 0; dx < dw; dx++) {
-			unsigned sx = x0 + dx * crop_w / dw;
-			if (sx >= sw)
-				sx = sw - 1;
-			if (hflip)
-				sx = sw - 1 - sx;
-			const uint8_t *p = row + sx * bpp;
+			const uint8_t *p = row + xmap[dx] * bpp;
 			uint8_t *o = rgbrow.data() + dx * 3;
 			o[0] = lut[p[ri]];
 			o[1] = lut[p[gi]];
@@ -617,8 +640,55 @@ static void on_complete(Pipe *p, Request *req)
 	p->cv.notify_one();
 }
 
+static int adopt_loop_fd(Pipe *p, unsigned w, unsigned h)
+{
+	const char *e = getenv("DAGU_LOOP_FD");
+	char *end = nullptr;
+	int fd, fl;
+	v4l2_format cap{};
+
+	if (!e || !*e)
+		return 0;
+	fd = (int)strtol(e, &end, 10);
+	if (!end || *end || fd < 0 || fcntl(fd, F_GETFD) < 0) {
+		log("DAGU_LOOP_FD=%s invalid: %m", e ? e : "");
+		return -1;
+	}
+	/* Dup so pipe_teardown close() cannot drop watch's OUTPUT. */
+	p->loop_fd = dup(fd);
+	if (p->loop_fd < 0) {
+		log("dup DAGU_LOOP_FD: %m");
+		return -1;
+	}
+	fcntl(p->loop_fd, F_SETFD, FD_CLOEXEC);
+	fl = fcntl(p->loop_fd, F_GETFL, 0);
+	if (fl >= 0)
+		fcntl(p->loop_fd, F_SETFL, fl | O_NONBLOCK);
+	p->loop_w = w;
+	p->loop_h = h;
+	cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	if (ioctl(p->loop_fd, VIDIOC_G_FMT, &cap) == 0 &&
+	    cap.fmt.pix.width >= 2 && cap.fmt.pix.height >= 2 &&
+	    cap.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV) {
+		p->loop_w = cap.fmt.pix.width;
+		p->loop_h = cap.fmt.pix.height;
+	}
+	s_ctrl(p->loop_fd, 0x0098f900, 1);
+	s_ctrl(p->loop_fd, 0x0098f902, 0);
+	s_ctrl(p->loop_fd, 0x0098f901, 1);
+	log("adopt OUTPUT fd %d -> %d %s %ux%u (no second open)", fd,
+	    p->loop_fd, p->dev.c_str(), p->loop_w, p->loop_h);
+	return 1;
+}
+
 static int open_loop(Pipe *p, unsigned w, unsigned h)
 {
+	int adopted = adopt_loop_fd(p, w, h);
+
+	if (adopted > 0)
+		return 0;
+	if (adopted < 0)
+		return -1;
 	/* Blocking write: O_NONBLOCK dropped frames and xcast saw
 	 * EAGAIN-silent holes as a stuck black preview. */
 	p->loop_fd = open(p->dev.c_str(), O_RDWR | O_CLOEXEC);
@@ -763,7 +833,11 @@ static void pipe_thread(Pipe *p)
 			if (buf && p->loop_fd >= 0) {
 				auto tp = std::chrono::steady_clock::now();
 				pack_rgb24(p, buf, yuyv.data());
-				yuyv_soften(yuyv.data(), p->loop_w, p->loop_h);
+				/* Rear skip 4×4 already reconstructs; the 1-2-1
+				 * pass on 1280×720 ate A55 while Snapshot's
+				 * gtk converted YUY2, pack spiked to 70ms. */
+				if (!p->rear)
+					yuyv_soften(yuyv.data(), p->loop_w, p->loop_h);
 				meter_and_agc(p, yuyv.data());
 				pack_us += (unsigned long)std::chrono::duration_cast<
 					std::chrono::microseconds>(

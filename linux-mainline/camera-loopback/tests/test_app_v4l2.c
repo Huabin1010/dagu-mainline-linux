@@ -17,6 +17,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1232,13 +1233,463 @@ static int test_sustain_nonblock(const char *dev)
 	return 0;
 }
 
-int main(void)
+/* Snapshot uses PipeWire Video/Source, not spa-libcamera. QUERYCAP must
+ * advertise CAPTURE after stamp or WirePlumber never creates the node. */
+static int test_querycap_capture(const char *dev, const char *tag)
+{
+	int fd;
+	struct v4l2_capability cap;
+	char msg[160];
+
+	fd = open(dev, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		fail(tag, "open");
+		return -1;
+	}
+	memset(&cap, 0, sizeof(cap));
+	if (xioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
+		fail(tag, "QUERYCAP");
+		close(fd);
+		return -1;
+	}
+	close(fd);
+	if (!(cap.device_caps & V4L2_CAP_VIDEO_CAPTURE)) {
+		snprintf(msg, sizeof(msg),
+			 "device_caps=0x%x (OUTPUT-only: no PipeWire Video/Source)",
+			 cap.device_caps);
+		fail(tag, msg);
+		return -1;
+	}
+	snprintf(msg, sizeof(msg), "device_caps=0x%x", cap.device_caps);
+	pass(tag, msg);
+	return 0;
+}
+
+/* G_FMT only: xcast still sees YUYV 1280x720 packed. No REQBUFS/STREAMON
+ * so Snapshot's live PipeWire capture is not torn down. */
+static int test_meeting_yuyv_gfmt(const char *dev, const char *tag)
+{
+	int fd;
+	struct v4l2_format fmt;
+	char msg[160];
+
+	fd = open(dev, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		fail(tag, "open");
+		return -1;
+	}
+	memset(&fmt, 0, sizeof(fmt));
+	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	if (xioctl(fd, VIDIOC_G_FMT, &fmt) < 0) {
+		fail(tag, "G_FMT");
+		close(fd);
+		return -1;
+	}
+	close(fd);
+	if (fmt.fmt.pix.pixelformat == RGB24) {
+		fail(tag, "RGB24 fourcc: xcast yuyv=0, black");
+		return -1;
+	}
+	if (fmt.fmt.pix.pixelformat == I420) {
+		fail(tag, "I420 fourcc: xcast yuyv=0, black");
+		return -1;
+	}
+	if (fmt.fmt.pix.pixelformat != YUYV) {
+		fail(tag, "not YUYV");
+		return -1;
+	}
+	if (fmt.fmt.pix.width != W || fmt.fmt.pix.height != H ||
+	    fmt.fmt.pix.sizeimage != PACKED) {
+		snprintf(msg, sizeof(msg), "YUYV %ux%u sizeimage=%u",
+			 fmt.fmt.pix.width, fmt.fmt.pix.height,
+			 fmt.fmt.pix.sizeimage);
+		fail(tag, msg);
+		return -1;
+	}
+	pass(tag, "YUYV 1280x720 packed");
+	return 0;
+}
+
+static int test_pipewire_snapshot_sources(void)
+{
+	int st;
+
+	st = system(
+		"python3 - <<'PY'\n"
+		"import glob, json, os, subprocess, sys\n"
+		"ok = False\n"
+		"lib = 0\n"
+		"for d in sorted(glob.glob('/run/user/[0-9]*')):\n"
+		"    uid = os.path.basename(d)\n"
+		"    if not uid.isdigit():\n"
+		"        continue\n"
+		"    name = None\n"
+		"    try:\n"
+		"        for line in open('/etc/passwd', encoding='utf-8'):\n"
+		"            p = line.split(':')\n"
+		"            if p[2] == uid:\n"
+		"                name = p[0]\n"
+		"                break\n"
+		"    except OSError:\n"
+		"        continue\n"
+		"    if not name:\n"
+		"        continue\n"
+		"    env = os.environ.copy()\n"
+		"    env['XDG_RUNTIME_DIR'] = d\n"
+		"    try:\n"
+		"        raw = subprocess.check_output(\n"
+		"            ['runuser', '-u', name, '--', 'env',\n"
+		"             'XDG_RUNTIME_DIR=' + d, 'pw-dump'],\n"
+		"            env=env, timeout=8, stderr=subprocess.DEVNULL)\n"
+		"        dump = json.loads(raw)\n"
+		"    except Exception:\n"
+		"        continue\n"
+		"    got = set()\n"
+		"    has_mod = False\n"
+		"    selfie = False\n"
+		"    for o in dump:\n"
+		"        p = (o.get('info') or {}).get('props') or {}\n"
+		"        if p.get('media.class') != 'Video/Source':\n"
+		"            continue\n"
+		"        fac = p.get('factory.name') or ''\n"
+		"        if 'libcamera' in fac:\n"
+		"            lib += 1\n"
+		"            continue\n"
+		"        path = p.get('api.v4l2.path')\n"
+		"        if path:\n"
+		"            got.add(path)\n"
+		"        if path == '/dev/video20' and p.get('api.libcamera.location') == 'front':\n"
+		"            selfie = True\n"
+		"        if path in ('/dev/video20', '/dev/video21'):\n"
+		"            for e in ((o.get('info') or {}).get('params') or {}).get('EnumFormat') or []:\n"
+		"                if 'modifier' in e:\n"
+		"                    has_mod = True\n"
+		"    if has_mod:\n"
+		"        sys.exit(3)\n"
+		"    if selfie:\n"
+		"        sys.exit(4)\n"
+		"    if '/dev/video20' in got and '/dev/video21' in got:\n"
+		"        ok = True\n"
+		"        break\n"
+		"if lib:\n"
+		"    sys.exit(2)\n"
+		"sys.exit(0 if ok else 1)\n"
+		"PY");
+	if (st == -1) {
+		fail("pw_snapshot_sources", "python3 pw-dump");
+		return -1;
+	}
+	st = WEXITSTATUS(st);
+	if (st == 2) {
+		fail("pw_snapshot_sources",
+		     "spa-libcamera Video/Source present (mutter starve)");
+		return -1;
+	}
+	if (st == 3) {
+		fail("pw_snapshot_sources",
+		     "loopback EnumFormat still has DMABuf modifier (Snapshot stutter)");
+		return -1;
+	}
+	if (st == 4) {
+		fail("pw_snapshot_sources",
+		     "front location=front: Snapshot selfie-mirrors unlike Meeting");
+		return -1;
+	}
+	if (st != 0) {
+		fail("pw_snapshot_sources",
+		     "missing Video/Source on /dev/video20 and /dev/video21");
+		return -1;
+	}
+	pass("pw_snapshot_sources",
+	     "dagu-front+dagu-rear Video/Source, no spa-libcamera");
+	return 0;
+}
+
+static int test_portal_camera_present(void)
+{
+	int st;
+
+	st = system(
+		"python3 - <<'PY'\n"
+		"import glob, os, subprocess, sys\n"
+		"ok = False\n"
+		"for d in sorted(glob.glob('/run/user/[0-9]*')):\n"
+		"    uid = os.path.basename(d)\n"
+		"    if not uid.isdigit():\n"
+		"        continue\n"
+		"    name = None\n"
+		"    try:\n"
+		"        for line in open('/etc/passwd', encoding='utf-8'):\n"
+		"            p = line.split(':')\n"
+		"            if p[2] == uid:\n"
+		"                name = p[0]\n"
+		"                break\n"
+		"    except OSError:\n"
+		"        continue\n"
+		"    if not name:\n"
+		"        continue\n"
+		"    bus = 'unix:path=' + d + '/bus'\n"
+		"    try:\n"
+		"        out = subprocess.check_output(\n"
+		"            ['runuser', '-u', name, '--', 'env',\n"
+		"             'XDG_RUNTIME_DIR=' + d,\n"
+		"             'DBUS_SESSION_BUS_ADDRESS=' + bus,\n"
+		"             'busctl', '--user', 'get-property',\n"
+		"             'org.freedesktop.portal.Desktop',\n"
+		"             '/org/freedesktop/portal/desktop',\n"
+		"             'org.freedesktop.portal.Camera',\n"
+		"             'IsCameraPresent'],\n"
+		"            timeout=8, stderr=subprocess.DEVNULL, text=True)\n"
+		"    except Exception:\n"
+		"        continue\n"
+		"    if 'true' in out.lower() or out.strip() == 'b true':\n"
+		"        ok = True\n"
+		"        break\n"
+		"sys.exit(0 if ok else 1)\n"
+		"PY");
+	if (st == -1 || WEXITSTATUS(st) != 0) {
+		fail("portal_camera_present",
+		     "org.freedesktop.portal.Camera.IsCameraPresent is not true");
+		return -1;
+	}
+	pass("portal_camera_present", "IsCameraPresent=true");
+	return 0;
+}
+
+/* GNOME Snapshot consumes PipeWire YUY2. A single gray stamp frame
+ * (Y=U=V=0x80) with no follow-up is the white/gray preview: watch used
+ * to close the OUTPUT hold-fd, spa-v4l2 saw POLLERR and froze. Meeting
+ * mmap is a different path and must stay packed YUYV. */
+static int test_pw_live_not_gray(const char *target, const char *tag,
+				int want_hflip)
+{
+	char script[16384];
+	int st;
+
+	snprintf(script, sizeof(script),
+		 "python3 - <<'PY'\n"
+		 "import glob, json, os, subprocess, sys, time\n"
+		 "dev = \"%s\"\n"
+		 "frame = %d\n"
+		 "want_hflip = %d\n"
+		 "need = 8\n"
+		 "ok = False\n"
+		 "why = 'no session'\n"
+		 "time.sleep(2)\n"
+		 "for d in sorted(glob.glob('/run/user/[0-9]*')):\n"
+		 "    uid = os.path.basename(d)\n"
+		 "    if not uid.isdigit():\n"
+		 "        continue\n"
+		 "    name = None\n"
+		 "    try:\n"
+		 "        for line in open('/etc/passwd', encoding='utf-8'):\n"
+		 "            p = line.split(':')\n"
+		 "            if p[2] == uid:\n"
+		 "                name = p[0]\n"
+		 "                break\n"
+		 "    except OSError:\n"
+		 "        continue\n"
+		 "    if not name:\n"
+		 "        continue\n"
+		 "    env = os.environ.copy()\n"
+		 "    env['XDG_RUNTIME_DIR'] = d\n"
+		 "    try:\n"
+		 "        raw = subprocess.check_output(\n"
+		 "            ['runuser', '-u', name, '--', 'env',\n"
+		 "             'XDG_RUNTIME_DIR=' + d, 'pw-dump'],\n"
+		 "            env=env, timeout=8, stderr=subprocess.DEVNULL)\n"
+		 "        dump = json.loads(raw)\n"
+		 "    except Exception as e:\n"
+		 "        why = 'pw-dump: ' + str(e)\n"
+		 "        continue\n"
+		 "    target = None\n"
+		 "    for o in dump:\n"
+		 "        p = (o.get('info') or {}).get('props') or {}\n"
+		 "        if p.get('media.class') != 'Video/Source':\n"
+		 "            continue\n"
+		 "        if p.get('api.v4l2.path') != dev:\n"
+		 "            continue\n"
+		 "        nm = p.get('node.name') or ''\n"
+		 "        if nm.startswith('v4l2_input'):\n"
+		 "            target = nm\n"
+		 "            break\n"
+		 "        if target is None:\n"
+		 "            target = str(p.get('object.serial') or o.get('id') or '')\n"
+		 "    if not target:\n"
+		 "        why = 'no Video/Source for ' + dev\n"
+		 "        continue\n"
+		 "    out = '/tmp/dagu-pw-live.yuyv'\n"
+		 "    v4l = '/tmp/dagu-v4l-live.yuyv'\n"
+		 "    for pth in (out, v4l):\n"
+		 "        try:\n"
+		 "            os.remove(pth)\n"
+		 "        except OSError:\n"
+		 "            pass\n"
+		 "    cmd = ['runuser', '-u', name, '--', 'env',\n"
+		 "           'XDG_RUNTIME_DIR=' + d,\n"
+		 "           'gst-launch-1.0', '-e',\n"
+		 "           'pipewiresrc',\n"
+		 "           'target-object=' + target,\n"
+		 "           'num-buffers=40',\n"
+		 "           '!', 'video/x-raw,format=YUY2,width=1280,height=720',\n"
+		 "           '!', 'filesink', 'location=' + out, 'sync=false']\n"
+		 "    try:\n"
+		 "        subprocess.run(cmd, timeout=12,\n"
+		 "                       stdout=subprocess.DEVNULL,\n"
+		 "                       stderr=subprocess.DEVNULL)\n"
+		 "    except subprocess.TimeoutExpired:\n"
+		 "        pass\n"
+		 "    except Exception as e:\n"
+		 "        why = 'gst: ' + str(e)\n"
+		 "        continue\n"
+		 "    try:\n"
+		 "        subprocess.run(\n"
+		 "            ['v4l2-ctl', '-d', dev, '--stream-mmap=4',\n"
+		 "             '--stream-count=12', '--stream-to=' + v4l,\n"
+		 "             '--stream-poll'],\n"
+		 "            timeout=6, stdout=subprocess.DEVNULL,\n"
+		 "            stderr=subprocess.DEVNULL)\n"
+		 "    except Exception as e:\n"
+		 "        why = 'v4l2-ctl: ' + str(e)\n"
+		 "        continue\n"
+		 "    try:\n"
+		 "        n = os.path.getsize(out)\n"
+		 "        rawv = open(v4l, 'rb').read()\n"
+		 "    except OSError:\n"
+		 "        why = 'no capture file'\n"
+		 "        continue\n"
+		 "    nf = n // frame\n"
+		 "    nf2 = len(rawv) // frame\n"
+		 "    if nf < need or nf2 < 1:\n"
+		 "        why = 'frames pw=%%d v4l=%%d' %% (nf, nf2)\n"
+		 "        continue\n"
+		 "    last = open(out, 'rb').read()[(nf - 1) * frame:nf * frame]\n"
+		 "    ys = last[0::2]\n"
+		 "    ymin, ymax = min(ys), max(ys)\n"
+		 "    if all(y == 128 for y in ys) or (ymax - ymin) < 20:\n"
+		 "        why = 'last frame gray Y=%%d-%%d' %% (ymin, ymax)\n"
+		 "        continue\n"
+		 "    rawp = open(out, 'rb').read()\n"
+		 "    ww, hh = 1280, 720\n"
+		 "    def sad_ident(a, b):\n"
+		 "        s = 0\n"
+		 "        for row in range(0, hh, 8):\n"
+		 "            off = row * ww * 2\n"
+		 "            for x in range(0, ww, 8):\n"
+		 "                s += abs(a[off + x * 2] - b[off + x * 2])\n"
+		 "        return s\n"
+		 "    def sad_hflip(a, b):\n"
+		 "        s = 0\n"
+		 "        for row in range(0, hh, 8):\n"
+		 "            off = row * ww * 2\n"
+		 "            for x in range(0, ww, 8):\n"
+		 "                s += abs(a[off + x * 2] - b[off + (ww - 1 - x) * 2])\n"
+		 "        return s\n"
+		 "    best_i = best_h = 10 ** 18\n"
+		 "    for pi in range(max(0, nf - 8), nf):\n"
+		 "        pf = rawp[pi * frame:(pi + 1) * frame]\n"
+		 "        for vi in range(nf2):\n"
+		 "            vf = rawv[vi * frame:(vi + 1) * frame]\n"
+		 "            best_i = min(best_i, sad_ident(pf, vf))\n"
+		 "            best_h = min(best_h, sad_hflip(pf, vf))\n"
+		 "    if want_hflip:\n"
+		 "        if best_h * 2 >= best_i:\n"
+		 "            why = 'pw not H-flip vs mmap ident=%%d hflip=%%d' %% (best_i, best_h)\n"
+		 "            continue\n"
+		 "    elif best_i * 2 >= best_h:\n"
+		 "        why = 'pw not identity vs mmap ident=%%d hflip=%%d' %% (best_i, best_h)\n"
+		 "        continue\n"
+		 "    ok = True\n"
+		 "    why = 'ok'\n"
+		 "    break\n"
+		 "if not ok:\n"
+		 "    sys.stderr.write(why + '\\n')\n"
+		 "sys.exit(0 if ok else 1)\n"
+		 "PY",
+		 target, PACKED, want_hflip);
+	st = system(script);
+	if (st == -1 || WEXITSTATUS(st) != 0) {
+		fail(tag, want_hflip
+			     ? "PipeWire YUY2 gray stamp, short capture, or not H-flip vs mmap"
+			     : "PipeWire YUY2 gray stamp, short capture, or not identity vs mmap");
+		return -1;
+	}
+	pass(tag, want_hflip
+		      ? "live YUY2 H-flip vs mmap, not gray stamp"
+		      : "live YUY2 identity vs mmap (GNOME selfie), not gray stamp");
+	return 0;
+}
+
+static void yuyv_hflip_pairs(uint8_t *dst, const uint8_t *src, unsigned w,
+			     unsigned h)
+{
+	unsigned y, x;
+
+	for (y = 0; y < h; y++) {
+		const uint8_t *s = src + y * w * 2;
+		uint8_t *d = dst + y * w * 2;
+
+		for (x = 0; x < w; x += 2) {
+			const uint8_t *sp = s + (w - 2 - x) * 2;
+			uint8_t *dp = d + x * 2;
+
+			dp[0] = sp[2];
+			dp[1] = sp[1];
+			dp[2] = sp[0];
+			dp[3] = sp[3];
+		}
+	}
+}
+
+static int test_yuyv_hflip_pairs(void)
+{
+	const uint8_t src[8] = { 10, 20, 30, 40, 50, 60, 70, 80 };
+	uint8_t dst[8];
+
+	yuyv_hflip_pairs(dst, src, 4, 1);
+	/* 4x1 YUYV H-flip: [Y3 U1 Y2 V1][Y1 U0 Y0 V0] */
+	if (dst[0] != 70 || dst[1] != 60 || dst[2] != 50 || dst[3] != 80 ||
+	    dst[4] != 30 || dst[5] != 20 || dst[6] != 10 || dst[7] != 40) {
+		fail("yuyv_hflip_pairs", "pair reverse contract");
+		return -1;
+	}
+	pass("yuyv_hflip_pairs", "YUYV macropixel reverse");
+	return 0;
+}
+
+static int run_snapshot_tests(void)
+{
+	test_yuyv_hflip_pairs();
+	test_querycap_capture(FRONT, "snap_caps_front");
+	test_querycap_capture(REAR, "snap_caps_rear");
+	test_meeting_yuyv_gfmt(FRONT, "meeting_gfmt_front");
+	test_meeting_yuyv_gfmt(REAR, "meeting_gfmt_rear");
+	test_pipewire_snapshot_sources();
+	test_portal_camera_present();
+	test_pw_live_not_gray(FRONT, "pw_live_front", 0);
+	test_meeting_yuyv_gfmt(FRONT, "meeting_gfmt_front_after_pw");
+	test_pw_live_not_gray(REAR, "pw_live_rear", 1);
+	test_meeting_yuyv_gfmt(REAR, "meeting_gfmt_rear_after_pw");
+	return g_fail;
+}
+
+int main(int argc, char **argv)
 {
 	struct stat st;
 
 	if (stat(FRONT, &st) || stat(REAR, &st)) {
 		fprintf(stderr, "missing %s or %s\n", FRONT, REAR);
 		return 2;
+	}
+
+	run_snapshot_tests();
+	if (argc > 1 && strcmp(argv[1], "snapshot") == 0) {
+		if (g_fail) {
+			fprintf(stderr, "\n%d FAIL\n", g_fail);
+			return 1;
+		}
+		printf("\nALL PASS\n");
+		return 0;
 	}
 
 	test_meeting_contract(FRONT);

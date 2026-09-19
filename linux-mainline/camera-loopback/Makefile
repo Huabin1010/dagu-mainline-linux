@@ -6,12 +6,16 @@ PKG_LIBS := $(shell pkg-config --libs libcamera 2>/dev/null)
 CXXFLAGS ?= -O2 -std=c++17 -fPIC -pthread $(or $(PKG_CFLAGS),-I/usr/include/libcamera)
 LDFLAGS ?= $(or $(PKG_LIBS),-lcamera -lcamera-base) -lstdc++ -pthread
 
-.PHONY: all install clean test
+.PHONY: all install clean test test-snapshot
 
 all: dagu-camera-loopback
 
 test: tests/test_app_v4l2
 	./tests/test_app_v4l2
+
+# Read-only: PipeWire Video/Source + Meeting YUYV caps. Does not stop watch.
+test-snapshot: tests/test_app_v4l2
+	./tests/test_app_v4l2 snapshot
 
 tests/test_app_v4l2: tests/test_app_v4l2.c
 	$(CC) -O2 -Wall -o $@ $<

@@ -32,6 +32,7 @@ install_src drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c
 install_src drivers/media/i2c/imx596-dagu.c
 install_src drivers/media/i2c/s5kjn1-dagu-regs.h
 install_src drivers/media/platform/qcom/camss/camss-vfe-480.c
+install_src drivers/media/platform/qcom/camss/camss-video.c
 install_src drivers/media/v4l2loopback-dagu/v4l2loopback.c
 install_src drivers/media/v4l2loopback-dagu/v4l2loopback.h
 install_src drivers/media/v4l2loopback-dagu/v4l2loopback_formats.h
@@ -1252,6 +1253,304 @@ if changed:
     path.write_text(text)
 PY
 
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+changed = False
+
+marker = "dagu: accept-list / unset-handle LE cancel"
+if marker not in text:
+    old = """static int hci_le_connect_cancel_sync(struct hci_dev *hdev,
+				      struct hci_conn *conn, u8 reason)
+{
+	/* Return reason if scanning since the connection shall probably be
+	 * cleanup directly.
+	 */
+	if (test_bit(HCI_CONN_SCANNING, &conn->flags))
+		return reason;
+
+	if (conn->role == HCI_ROLE_SLAVE ||
+	    test_and_set_bit(HCI_CONN_CANCEL, &conn->flags))
+		return 0;
+
+	return __hci_cmd_sync_status(hdev, HCI_OP_LE_CREATE_CONN_CANCEL,
+				     0, NULL, HCI_CMD_TIMEOUT);
+}
+"""
+    new = """static int hci_le_connect_cancel_sync(struct hci_dev *hdev,
+				      struct hci_conn *conn, u8 reason)
+{
+	int err;
+
+	(void)reason;
+
+	/* dagu: accept-list / unset-handle LE cancel. GNOME Device.Connect
+	 * parks HOG in HCI_CONN_SCANNING (no LE Create Connection). Sending
+	 * LE_CREATE_CONN_CANCEL then gets 0x02/0x0C and leaves handle 3840
+	 * in BT_CONNECT, so the next Settings click times out. Skip the
+	 * command; abort_conn_sync still runs hci_conn_failed.
+	 */
+	if (test_bit(HCI_CONN_SCANNING, &conn->flags) ||
+	    HCI_CONN_HANDLE_UNSET(conn->handle))
+		return 0;
+
+	if (conn->role == HCI_ROLE_SLAVE ||
+	    test_and_set_bit(HCI_CONN_CANCEL, &conn->flags))
+		return 0;
+
+	err = __hci_cmd_sync_status(hdev, HCI_OP_LE_CREATE_CONN_CANCEL,
+				    0, NULL, HCI_CMD_TIMEOUT);
+	if (err == -ENOTCONN || err == -ENOSYS || err == -EPERM)
+		return 0;
+	return err;
+}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hci_le_connect_cancel_sync not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+marker = "dagu: unset-handle abort must still run"
+if marker not in text:
+    old = """	hci_dev_lock(hdev);
+
+	/* Check if the connection has been cleaned up concurrently */
+	c = hci_conn_hash_lookup_handle(hdev, handle);
+	if (!c || c != conn) {
+		err = 0;
+		goto unlock;
+	}
+"""
+    new = """	hci_dev_lock(hdev);
+
+	/* Check if the connection has been cleaned up concurrently */
+	/* dagu: unset-handle abort must still run hci_conn_failed.
+	 * lookup_handle(3840) can miss after QCA setup / ida_free;
+	 * GNOME then leaves BT_CONNECT occupying the radio.
+	 */
+	if (HCI_CONN_HANDLE_UNSET(handle)) {
+		if (!hci_conn_valid(hdev, conn)) {
+			err = 0;
+			goto unlock;
+		}
+		c = conn;
+	} else {
+		c = hci_conn_hash_lookup_handle(hdev, handle);
+		if (!c || c != conn) {
+			err = 0;
+			goto unlock;
+		}
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hci_abort_conn_sync handle lookup not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+marker = "dagu: fail THIS conn"
+if marker not in text:
+    old = """	if (!err) {
+		hci_connect_le_scan_cleanup(conn, 0x00);
+		goto done;
+	}
+
+	/* Check if connection is still pending */
+	if (conn != hci_lookup_le_connect(hdev))
+		goto done;
+
+	/* Flush to make sure we send create conn cancel command if needed */
+	flush_delayed_work(&conn->le_conn_timeout);
+	hci_conn_failed(conn, bt_status(err));
+"""
+    new = """	if (!err) {
+		hci_connect_le_scan_cleanup(conn, 0x00);
+		goto done;
+	}
+
+	/* dagu: fail THIS conn. lookup_le_connect() returns the first
+	 * BT_CONNECT without SCANNING; a second GNOME click then skips
+	 * cleanup and leaves handle 3841/3842 until the next HCI reset.
+	 */
+	if (conn->state != BT_CONNECT)
+		goto done;
+
+	/* Flush to make sure we send create conn cancel command if needed */
+	flush_delayed_work(&conn->le_conn_timeout);
+	hci_conn_failed(conn, bt_status(err));
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: create_le_conn_complete pending check not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+if changed:
+    path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/l2cap_core.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: GNOME Settings Pair/Connect"
+if marker not in text:
+    old = """		if (hci_dev_test_flag(hdev, HCI_ADVERTISING))
+			hcon = hci_connect_le(hdev, dst, dst_type, false,
+					      chan->sec_level, timeout,
+					      HCI_ROLE_SLAVE, 0, 0);
+		else
+			hcon = hci_connect_le_scan(hdev, dst, dst_type,
+						   chan->sec_level, timeout,
+						   CONN_REASON_L2CAP_CHAN);
+"""
+    new = """		if (hci_dev_test_flag(hdev, HCI_ADVERTISING))
+			hcon = hci_connect_le(hdev, dst, dst_type, false,
+					      chan->sec_level, timeout,
+					      HCI_ROLE_SLAVE, 0, 0);
+		else
+			/* dagu: GNOME Settings Pair/Connect. le_scan waits
+			 * for another host adv report after setup-mode
+			 * StopDiscovery; the device we just saw is gone and
+			 * the row spinner never reaches LE Create Connection.
+			 * Directed create_conn lets the controller listen.
+			 */
+			hcon = hci_connect_le(hdev, dst, dst_type, false,
+					      chan->sec_level, timeout,
+					      HCI_ROLE_MASTER, HCI_ADV_PHY_1M,
+					      HCI_ADV_PHY_2M);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: L2CAP LE connect-scan branch not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: GNOME Settings Pair/Connect while the bluetooth page is"
+if marker not in text:
+    old = """	/* If controller is scanning, we stop it since some controllers are
+	 * not able to scan and connect at the same time. Also set the
+	 * HCI_LE_SCAN_INTERRUPTED flag so that the command complete
+	 * handler for scan disabling knows to set the correct discovery
+	 * state.
+	 */
+	if (hci_dev_test_flag(hdev, HCI_LE_SCAN)) {
+		hci_dev_set_flag(hdev, HCI_LE_SCAN_INTERRUPTED);
+		hci_scan_disable_sync(hdev);
+	}
+"""
+    new = """	/* dagu: GNOME Settings Pair/Connect while the bluetooth page is
+	 * still discovering. QCA6390 is TDD — Inquiry and LE Create
+	 * Connection cannot share the radio. ACL create_conn already
+	 * cancels Inquiry; LE did not, so StartDiscovery's Inquiry
+	 * cancelled the initiator (le-connection-abort-by-local) and
+	 * the 未设置 row spun until GDBus timed out.
+	 */
+	if (test_bit(HCI_INQUIRY, &hdev->flags)) {
+		int ierr = __hci_cmd_sync_status(hdev, HCI_OP_INQUIRY_CANCEL,
+						 0, NULL, HCI_CMD_TIMEOUT);
+		if (ierr)
+			bt_dev_warn(hdev, "Failed to cancel inquiry %d", ierr);
+		hci_discovery_set_state(hdev, DISCOVERY_STOPPED);
+	}
+
+	/* If controller is scanning, we stop it since some controllers are
+	 * not able to scan and connect at the same time. Also set the
+	 * HCI_LE_SCAN_INTERRUPTED flag so that the command complete
+	 * handler for scan disabling knows to set the correct discovery
+	 * state.
+	 */
+	if (hci_dev_test_flag(hdev, HCI_LE_SCAN)) {
+		hci_dev_set_flag(hdev, HCI_LE_SCAN_INTERRUPTED);
+		hci_scan_disable_sync(hdev);
+	}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: LE create-conn scan-disable block not found")
+    text = text.replace(old, new, 1)
+    print(f"patched {path}: {marker}")
+
+marker2 = "dagu: same rule as hci_update_passive_scan_sync"
+if marker2 not in text:
+    old = """int hci_start_discovery_sync(struct hci_dev *hdev)
+{
+	unsigned long timeout;
+	int err;
+
+	bt_dev_dbg(hdev, "type %u", hdev->discovery.type);
+"""
+    new = """int hci_start_discovery_sync(struct hci_dev *hdev)
+{
+	unsigned long timeout;
+	int err;
+
+	/* dagu: same rule as hci_update_passive_scan_sync. QCA6390
+	 * cannot scan or Inquiry while LE Create Connection is in
+	 * flight; GNOME Settings queues StartDiscovery behind Pair.
+	 */
+	if (hci_lookup_le_connect(hdev))
+		return -EBUSY;
+
+	bt_dev_dbg(hdev, "type %u", hdev->discovery.type);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hci_start_discovery_sync prologue not found")
+    text = text.replace(old, new, 1)
+    print(f"patched {path}: {marker2}")
+
+marker3 = "dagu: hci_connect_le(..., 0, 0) left Initiating PHYs=0"
+if marker3 not in text:
+    old = """	if (scan_coded(hdev) && (conn->le_adv_phy == HCI_ADV_PHY_CODED ||
+				 conn->le_adv_sec_phy == HCI_ADV_PHY_CODED)) {
+		cp->phys |= LE_SCAN_PHY_CODED;
+		set_ext_conn_params(conn, p);
+
+		plen += sizeof(*p);
+	}
+
+	return __hci_cmd_sync_status_sk(hdev, HCI_OP_LE_EXT_CREATE_CONN,
+"""
+    new = """	if (scan_coded(hdev) && (conn->le_adv_phy == HCI_ADV_PHY_CODED ||
+				 conn->le_adv_sec_phy == HCI_ADV_PHY_CODED)) {
+		cp->phys |= LE_SCAN_PHY_CODED;
+		set_ext_conn_params(conn, p);
+
+		plen += sizeof(*p);
+	}
+
+	/* dagu: hci_connect_le(..., 0, 0) left Initiating PHYs=0.
+	 * QCA6390 Command Status 0x11 (Unsupported Feature or
+	 * Parameter); BlueZ maps it to le-connection-abort-by-local
+	 * and the GNOME 未设置 row spins until GDBus times out.
+	 */
+	if (!cp->phys && scan_1m(hdev)) {
+		cp->phys |= LE_SCAN_PHY_1M;
+		set_ext_conn_params(conn, p);
+		plen += sizeof(*p);
+	}
+
+	return __hci_cmd_sync_status_sk(hdev, HCI_OP_LE_EXT_CREATE_CONN,
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: ext create conn phys block not found")
+    text = text.replace(old, new, 1)
+    print(f"patched {path}: {marker3}")
+
+path.write_text(text)
+PY
+
 python3 - "$KERNEL_SRC/drivers/bluetooth/hci_qca.c" <<'PY'
 from pathlib import Path
 import sys
@@ -1383,6 +1682,97 @@ elif upstream in text:
     text = text.replace(upstream, load, 1)
 else:
     raise SystemExit(f"{path}: I2C firmware-load block not found")
+path.write_text(text)
+print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/drivers/i2c/busses/i2c-qcom-geni.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: drain GENI RX FIFO leftover"
+if marker in text:
+    raise SystemExit(0)
+old = """static void geni_i2c_rx_fsm_rst(struct geni_i2c_dev *gi2c)
+{
+	u32 val;
+	unsigned long time_left = RST_TIMEOUT;
+
+	writel_relaxed(1, gi2c->se.base + SE_DMA_RX_FSM_RST);
+"""
+new = """/* CAF QUP zeros unused RX FIFO words. GENI leaves the previous
+ * envelope. A GPIO bounce then reads leftover as a new packet
+ * (folio Nanosic ghost empty 0x05 KEY_UP). Drain this SE FIFO.
+ * Per-SE RX register, not QUPV3 wrapper CSR.
+ */
+static void geni_i2c_drain_rx_fifo(struct geni_i2c_dev *gi2c)
+{
+	void __iomem *base = gi2c->se.base;
+	u32 rxcnt, i;
+
+	rxcnt = readl_relaxed(base + SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC_MSK;
+	if (rxcnt > 64)
+		rxcnt = 64;
+	for (i = 0; i < rxcnt; i++)
+		readl_relaxed(base + SE_GENI_RX_FIFOn);
+}
+
+static void geni_i2c_rx_fsm_rst(struct geni_i2c_dev *gi2c)
+{
+	u32 val;
+	unsigned long time_left = RST_TIMEOUT;
+
+	writel_relaxed(1, gi2c->se.base + SE_DMA_RX_FSM_RST);
+"""
+if old not in text:
+    raise SystemExit(f"{path}: rx_fsm_rst not found")
+text = text.replace(old, new, 1)
+old = """	if (dma_buf)
+		geni_se_select_mode(se, GENI_SE_DMA);
+	else
+		geni_se_select_mode(se, GENI_SE_FIFO);
+
+	writel_relaxed(len, se->base + SE_I2C_RX_TRANS_LEN);
+	geni_se_setup_m_cmd(se, I2C_READ, m_param);
+"""
+new = """	if (dma_buf)
+		geni_se_select_mode(se, GENI_SE_DMA);
+	else
+		geni_se_select_mode(se, GENI_SE_FIFO);
+
+	if (!dma_buf)
+		geni_i2c_drain_rx_fifo(gi2c);
+
+	writel_relaxed(len, se->base + SE_I2C_RX_TRANS_LEN);
+	geni_se_setup_m_cmd(se, I2C_READ, m_param);
+"""
+if old not in text:
+    raise SystemExit(f"{path}: rx_one_msg FIFO select not found")
+text = text.replace(old, new, 1)
+old = """	if (!time_left)
+		geni_i2c_abort_xfer(gi2c);
+
+	geni_i2c_rx_msg_cleanup(gi2c, cur);
+
+	return gi2c->err;
+}
+"""
+new = """	if (!time_left)
+		geni_i2c_abort_xfer(gi2c);
+
+	if (!dma_buf)
+		geni_i2c_drain_rx_fifo(gi2c);
+
+	geni_i2c_rx_msg_cleanup(gi2c, cur);
+
+	return gi2c->err;
+}
+"""
+if old not in text:
+    raise SystemExit(f"{path}: rx_one_msg cleanup not found")
+text = text.replace(old, new, 1)
 path.write_text(text)
 print(f"patched {path}: {marker}")
 PY
@@ -3899,7 +4289,10 @@ static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 
 	 * #387 VCROP last 0x05bf << 16 (1472) for Display Full 2320.
 	 * #412 identity feeds full 1951. Do not retry 0x05bf as the chroma gap.
 	 */
-	val = ((input_format->height - 1) << 16) | 0;
+	if (input_format->width == 2592 && input_format->height == 1952)
+		val = (0x05bf << 16) | 0;
+	else
+		val = ((input_format->height - 1) << 16) | 0;
 	writel_relaxed(val, csid->base + CSID_IPP_VCROP);
 
 	writel_relaxed(1, csid->base + CSID_IPP_FRM_DROP_PERIOD);
@@ -4293,34 +4686,55 @@ if "RDI_CFG0_EARLY_EOF_EN" not in text:
 
 path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
 text = path.read_text()
-if "IPP pix_store (CFG0 bit7)" not in text:
-    old = '''	val |= 1 << IPP_PIX_STORE_EN;
-	/*
-	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736
+# #396 dropped front pix_store while chasing 4591616. #501 stride
+# 4096 completed that frame. #502 restores CAF bit7 for 2nd COMP.
+drop_store = '''	if (!(input_format->width == 2592 && input_format->height == 1952))
+		val |= 1 << IPP_PIX_STORE_EN;'''
+if drop_store in text:
+    text = text.replace(drop_store, "	val |= 1 << IPP_PIX_STORE_EN;", 1)
+    path.write_text(text)
+    print(f"patched {path}: #502 front IPP pix_store on")
+
+path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
+text = path.read_text()
+if "dagu csid ipp sof recrop" not in text:
+    old = '''		if (val)
+			dev_info_ratelimited(csid->camss->dev,
+					     "dagu csid ipp irq=0x%x\\n", val);
+	}
 '''
-    new = '''	/*
-	 * #396: #394 errrec=0 killed PIXEL PIPE OVERFLOW, still
-	 * 4591616 UV short 1984. CAF IPP pix_store (CFG0 bit7) holds
-	 * a CSI line for back-pressure. With overflow_ctrl off that
-	 * stored line never flushes into chroma WM. Front only; rear
-	 * DQBUF 3 frames keeps pix_store. Do not crop last. Do not
-	 * retry CAMIF EOF buf_done. Keep errrec=0.
-	 */
-	if (!(input_format->width == 2592 && input_format->height == 1952))
-		val |= 1 << IPP_PIX_STORE_EN;
-	/*
-	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736
+    new = '''		if (val)
+			dev_info_ratelimited(csid->camss->dev,
+					     "dagu csid ipp irq=0x%x\\n", val);
+		if (val & BIT(IPP_IRQ_INPUT_SOF)) {
+			unsigned int pix_pad = MSM_CSID_PADS_NUM - 1;
+			struct v4l2_mbus_framefmt *f = &csid->fmt[pix_pad];
+			u32 h, v;
+
+			if (!f->width || !f->height)
+				f = &csid->fmt[MSM_CSID_PAD_FIRST_SRC];
+			if (f->width && f->height) {
+				h = ((f->width - 1) << 16);
+				if (f->width == 2592 && f->height == 1952)
+					v = (0x05bf << 16);
+				else
+					v = ((f->height - 1) << 16);
+				writel_relaxed(h, csid->base + CSID_IPP_HCROP);
+				writel_relaxed(v, csid->base + CSID_IPP_VCROP);
+				wmb();
+				dev_info_ratelimited(csid->camss->dev,
+						     "dagu csid ipp sof recrop h=0x%x v=0x%x meas=0x%x/0x%x\\n",
+						     h, v,
+						     readl_relaxed(csid->base + 0x278),
+						     readl_relaxed(csid->base + 0x27c));
+			}
+		}
+	}
 '''
     if old not in text:
-        old = '''	val |= 1 << IPP_PIX_STORE_EN;
-	/*
-	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736.
-'''
-        new = new.replace('still line=736\n', 'still line=736.\n')
-    if old not in text:
-        raise SystemExit(f"{path}: #396 IPP pix_store needle missing")
+        raise SystemExit(f"{path}: #504 IPP SOF recrop needle missing")
     path.write_text(text.replace(old, new, 1))
-    print(f"patched {path}: #396 front IPP pix_store off")
+    print(f"patched {path}: #504 IPP SOF recrop")
 
 path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
 text = path.read_text()
@@ -4342,7 +4756,7 @@ if "clips chroma WM" not in text:
 	 * pix_store=False, early_eof=True cfg0=0xa02b2063. Overflow
 	 * is gone (#394 errrec=0). EARLY_EOF still fires CSID EOF
 	 * before the last CSI line and clips chroma WM. Front bit29
-	 * off. Rear never set it. Keep pix_store=0. Keep errrec=0.
+	 * off. Rear never set it. Keep errrec=0.
 	 * Do not retry EARLY_EOF ON. Do not crop last.
 	 */
 	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
@@ -4366,31 +4780,31 @@ if wrap_old in text:
     path.write_text(text)
     print(f"patched {path}: #412 CSID 1472 comment wrap")
     text = path.read_text()
-if "Do not retry 0x05bf as the chroma gap" not in text:
+# Display Full restores CSID window last 0x05bf. Identity keep-all
+# 1951 was AXI silent (#412).
+if "val = (0x05bf << 16) | 0" not in text:
     old = '''	/*
-	 * Front imx596 live heap Crop last Y is 0x05bf = 1471
-	 * (2592×1472). Keep-all last=1951 feeds CAMIF 976 2ppc
-	 * lines; overflow stays at line=976 even after #385
-	 * CAMIF_CROP_HEIGHT 735. #387 IPP VCROP last=0x05bf
-	 * first=0 so CSID stops at the same last CLC Crop
-	 * already uses. Rear stays height-1. Do not copy
-	 * 0xfef0bf3. Do not unmask SOT.
+	 * #387 VCROP last 0x05bf << 16 (1472) for Display Full 2320.
+	 * #412 identity feeds full 1951. Do not retry 0x05bf as the chroma gap.
+	 */
+	val = ((input_format->height - 1) << 16) | 0;
+	writel_relaxed(val, csid->base + CSID_IPP_VCROP);
+'''
+    new = '''	/*
+	 * #387 VCROP last 0x05bf << 16 (1472) for Display Full 2320.
+	 * #412 identity keep-all 1951 was AXI silent. Display Full
+	 * restores CSID window last 0x05bf. Do not retry 0x05bf as the chroma gap.
 	 */
 	if (input_format->width == 2592 && input_format->height == 1952)
 		val = (0x05bf << 16) | 0;
 	else
 		val = ((input_format->height - 1) << 16) | 0;
-'''
-    new = '''	/*
-	 * #387 VCROP last 0x05bf << 16 (1472) for Display Full 2320.
-	 * #412 identity feeds full 1951. Do not retry 0x05bf as the chroma gap.
-	 */
-	val = ((input_format->height - 1) << 16) | 0;
+	writel_relaxed(val, csid->base + CSID_IPP_VCROP);
 '''
     if old not in text:
-        raise SystemExit(f"{path}: #412 IPP VCROP identity needle missing")
+        raise SystemExit(f"{path}: Display Full IPP VCROP 0x05bf needle missing")
     path.write_text(text.replace(old, new, 1))
-    print(f"patched {path}: #412 front IPP VCROP identity")
+    print(f"patched {path}: Display Full IPP VCROP last 0x05bf")
 
 path = root / "drivers/media/platform/qcom/camss/camss-csid.c"
 text = path.read_text()
@@ -5355,7 +5769,7 @@ if "vfe_480_crop(vfe, CLC_CROP, in_w - 1, in_h - 1)" in vfe480:
     raise SystemExit("camss-vfe-480.c: Crop11 Y last_y=in_h-1 waits for 3059; CAMIF stops at 1530")
 if "vfe_480_clc_enable(vfe, CLC_PDPC11, BIT(0))" in vfe480:
     raise SystemExit("camss-vfe-480.c: empty PDPC EN=1 is a line-0 brick wall")
-if "vfe_480_pdpc30(vfe)" not in vfe480:
+if "vfe_480_pdpc30(vfe, in_w, in_h)" not in vfe480:
     raise SystemExit("camss-vfe-480.c: PDPC30 identity between Pedestal and Demux missing")
 if "PDPC30_DMI_N		0x90" not in vfe480:
     raise SystemExit("camss-vfe-480.c: CamX PDPC30 DMI sel1 n=0x90 missing")
@@ -5503,8 +5917,8 @@ if "0x00000287, 0x0000047f" in vfe480:
 csidgen = (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text()
 if "0x05bf << 16" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #387 front IPP VCROP last 0x05bf (live Crop last Y) missing")
-if "val = (0x05bf << 16) | 0" in csidgen:
-    raise SystemExit("camss-csid-gen2.c: #412 must not VCROP 1472 on identity")
+if "val = (0x05bf << 16) | 0" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: Display Full IPP VCROP last 0x05bf missing")
 if "Do not retry 0x05bf as the chroma gap" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #412 CSID 1472 comment missing")
 if "input_format->width == 2592 && input_format->height == 1952" not in csidgen:
@@ -5595,6 +6009,74 @@ if "hph=0xc047b058" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #408 H_PHASE img=0x20 0-byte must stay falsified")
 if "Do not retry H_PHASE 0xc047b058 as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #408 must not retry H_PHASE 0xc047b058 as the chroma gap")
+if "writel_relaxed(0xc023d82c" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #465 MNDS Y H_PHASE 0xc023d82c must stay reverted")
+if "Do not retry MNDS Y H_PHASE 0xc023d82c as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #465 MNDS Y H_PHASE 0-byte must stay falsified")
+if "writel_relaxed(0x090f0000,\n\t\t\t       vfe->base + CLC_MNDS_Y + MNDS_H_STRIPE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #466 MNDS Y H_STRIPE 0x090f0000 missing")
+if "hst=0x90f0000 stuck" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #466 MNDS Y H_STRIPE still 4591616 must stay falsified")
+if "Do not retry MNDS Y H_STRIPE as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #466 must not retry MNDS Y H_STRIPE as the chroma gap")
+if "writel_relaxed(0x0011d7a9,\n\t\t\t       vfe->base + CLC_MNDS_Y + MNDS_V_PHASE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #467 MNDS Y V_PHASE 0x0011d7a9 missing")
+if "Do not retry MNDS Y V_PHASE as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #467 must not retry MNDS Y V_PHASE as the chroma gap")
+if "#467 on #492: vph=0x1117a9 stuck" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #467 MNDS Y V_PHASE still 4591616 must stay falsified")
+if "writel_relaxed(0xc023d909,\n\t\t\t       vfe->base + CLC_CROP + CROP_V_PHASE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #468 Crop Y V_PHASE 0xc023d909 missing")
+if "crop_yvph=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #468 crop_yvph telemetry missing")
+if "#468 on #493: crop_yvph=0x231909 stuck" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #468 Crop Y V_PHASE still 4591616 must stay falsified")
+if "Do not retry Crop Y V_PHASE as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #468 must not retry Crop Y V_PHASE as the chroma gap")
+if "writel_relaxed(0x02df0000,\n\t\t\t       vfe->base + CLC_CROP + CROP_V_STRIPE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #469 Crop Y V_STRIPE 0x02df0000 missing")
+if "#469 on #494: vst=0x2df0000 stuck" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #469 Crop Y V_STRIPE still 4591616 must stay falsified")
+if "Do not retry Crop Y V_STRIPE as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #469 must not retry Crop Y V_STRIPE as the chroma gap")
+if "writel_relaxed(0x016f0000,\n\t\t\t       vfe->base + CLC_CROP_C + CROP_V_STRIPE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #470 Crop C V_STRIPE 0x016f0000 missing")
+if "#470 on #495: crop_c_vst=0x16f0000 stuck" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #470 Crop C V_STRIPE still 4591616 must stay falsified")
+if "Do not retry Crop C V_STRIPE as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #470 must not retry Crop C V_STRIPE as the chroma gap")
+if "writel_relaxed(0xc047b212,\n\t\t\t       vfe->base + CLC_CROP_C + CROP_V_PHASE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #471 Crop C V_PHASE 0xc047b212 missing")
+if "crop_cvph=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #471 crop_cvph telemetry missing")
+if "#471 on #496: crop_cvph=0x473212 stuck" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #471 Crop C V_PHASE still 4591616 must stay falsified")
+if "Do not retry Crop C V_PHASE as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #471 must not retry Crop C V_PHASE as the chroma gap")
+if "writel_relaxed(0x016f0000,\n\t\t\t       vfe->base + CLC_CROP_C + CROP_V_SIZE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #472 Crop C V_SIZE 0x016f0000 missing")
+if "crop_cvsz=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #472 crop_cvsz telemetry missing")
+if "#472 on #497: crop_cvsz=0x16f0000 stuck" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #472 Crop C V_SIZE still 4591616 must stay falsified")
+if "Do not retry Crop C V_SIZE as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #472 must not retry Crop C V_SIZE as the chroma gap")
+if "writel_relaxed(0x02df0000,\n\t\t\t       vfe->base + CLC_CROP + CROP_V_SIZE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #473 Crop Y V_SIZE 0x02df0000 missing")
+if "crop_yvsz=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #473 crop_yvsz telemetry missing")
+if "#473 on #498: crop_yvsz=0x2df0000 stuck" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #473 Crop Y V_SIZE still 4591616 must stay falsified")
+if "Do not retry Crop Y V_SIZE as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #473 must not retry Crop Y V_SIZE as the chroma gap")
+if "writel_relaxed(0x090f0000,\n\t\t\t       vfe->base + CLC_CROP_C + CROP_H_STRIPE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #474 Crop C H_STRIPE 0x090f0000 missing")
+if "crop_chst=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #474 crop_chst telemetry missing")
+if "#474 on #499: crop_chst=0x90f0000 stuck" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #474 Crop C H_STRIPE still 4591616 must stay falsified")
+if "Do not retry Crop C H_STRIPE as the chroma gap" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #474 must not retry Crop C H_STRIPE as the chroma gap")
 if "2592/1157" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #408 must keep Android Display Full chroma phase comment")
 if "Do not write non-zero IMAGE_CFG_1" not in vfe480:
@@ -5652,11 +6134,27 @@ if "hph=0xc0400000 stuck" not in vfe480:
 if "Do not retry MNDS_C 2× as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #415 must not retry MNDS_C 2x as the chroma gap")
 if "0x00000001, 0x00000600, 0x0a1f079f, 0xc081999a" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #416 Crop Y live 0x4460 0xc081999a missing")
+    raise SystemExit("camss-vfe-480.c: #416 Crop Y live 0x4460 0xc081999a must stay in comments")
 if "0x00000001, 0x00000600, 0x0a1f079f, 0xc1033334" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #416 Crop C live 0x4660 0xc1033334 missing")
+    raise SystemExit("camss-vfe-480.c: #416 Crop C live 0x4660 0xc1033334 must stay in comments")
 if "0xc0822222" not in vfe480 or "0xc1044444" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #416 Crop H_PAD live 0xc0822222/0xc1044444 missing")
+    raise SystemExit("camss-vfe-480.c: #416 Crop H_PAD live 0xc0822222/0xc1044444 must stay in comments")
+if "static const u32 front_crop_y[] = {\n\t\t0x00000001, 0x00000600, 0x0a1f079f, 0xc081999a" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #416 640 Crop Y pack must stay reverted")
+if "static const u32 front_crop_c[] = {\n\t\t0x00000001, 0x00000600, 0x0a1f079f, 0xc1033334" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #416 640 Crop C pack must stay reverted")
+if "static const u32 front_crop_y[] = {\n\t\t0x00000001, 0x00000600, 0x0a1f079f, 0xc0200000" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #422 Crop Y identity unity missing")
+if "static const u32 front_crop_c[] = {\n\t\t0x00000001, 0x00000600, 0x0a1f079f, 0xc0400000" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #422 Crop C identity 2ppc missing")
+if "front_crop_y_disp" not in vfe480 or "0x0a1f05bf, 0xc023d82c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Display Full Crop Y 9-word missing")
+if "front_crop_c_disp" not in vfe480 or "0x0a1f05bf, 0xc047b058" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Display Full Crop C 9-word missing")
+if "crop_y = front_crop_y_disp" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Display Full Crop must be the packed dest")
+if "0x5504 first-list\n\t * is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #421 0x5504 0-byte must stay falsified")
 if "{ 0x000001df, 0x0000027f }" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #417 live MID Y 0x4868 480x640 missing")
 if "{ 0x000000ef, 0x0000013f }" not in vfe480:
@@ -5695,6 +6193,146 @@ if "CLC_DS411_C_CROP,\n\t\t\t     (const u32[]){ 0x0000079f, 0x00000a1f }" not i
     raise SystemExit("camss-vfe-480.c: #421 live DS411 C 0x5504 identity missing")
 if "Do not copy 0x5d04 0x1e7/0x287" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #421 must not copy 640 DS16 0x5d04")
+if "Crop identity unity is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #422 Crop unity 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x5704,\n\t\t\t     (const u32[]){ 0x000003cf, 0x00000a1f }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #423 live 0x5704 976x2592 missing")
+if "vfe_480_pack(vfe, 0x5608" in vfe480.split("static void vfe_wm_start", 1)[0]:
+    raise SystemExit("camss-vfe-480.c: #426 must not EN 0x5608 before WM6/7 dummy go")
+if "vfe_480_pack(vfe, 0x5e08" in vfe480.split("static void vfe_wm_start", 1)[0]:
+    raise SystemExit("camss-vfe-480.c: #427 must not EN 0x5e08 before WM6/7 dummy go")
+if "0x5704 first-list is not\n\t * the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #423 0x5704 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x5f04,\n\t\t\t     (const u32[]){ 0x000000f3, 0x00000287 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #424 live 0x5f04 missing")
+if "One variable: 0x5f04 crop window only" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #424 must not EN 0x5e08 with 0x5f04")
+if "0x5f04 first-list is not\n\t * the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #424 0x5f04 0-byte must stay falsified")
+if "vfe_480_ds_config(vfe, DISP_DS4_WM, 324, 244" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #425 live WM6 324x244 missing")
+if "vfe_480_ds_config(vfe, DISP_DS16_WM, 81, 61" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #425 live WM7 81x61 missing")
+if "vfe_480_ds_go(vfe)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #425 WM6/7 dummy ADDR start missing")
+if "WM6/7 dummy IOVA is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #425 0-byte img=0xc0 must stay falsified")
+if "vfe_480_ds_go(vfe);\n\t\t\t\tvfe_480_pack(vfe, 0x5608" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #426 0x5608 must follow WM6/7 dummy go")
+if "vfe_480_pack(vfe, 0x5608,\n\t\t\t\t\t     (const u32[]){ 0x00000307 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #426 live 0x5608 0x307 missing")
+if "0x5608 after dummy go is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #426 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x5e08,\n\t\t\t\t\t     (const u32[]){ 0x00000f07 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #427 live 0x5e08 0xf07 missing")
+if "0x5e08 after 0x5608 is not" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #427 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x6068,\n\t\t\t     (const u32[]){ 0x00000079, 0x000000a1 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #428 live 0x6068 122x162 missing")
+if "0x6068 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #428 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x6268,\n\t\t\t     (const u32[]){ 0x0000003c, 0x00000050 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #429 live 0x6268 61x81 missing")
+if "0x6268 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #429 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x6060,\n\t\t\t     (const u32[]){ 0x00000e01 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #430 live 0x6060 0xe01 missing")
+if "0x6060 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #430 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x6070,\n\t\t\t     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #431 live 0x6070 clamp missing")
+if "0x6070 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #431 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x6260,\n\t\t\t     (const u32[]){ 0x00003e01 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #432 live 0x6260 0x3e01 missing")
+if "0x6260 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #432 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x6270,\n\t\t\t     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #433 live 0x6270 linear clamp 6 missing")
+if "Do not pack chroma 7" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #433 must not copy UBWC chroma 7 onto linear 0x6270")
+if "0x6270 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #433 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x5868,\n\t\t\t     (const u32[]){ 0x000001e7, 0x00000287 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #434 live 0x5868 488x648 missing")
+if "0x5868 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #434 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x5a68,\n\t\t\t     (const u32[]){ 0x000000f3, 0x00000143 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #435 live 0x5a68 244x324 missing")
+if "0x5a68 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #435 0-byte img=0xc0 must stay falsified")
+if "w5a68=0x%x/0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #435 pix stop must dump 0x5a68")
+if "vfe_480_pack(vfe, 0x5860,\n\t\t\t     (const u32[]){ 0x00000e01 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #436 live 0x5860 0xe01 missing")
+if "0x5860 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #436 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x5870,\n\t\t\t     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #437 live 0x5870 linear clamp 6 missing")
+if "0x5870 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #437 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x5a60,\n\t\t\t     (const u32[]){ 0x00003e01 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #438 live 0x5a60 0x3e01 missing")
+if "0x5a60 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #438 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x5a70,\n\t\t\t     (const u32[]){ 0x03ff0000, 6, 0x03ff0000, 6, 0, 0 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #439 live 0x5a70 linear clamp 6 missing")
+if "0x5a70 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #439 0-byte img=0xc0 must stay falsified")
+if "vfe_480_pack(vfe, 0x5d04,\n\t\t\t     (const u32[]){ 0x000001e7, 0x00000287 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #440 live identity 0x5d04 488x648 missing")
+if "0x5d04 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #440 0-byte img=0xc0 must stay falsified")
+if "if (in_w != 2592 || in_h != 1952)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #440 must not let Display Full 0x5d04 overwrite identity")
+if "w5d04=0x%x/0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #440 pix stop must dump 0x5d04")
+if "FRONT_DS4_INCR			720896" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #441 Camera ID 1 live WM6 frame_inc 720896 missing")
+if "324 * 244" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #441 must not use width*height as WM6 frame_inc")
+if "dummy live BUS incr is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #441 0-byte img=0xc0 must stay falsified")
+if "incr6=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #441 pix stop must dump WM6 frame_inc")
+if "vfe_480_pack(vfe, 0x3658, (const u32[]){ 0, 0, 0x01002001 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #442 Camera ID 1 first-list LSC MODULE 0x01002001 missing")
+if "last_x == 2591 && last_y == 975" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #442 LSC EN must stay identity-only")
+if "0x00530053" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #442 first-list 0x3668 blob missing")
+if "Do not EN LSC with empty 0x3668" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #329 empty LSC EN must stay falsified")
+if "0x3658 first-list LSC is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #442 0-byte img=0xc0 must stay falsified")
+if "{ 0, 0, 0x0000c101 }" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #443 Camera ID 1 first-list GIC MODULE 0xc101 missing")
+if "0x3c303af0" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #443 first-list 0x3468 blob missing")
+if "in_w == 2592 && in_h == 1952" not in vfe480.split("vfe_480_abf_bank2", 1)[-1]:
+    raise SystemExit("camss-vfe-480.c: #443 GIC EN must stay identity-only")
+if "vfe_480_pack(vfe, 0x3458, (const u32[]){ 1, 1, ABF_BANK2_MODULE }, 3)" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #357 {1,1,ABF_BANK2_MODULE} must not return")
+if "0x3458 first-list GIC is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #443 0-byte img=0xc0 must stay falsified")
+if "0x07bf003f" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #444 Camera ID 1 first-list 0x2e68 missing")
+if "w2e68=0x%x/0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #444 pix stop must dump 0x2e68")
+if "Do not 0x2e58 EN" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #444 must not EN PDPC30")
+if "0x2e68 first-list PDPC is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #444 0-byte img=0xc0 must stay falsified")
+if "FRONT_DS4_STRIDE		2816" not in vfe480 and "FRONT_DS4_STRIDE			2816" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #445 Camera ID 1 live WM6 stride 2816 missing")
+if "DISP_DS4_STRIDE			2048" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #445 must not replace rear dummy stride 2048")
+if "dummy live BUS stride 2816 is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #445 0-byte img=0xc0 must stay falsified")
+if "CLC_RNDCLAMP_OUT_Y + 0x68,\n\t\t     (const u32[]){ 0x000001e7, 0x00000287 }" in vfe480:
+    raise SystemExit("camss-vfe-480.c: #434 must not copy 0x5868 onto OUT")
+if "c6270=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #433 pix stop must dump 0x6270")
 if "0x079f03cf" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #412 MNDS_Y V_SIZE dest 1952 src 976 missing")
 if "0x03cf01e7" not in vfe480:
@@ -5745,10 +6383,14 @@ if "Do not retry CAMIF EOF" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #395 CAMIF EOF buf_done must stay falsified")
 if "Keep front overflow_ctrl=0" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #394 errrec=0 on #408 must stay (overflow gone)")
-if "IPP pix_store (CFG0 bit7)" not in csidgen:
-    raise SystemExit("camss-csid-gen2.c: #396 front must drop IPP pix_store")
-if "if (!(input_format->width == 2592 && input_format->height == 1952))\n\t\tval |= 1 << IPP_PIX_STORE_EN" not in csidgen:
-    raise SystemExit("camss-csid-gen2.c: #396 PIX_STORE must stay on rear, off front")
+if "if (!(input_format->width == 2592 && input_format->height == 1952))\n\t\tval |= 1 << IPP_PIX_STORE_EN" in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #502 must restore front IPP pix_store")
+if "val |= 1 << IPP_PIX_STORE_EN" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: CAF IPP pix_store (CFG0 bit7) missing")
+if "dagu csid ipp eof resume" in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #503 IPP EOF resume meas=0/0xfff still 1 COMP — do not keep")
+if "dagu csid ipp sof recrop" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: #504 must re-arm IPP crop on SOF")
 if "pix_store=" not in pix_test:
     raise SystemExit("dagu-ife-pix-test.sh: #396 pix_store probe missing")
 if "mnds_c_vph=" not in pix_test:
@@ -5865,8 +6507,10 @@ if "writel_relaxed(MODE_QCOM_PLAIN << WM_CFG_MODE" not in vfe480:
     raise SystemExit("camss-vfe-480.c: PLAIN WM must stay EN=0 until IMAGE_ADDR")
 if "if (plain)\n\t\twritel_relaxed(1 << WM_CFG_EN | MODE_QCOM_PLAIN << WM_CFG_MODE" in vfe480:
     raise SystemExit("camss-vfe-480.c: enabling PLAIN WM in wm_config (addr 0) is illegal")
-if "writel_relaxed(addr, vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));\n\tif (wm == DISP_Y_WM || wm == DISP_C_WM)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: CAF enables DISP WM after IMAGE_ADDR")
+if "writel_relaxed(addr, vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: CAF writes IMAGE_ADDR in wm_update")
+if "if (cfg & (1 << WM_CFG_EN))" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: later PIX frames are IMAGE_ADDR + RUP only")
 if "VFE_BUS_WM_DEBUG_CFG" not in vfe480:
     raise SystemExit("camss-vfe-480.c: WM debug_status_cfg 0xB078 missing")
 if "VFE_BUS_WM_ADDR_STATUS0" not in vfe480:
@@ -6019,10 +6663,188 @@ if "core |= BIT(CORE_CFG_0_VID_DS4_R2PD) | BIT(CORE_CFG_0_VID_DS16_R2PD)" not in
     raise SystemExit("camss-vfe-480.c: Android CORE_CFG sets VID R2PD off")
 if "core |= BIT(CORE_CFG_0_DISP_DS4_R2PD) | BIT(CORE_CFG_0_DISP_DS16_R2PD)" not in vfe480:
     raise SystemExit("camss-vfe-480.c: linear NV12 must set DISP R2PD off; on without DSX10 stalls COMP_GRP_1")
-if "vfe_480_ds_config(vfe, DISP_DS4_WM" in vfe480:
-    raise SystemExit("camss-vfe-480.c: do not start WM6 without DSX10")
-if "vfe_480_ds_go(vfe)" in vfe480:
-    raise SystemExit("camss-vfe-480.c: do not EN WM6/7 without DSX10")
+if "core &= ~(BIT(CORE_CFG_0_DISP_DS4_R2PD)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #446 identity Android CORE_CFG 0x60000800 DISP R2PD on missing")
+if "in_w == 2592 && in_h == 1952 && out_w == 2592 && out_h == 1952" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Display Full must keep DISP R2PD off like #386 0x78000800")
+if "if (0 && in_w == 2592 && in_h == 1952 && out_w == 2592 && out_h == 1952)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Display Full must not execute identity CORE 0x60000800")
+if "One variable: identity DISP R2PD on" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #446 must stay identity-only R2PD")
+if "identity DISP R2PD on is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #446 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x010c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #447 Camera ID 1 first-list 0x010c missing")
+if "0x44440001" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #447 first-list 0x010c=0x44440001 missing")
+if "One variable: identity 0x010c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #447 must stay identity-only 0x010c")
+if "r010c=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #447 pix-stop r010c missing")
+if "0x010c first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #447 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x9c60" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #448 Camera ID 1 first-list 0x9c60 missing")
+if "One variable: identity 0x9c60" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #448 must stay identity-only 0x9c60")
+if "r9c60=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #448 pix-stop r9c60 missing")
+if "0x9c60 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #448 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x9c68" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #449 Camera ID 1 first-list 0x9c68 missing")
+if "One variable: identity 0x9c68" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #449 must stay identity-only 0x9c68")
+if "r9c68=0x%x/0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #449 pix-stop r9c68 missing")
+if "0x9c68 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #449 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x826c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #450 Camera ID 1 first-list 0x826c missing")
+if "One variable: identity 0x826c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #450 must stay identity-only 0x826c")
+if "r826c=0x%x/0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #450 pix-stop r826c missing")
+if "Do not 0x8260 EN" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #450 must not EN 0x8260")
+if "0x826c first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #450 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x8260" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #451 Camera ID 1 first-list 0x8260 missing")
+if "0xffff0001" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #451 first-list 0x8260=0xffff0001 missing")
+if "One variable: identity 0x8260" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #451 must stay identity-only 0x8260")
+if "r8260=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #451 pix-stop r8260 missing")
+if "0x8260 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #451 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x846c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #452 Camera ID 1 first-list 0x846c missing")
+if "One variable: identity 0x846c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #452 must stay identity-only 0x846c")
+if "Do not 0x8460 EN" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #452 must not EN 0x8460")
+if "r846c=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #452 pix-stop r846c missing")
+if "0x846c first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #452 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x8480" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #453 Camera ID 1 first-list 0x8480 missing")
+if "One variable: identity 0x8480" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #453 must stay identity-only 0x8480")
+if "r8480=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #453 pix-stop r8480 missing")
+if "0x8480 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #453 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x8460" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #454 Camera ID 1 first-list 0x8460 missing")
+if "One variable: identity 0x8460" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #454 must stay identity-only 0x8460")
+if "r8460=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #454 pix-stop r8460 missing")
+if "0x8460 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #454 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x8060" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #455 Camera ID 1 first-list 0x8060 missing")
+if "One variable: identity 0x8060" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #455 must stay identity-only 0x8060")
+if "Do not 0x8068" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #455 must not pack 0x8068")
+if "r8060=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #455 pix-stop r8060 missing")
+if "0x8060 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #455 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x8068" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #456 Camera ID 1 first-list 0x8068 missing")
+if "One variable: identity 0x8068" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #456 must stay identity-only 0x8068")
+if "r8068=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #456 pix-stop r8068 missing")
+if "0x8068 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #456 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x8e60" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #457 Camera ID 1 first-list 0x8e60 missing")
+if "One variable: identity 0x8e60" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #457 must stay identity-only 0x8e60")
+if "Do not 0x8e68" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #457 must not pack 0x8e68")
+if "r8e60=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #457 pix-stop r8e60 missing")
+if "0x8e60 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #457 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x8e68" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #458 Camera ID 1 first-list 0x8e68 missing")
+if "One variable: identity 0x8e68" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #458 must stay identity-only 0x8e68")
+if "r8e68=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #458 pix-stop r8e68 missing")
+if "0x8e68 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #458 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x8660" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #459 Camera ID 1 first-list 0x8660 missing")
+if "One variable: identity 0x8660" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #459 must stay identity-only 0x8660")
+if "Do not 0x8668" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #459 must not pack 0x8668")
+if "r8660=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #459 pix-stop r8660 missing")
+if "0x8660 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #459 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x8668" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #460 Camera ID 1 first-list 0x8668 missing")
+if "One variable: identity 0x8668" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #460 must stay identity-only 0x8668")
+if "r8668=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #460 pix-stop r8668 missing")
+if "0x8668 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #460 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x7e6c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #461 Camera ID 1 first-list 0x7e6c missing")
+if "One variable: identity 0x7e6c" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #461 must stay identity-only 0x7e6c")
+if "Do not 0x7e80" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #461 must not pack 0x7e80")
+if "Do not 0x7e60 EN" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #461 must not EN 0x7e60")
+if "r7e6c=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #461 pix-stop r7e6c missing")
+if "0x7e6c first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #461 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x7e80" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #462 Camera ID 1 first-list 0x7e80 missing")
+if "One variable: identity 0x7e80" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #462 must stay identity-only 0x7e80")
+if "Do not 0x7e60 EN" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #462 must not EN 0x7e60")
+if "r7e80=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #462 pix-stop r7e80 missing")
+if "0x7e80 first-list is not the identity stall" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #462 STREAMON 0-byte must stay falsified")
+if "vfe_480_pack(vfe, 0x7e60" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #463 Camera ID 1 first-list 0x7e60 missing")
+if "One variable: identity 0x7e60" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #463 must stay identity-only 0x7e60")
+if "r7e60=0x%x" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #463 pix-stop r7e60 missing")
+if "out_w == 2592 && out_h == 1952" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: identity first-list must stay dest-gated; Display Full 2320 must not execute 0x7e60")
+if "vfe_480_live_display_cdm(vfe, in_w, in_h, out_w, out_h)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Display Full must dest-gate TAP first-list")
+if "w5868=0x1e7/0x287 vs WM 2320" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Display Full must restore OUT dest after TAP 488")
+if "u32 dest_w = out_w" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: live_display_cdm must spill dest before TAP clobber")
+if "if (0 && in_w == 2592 && in_h == 1952 && dest_w == 2592 && dest_h == 1952)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: Display Full must not execute TAP identity 488 OUT")
+# #425 starts WM6/7 with dummy IOVA + live 324x244 / 81x61.
+# Empty ADDR=0 EN hung CAMNOC. 0x5608 CLC without WM6/7 hung CAMNOC.
+if "writel_relaxed(0, vfe->base + VFE_BUS_WM_IMAGE_ADDR(DISP_DS4_WM))" in vfe480:
+    raise SystemExit("camss-vfe-480.c: empty ADDR WM6 hung CAMNOC")
+if "lower_32_bits(vfe_480_ds4_dma)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #425 WM6 dummy IOVA missing")
+if "lower_32_bits(vfe_480_ds16_dma)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: #425 WM7 dummy IOVA missing")
 if "vfe_480_pixel_pattern(sink->code) << CORE_CFG_0_PIXEL_PATTERN" in vfe480:
     raise SystemExit("camss-vfe-480.c: CORE_CFG_0 bits 24-25 are dsp_mode/DSP_STREAMING; Bayer is Demux even/odd")
 if "vfe_480_clc_enable(vfe, CLC_CAMIF, CAMIF_EN | CAMIF_IFE_OUT_EN);" in vfe480:

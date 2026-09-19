@@ -170,6 +170,7 @@ struct Pipe {
 	/* s5kjn1 GBRG Debayer STORE is B,G,R in the same RG24 mmap where
 	 * imx596 BGGR is R,G,B. RGB pack makes rear Coke/red go blue. */
 	bool bgr = false;
+	bool rear = false;
 	std::mutex mu;
 	std::condition_variable cv;
 	std::deque<Request *> done;
@@ -333,28 +334,35 @@ static void rgb24_row_to_yuyv(const uint8_t *s, uint8_t *d, unsigned w, bool bgr
 	}
 }
 
-static const uint8_t *preview_lut()
+static const uint8_t *preview_lut(bool rear)
 {
 	/* DebayerCpu dumps near-linear 8-bit (10-bit RAW in the low bits).
 	 * Snapshot GTK stretches it; wemeet paints YUYV as-is so indoor Y≈47
-	 * is a black preview. 4× preamp + sRGB is the IFE preview tone map. */
-	static uint8_t t[256];
+	 * is a black preview. Front skip 2×2 sees 4 photosites/pixel → 4×
+	 * preamp + sRGB. Rear skip 4×4 already averages 16 photosites; the
+	 * same 4× tone curve blows a desk to Y≈207. */
+	static uint8_t t_front[256], t_rear[256];
 	static bool init;
 	if (!init) {
-		for (int i = 0; i < 256; i++) {
-			float x = std::min(1.f, (float)i * 4.f / 255.f);
-			float y = (x <= 0.0031308f) ? 12.92f * x
-						    : 1.055f * powf(x, 1.f / 2.4f) - 0.055f;
-			t[i] = (uint8_t)std::min(255, (int)(y * 255.f + 0.5f));
+		for (int s = 0; s < 2; s++) {
+			uint8_t *t = s ? t_rear : t_front;
+			float pre = s ? 1.f : 4.f;
+			for (int i = 0; i < 256; i++) {
+				float x = std::min(1.f, (float)i * pre / 255.f);
+				float y = (x <= 0.0031308f) ? 12.92f * x
+							    : 1.055f * powf(x, 1.f / 2.4f) - 0.055f;
+				t[i] = (uint8_t)std::min(255, (int)(y * 255.f + 0.5f));
+			}
 		}
 		init = true;
 	}
-	return t;
+	return rear ? t_rear : t_front;
 }
 
 static void rgb_to_webcam_yuyv(const uint8_t *src, unsigned stride, unsigned sw,
 			       unsigned sh, unsigned bpp, int ri, int gi, int bi,
-			       uint8_t *dst, unsigned dw, unsigned dh, bool rot180)
+			       uint8_t *dst, unsigned dw, unsigned dh, bool rot180,
+			       bool rear)
 {
 	unsigned crop_w, crop_h, x0, y0;
 	if (sw * dh >= sh * dw) {
@@ -373,7 +381,7 @@ static void rgb_to_webcam_yuyv(const uint8_t *src, unsigned stride, unsigned sw,
 		y0 = (sh - crop_h) / 2;
 	}
 	crop_w &= ~1u;
-	const uint8_t *lut = preview_lut();
+	const uint8_t *lut = preview_lut(rear);
 	thread_local std::vector<uint8_t> rgbrow;
 	rgbrow.resize(dw * 3);
 	for (unsigned dy = 0; dy < dh; dy++) {
@@ -461,7 +469,7 @@ static void pack_yuyv(Pipe *p, FrameBuffer *buf, uint8_t *dst)
 		bpp = 4;
 	}
 	rgb_to_webcam_yuyv(src, p->stride, p->w, p->h, bpp, ri, gi, bi, dst,
-			   p->loop_w, p->loop_h, p->rot180);
+			   p->loop_w, p->loop_h, p->rot180, p->rear);
 }
 
 static void apply_preview_ctrls(Pipe *p, Request *req)
@@ -469,15 +477,24 @@ static void apply_preview_ctrls(Pipe *p, Request *req)
 	if (!p->camera)
 		return;
 	const ControlInfoMap &infos = p->camera->controls();
-	/* IPASoft AnalogueGain is the sensor code (imx596 0–960), not 1.0–16.0.
-	 * 8.0 left PGA at ~1×; wemeet mmap Y≈47. No sensor helper, so AGC
-	 * does not ramp — pin CamX 16× and 30 fps shutter. */
+	/* No sensor helper → IPA AGC does not ramp. Pin per-sensor codes.
+	 * Front imx596: V4L2 analogue 0–960 (0x3c0 = CamX 16×). 8.0 left
+	 * PGA at ~1× and wemeet mmap Y≈47.
+	 * Rear s5kjn1: V4L2 analogue 1–16. The same 960/33000 clamps to
+	 * 16/3142; 4× preview LUT then blows indoor (Y≈207, white desk). */
 	if (infos.find(&controls::AeEnable) != infos.end())
 		req->controls().set(controls::AeEnable, false);
-	if (infos.find(&controls::ExposureTime) != infos.end())
-		req->controls().set(controls::ExposureTime, 33000);
-	if (infos.find(&controls::AnalogueGain) != infos.end())
-		req->controls().set(controls::AnalogueGain, 960.0f);
+	if (p->rear) {
+		if (infos.find(&controls::ExposureTime) != infos.end())
+			req->controls().set(controls::ExposureTime, 2000);
+		if (infos.find(&controls::AnalogueGain) != infos.end())
+			req->controls().set(controls::AnalogueGain, 4.0f);
+	} else {
+		if (infos.find(&controls::ExposureTime) != infos.end())
+			req->controls().set(controls::ExposureTime, 33000);
+		if (infos.find(&controls::AnalogueGain) != infos.end())
+			req->controls().set(controls::AnalogueGain, 960.0f);
+	}
 }
 
 static void on_complete(Pipe *p, Request *req)
@@ -687,6 +704,7 @@ int dagu_pipe_start(int slot, const char *camera_id, const char *loopback_dev,
 	p->stop = false;
 	p->rot180 = (slot == 0); /* imx596: loopback has no V4L2 rotation */
 	p->bgr = (slot == 1); /* s5kjn1 GBRG: RG24 bytes are B,G,R */
+	p->rear = (slot == 1);
 	if (start_camera(p, w, h) < 0) {
 		pipe_teardown(p);
 		return -1;

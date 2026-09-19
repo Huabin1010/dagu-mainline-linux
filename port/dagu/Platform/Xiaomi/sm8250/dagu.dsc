@@ -14,7 +14,8 @@
 !include Platform/Qualcomm/sm8250/sm8250.dsc
 
 [BuildOptions.common]
-  GCC:*_*_AARCH64_CC_FLAGS = -DENABLE_SIMPLE_INIT
+  # gnu17: host GCC 15 defaults to C23 and rejects SimpleInit typedef bool.
+  GCC:*_*_AARCH64_CC_FLAGS = -DENABLE_SIMPLE_INIT -std=gnu17
 
 [LibraryClasses.common]
   # Force on-screen early boot log (PrePI DEBUG text on framebuffer).
@@ -22,6 +23,7 @@
 
 [Components.common]
   Silicon/Qualcomm/QcomPkg/Drivers/TestLabBridgeDxe/TestLabBridgeDxe.inf
+  Silicon/Qualcomm/QcomPkg/Drivers/DaguUsbCdcAcmDxe/DaguUsbCdcAcmDxe.inf
   MdeModulePkg/Application/BootManagerMenuApp/BootManagerMenuApp.inf
   Silicon/Qualcomm/QcomPkg/PrePi/PrePi.inf {
     <LibraryClasses>
@@ -37,7 +39,8 @@
   gQcomTokenSpaceGuid.PcdMipiFrameBufferVisibleHeight|1066
   gQcomTokenSpaceGuid.PcdMipiFrameBufferRotation|90
   gQcomTokenSpaceGuid.PcdMipiFrameBufferConsoleScale|150
-  gQcomTokenSpaceGuid.PcdDebugUartPortBase|0x988000
+  # Live FDT qcom,qup_uart@a90000 (GPIO34/35). Not 0x988000 (keyboard I2C).
+  gQcomTokenSpaceGuid.PcdDebugUartPortBase|0xa90000
 
   # No auto-boot timeout — PlatformBm forces BootManagerMenuApp.
   gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|0

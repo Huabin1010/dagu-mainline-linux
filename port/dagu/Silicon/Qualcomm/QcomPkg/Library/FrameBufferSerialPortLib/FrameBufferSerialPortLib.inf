@@ -29,6 +29,10 @@
   CompilerIntrinsicsLib
   CacheMaintenanceLib
   TimerLib
+  BaseMemoryLib
+
+[BuildOptions.common]
+  GCC:*_*_AARCH64_CC_FLAGS = -I$(MODULE_DIR)/../../Include
 
 [Pcd]
   gQcomTokenSpaceGuid.PcdMipiFrameBufferAddress

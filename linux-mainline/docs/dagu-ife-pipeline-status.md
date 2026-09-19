@@ -1,6 +1,6 @@
 # dagu：相机两路与 IFE 卡死点
 
-对照 **`#437`**（2026-09-18 15:54 CST；前置 `#420` 活 Demux `0x3058` 仍 0 字节）。后置 **CLC（Camera Logic Core，相机逻辑核）门已过**（`#360` / `#365`）。本刀把前置 imx596 接到同一条 **IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）**：**CSIPHY4（CSI Physical Layer，CSI 物理层）→ CSID1（CSI Decoder，CSI 解码器）IPP → IFE1 CAMIF（Camera Interface，相机接口）→ CLC → WM4/5 线性 NV12**。桌面仍走 RDI（Raw Dump Interface，原始旁路出口）SoftISP。前置还要过的门：`dagu-front-camera-pipeline-status.md`。前置卡死细账：`dagu-ife-front-pipeline-status.md`。细账：`dagu-ife-pix-nv12-attempts.md`。
+对照 **`#437`**（2026-09-18 15:54 CST；前置 `#420` 活 Demux `0x3058` 仍 0 字节）。后置 **CLC（Camera Logic Core，相机逻辑核）门已过**（`#360` / `#365`）。**2026-09-19 15:18 复测**：`dagu-ife-pix-test.sh` 硬写 `SGBRG10` 而 `s5kjn1` 第一表是 `SGRBG10`，`media_pipeline_start` 回 **EPIPE（Broken pipe，管道破裂）-32**、0 字节，不是 `#365` 硅回退。对齐传感器 pad 后再跑：`/tmp/pix.nv12` **9331200 = 3×3110400**，`r0114=0x300`，`viol=0`。本刀把前置 imx596 接到同一条 **IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）**：**CSIPHY4（CSI Physical Layer，CSI 物理层）→ CSID1（CSI Decoder，CSI 解码器）IPP → IFE1 CAMIF（Camera Interface，相机接口）→ CLC（Camera Logic Core，相机逻辑核）→ WM（Write Master，AXI 写通道）4/5 线性 NV12**。桌面仍走 RDI（Raw Dump Interface，原始旁路出口）SoftISP（Software Image Signal Processor，软件图像信号处理器）。前置还要过的门：`dagu-front-camera-pipeline-status.md`。前置卡死细账：`dagu-ife-front-pipeline-status.md`。细账：`dagu-ife-pix-nv12-attempts.md`。
 
 图例：绿 = 板上已证明 · 蓝 = 正在飞的软预览 · 黄 = 寄存器粘住、像素没证明穿过 · 红 = 卡死 · 灰 = 本阶段不做。
 
@@ -26,12 +26,12 @@ HyperOS Camera ID 1：IFE1+CSID1，CSIPHY4。堆 IQ Crop/MNDS last **`0x0a1f079f
 
 `DAGU_IFE_PIX=front`：`csiphy4 → csid1 pad4 → vfe1_pix`，≥3 帧非零线性 NV12，UV ~128。PDPC30 MODULE=0，chroma packer 1，不空 `0x5e00`。
 
-`#420` 前置 identity：活 Demux `0x3058` 第一表粘住仍 0 字节。下一刀 `#421` 只改 DS411 C `0x5504` identity。细账：`dagu-ife-front-pipeline-status.md`。禁止抄 `0xfef0bf3`。禁止 Dual-IFE `COMP_CFG`。禁止只改 WM。禁止 WM 640。禁止再扩 640 dest。禁止 `0x04df04df`。禁止抄 `0x5d04` 488×648。禁止再写 H_SIZE dest。禁止再写 H_PHASE `0xc047b058`。禁止解 SOT mask。
+`#462` 前置 identity：`r7e80=0x3fff3fff/0x3fff3fff` 已粘仍 0 字节，`img=0x0`。下一刀 `#463` identity 第一表 `0x7e60=0xffff0001`（跳过 `0x7e68=0`）。细账：`dagu-ife-front-pipeline-status.md`。禁止抄 `0xfef0bf3`。禁止 Dual-IFE `COMP_CFG`。禁止只改 WM。禁止 WM 640。禁止再扩 640 dest。禁止 `0x04df04df`。禁止把 `0x5d04` 抄进 OUT。禁止再写 H_SIZE dest。禁止再写 H_PHASE `0xc047b058`。禁止空 ADDR WM6/7。禁止解 SOT mask。禁止 `0x2e58` EN。
 
 ```mermaid
 flowchart LR
   NOW["现在 · 后置 PIX 已过门<br/>前置仍 SoftISP skip 2×2"]
-  CUT["#421 · 前置 DS411 C 0x5504 identity"]
+  CUT["#463 · identity 0x7e60=0xffff0001"]
   GOAL["≥3 帧非零 NV12 · UV~128"]
   LATER["之后才允许<br/>Viewfinder 离开 DebayerCpu"]
   NOW --> CUT --> GOAL --> LATER
@@ -271,6 +271,28 @@ ION CDM：进程内 dump 48 个 <400KB dmabuf。LIN DMI n=36 在 **212992B** 缓
 `#368` 已刷 B：MID 改回 live CDM `0x3c01a3`/`0x27f`（CamX `@0x52b168` 14-bit `(first<<16)|last`，Display 1920 共用）。dump `mid_y=0x3c01a3/0x27f` 粘住。仍 overflow `as0=0` line=976。
 
 `#369` 已刷 B：前置 Demux `0x3090` 用堆 `0x08c908c9` + even `0xca` odd `0x9c`（BGGR）。dump `demux=0x3c003c01/0x8c908c9/0xca/0x9c` 粘住。仍 **0 字节**，`streamon_rc=124`，`viol_id=0` pix=2592 line=976，`as0=0`，clcstat 全 0。even/odd **不是**剩下的 AXI 卡死点。Crop last `0xa1f079f`、Demux last `0x07a00a20`、MID `0x3c01a3` 都粘着。
+
+`#464` 已刷 B（`#488`）：停 identity 第一表和 TAP（Tap / downscale tap，抽头）else。Display Full 线性 2320×1320 回到 **4591616**，UV（chroma，色度） avg 128.1，末行 336，`viol=0`。禁止未测 `0x7e60`。
+
+`#465` 已刷 B（`#489`）后撤回：front MNDS（MN Down Scaler，M/N 下采样器） Y H_PHASE `0xc023d82c` `hph=0xc023d82c` 粘住。**0 字节，`img=0x10`**，as0 Y=0，`bus=0x80000000`。`#490` 恢复 4591616。禁止再写 MNDS（MN Down Scaler，M/N 下采样器） Y H_PHASE `0xc023d82c`。
+
+`#466` 已刷 B（`#491`）：front MNDS（MN Down Scaler，M/N 下采样器） Y H_STRIPE `0x090f0000` 粘住。仍 **4591616**，UV（chroma，色度） avg 128.0，末行 336。**不是** chroma 缺口。保留。禁止 identity dest `0x0a1f0000`。
+
+`#467` 已刷 B（`#492`）：front MNDS（MN Down Scaler，M/N 下采样器） Y V_PHASE `0x0011d7a9` 粘住 `vph=0x1117a9`。仍 **4591616**，UV（chroma，色度） avg 128.0，末行 336。**不是** chroma 缺口。保留。禁止再写 MNDS（MN Down Scaler，M/N 下采样器） Y V_PHASE 当缺口。
+
+`#468` 已刷 B（`#493`）：front Crop Y V_PHASE `0xc023d909` 粘住 `crop_yvph=0x231909`。仍 **4591616**，UV（chroma，色度） avg 128.0，末行 336。**不是** chroma 缺口。保留。禁止 PIXEL dest last。禁止 Crop C `0xc047b212`。
+
+`#469` 已刷 B（`#494`）：front Crop Y V_STRIPE `0x02df0000` 粘住 `crop_y_vst=0x2df0000`。仍 **4591616**，UV（chroma，色度） avg 128.0，末行 336。**不是** chroma 缺口。保留。禁止 PIXEL dest last。禁止把 `0xc047b212` 写回 MNDS（MN Down Scaler，M/N 下采样器） H_PAD。
+
+`#470` 已刷 B（`#495`）：front Crop C V_STRIPE `0x016f0000` 粘住 `crop_c_vst=0x16f0000`。仍 **4591616**，UV（chroma，色度） avg 128.0，末行 336。**不是** chroma 缺口。保留。禁止 PIXEL dest last。禁止把 `0xc047b212` 写回 MNDS（MN Down Scaler，M/N 下采样器） H_PAD。
+
+`#471` 已刷 B（`#496`）：front Crop C V_PHASE `0xc047b212` 粘住 `crop_cvph=0x473212`。仍 **4591616**，UV（chroma，色度） avg 128.0，末行 336。**不是** chroma 缺口。保留。禁止 PIXEL dest last。禁止把 `0xc047b212` 写回 MNDS（MN Down Scaler，M/N 下采样器） H_PAD。
+
+`#472` 已刷 B（`#497`）：front Crop C V_SIZE `0x016f0000` 粘住 `crop_cvsz=0x16f0000`。仍 **4591616**，UV（chroma，色度） avg 128.0，末行 336。**不是** chroma 缺口。保留。禁止 PIXEL dest last。禁止把 `0xc047b212` 写回 MNDS（MN Down Scaler，M/N 下采样器） H_PAD。
+
+`#473` 已刷 B（`#498`）：front Crop Y V_SIZE `0x02df0000` 粘住 `crop_yvsz=0x2df0000`。仍 **4591616**，UV（chroma，色度） avg 128.0，末行 336。**不是** chroma 缺口。保留。禁止 PIXEL dest last。禁止 identity H_STRIPE `0x0a1f0000`。禁止把 `0xc047b212` 写回 MNDS（MN Down Scaler，M/N 下采样器） H_PAD。
+
+`#474` 已刷 B（`#499`）：front Crop C H_STRIPE `0x090f0000` 粘住 `crop_chst=0x90f0000`。仍 **4591616**，UV（chroma，色度） avg 128.0，末行 336。**不是** chroma 缺口。保留。禁止 identity `0x0a1f0000`。禁止把 `0xc047b212` 写回 MNDS（MN Down Scaler，M/N 下采样器） H_PAD。
 
 `#411` 已刷 B（`#427`）后撤回：front MNDS_C H_PAD `0xc047b212` `hpd=0xc047b212` 粘住。**0 字节**，`viol=0` `img=0x0` as0 C=0。640 pack 的 MNDS_C 词作为 chroma 缺口已穷尽。禁止再写 H_PAD。
 

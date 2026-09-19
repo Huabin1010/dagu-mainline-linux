@@ -1,0 +1,8 @@
+/org/gnome/settings-daemon/plugins/power/power-button-action
+/org/gnome/settings-daemon/plugins/power/lid-close-ac-action
+/org/gnome/settings-daemon/plugins/power/lid-close-battery-action
+/org/gnome/settings-daemon/plugins/power/lid-close-suspend-with-external-monitor
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-type
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-type
+/org/gnome/desktop/screensaver/lock-enabled
+/org/gnome/desktop/screensaver/ubuntu-lock-on-suspend

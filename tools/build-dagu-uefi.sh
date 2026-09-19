@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 EDK2="${ROOT}/edk2-msm"
 OUT="${ROOT}/artifacts"
+# Host-local iasl (acpica-tools); not committed. See tools/compile-dagu-acpi.sh.
+export PATH="${ROOT}/tools/bin:${PATH}"
 
 write_boot_artifact_stamp() {
   local src_img="$1"
@@ -42,6 +44,11 @@ fi
 
 BUILD_ARGS=()
 UART_ENABLED=0
+# edk2-msm defaults to CLANG38. This host has aarch64-linux-gnu-gcc only.
+if ! command -v clang >/dev/null 2>&1; then
+  BUILD_ARGS+=(--toolchain GCC5)
+  echo "[build-dagu] clang missing — TOOLCHAIN=GCC5"
+fi
 for arg in "$@"; do
   if [[ "${arg}" == "--no-uart" ]]; then
     UART_ENABLED=0

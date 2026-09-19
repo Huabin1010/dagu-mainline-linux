@@ -1,0 +1,39 @@
+; SPDX-License-Identifier: MIT
+; Host-side INF: bind inbox usbser.sys to the tablet gadget 0525:A4A7.
+; Install on the Windows PC, not on the tablet.
+; UEFI DaguUsbCdcAcmDxe and Linux g_serial share this VID/PID.
+; Do not use this to revive Mass Storage / LSMS.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Ports
+ClassGuid   = {4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider    = %Mfg%
+DriverVer   = 09/19/2026,1.0.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Models, NTamd64, NTarm64
+
+[Models.NTamd64]
+%Desc% = AcmHost_Inst, USB\VID_0525&PID_A4A7
+
+[Models.NTarm64]
+%Desc% = AcmHost_Inst, USB\VID_0525&PID_A4A7
+
+[AcmHost_Inst.NT]
+include   = mdmcpq.inf
+CopyFiles = FakeModemCopyFileSection
+AddReg    = AcmHost_AddReg
+
+[AcmHost_Inst.NT.Services]
+include    = mdmcpq.inf
+AddService = usbser, 0x00000002, LowerFilter_Service_Inst
+
+[AcmHost_AddReg]
+HKR,,NTMPDriver,,usbser.sys
+HKR,,EnumPropPages32,,"MsPorts.dll,SerialPortPropPageProvider"
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu USB CDC-ACM (0525:A4A7)"

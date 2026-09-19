@@ -35,6 +35,13 @@ if [[ -f "$UBUNTU_PATCH" ]]; then
   fi
 fi
 
+REPEAT_PATCH="$ROOT/linux-mainline/patches/mutter-50-repeat-on-other-key-release.patch"
+if [[ -f "$REPEAT_PATCH" ]] &&
+   ! grep -q 'GNOME #4675 / Ubuntu' \
+        "$SRC/src/backends/native/meta-seat-impl.c"; then
+  patch -d "$SRC" -p1 --forward < "$REPEAT_PATCH"
+fi
+
 cat > "$CROSS" <<EOF
 [binaries]
 c = 'aarch64-linux-gnu-gcc'

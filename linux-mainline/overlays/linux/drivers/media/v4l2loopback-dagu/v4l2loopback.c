@@ -994,9 +994,12 @@ static int check_buffer_capability(struct v4l2_loopback_device *dev,
 			       0 :
 			       -EINVAL;
 	/* CAPTURE if opener has a capture format or a writer is streaming;
-	 * else OUTPUT. */
+	 * else OUTPUT. keep_format after stamp: Chrome ENUM_FMT must see
+	 * YUYV before SoftISP opens OUTPUT. */
 	switch (type) {
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
+		if (dev->keep_format)
+			return 0;
 		if (!(has_capture_token(opener->format_token) ||
 		      !has_output_token(dev->stream_tokens)))
 			return -EINVAL;

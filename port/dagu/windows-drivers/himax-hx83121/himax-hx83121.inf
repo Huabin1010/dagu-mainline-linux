@@ -1,0 +1,51 @@
+; Himax HX83121 on dagu. ACPI HID HIMA8312.
+; Build ARM64 with WDK. Test-sign until WHQL.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = HIDClass
+ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Provider    = %Mfg%
+DriverVer   = 09/19/2026,1.0.0.0
+CatalogFile = himax-hx83121.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Himax_Inst, ACPI\HIMA8312
+
+[Himax_Inst.NT]
+CopyFiles = Himax_Copy
+Include   = hidclass.inf
+Needs     = HID_Inst.NT
+
+[Himax_Inst.NT.Services]
+AddService = dagu_himax, 0x00000002, Himax_Service
+Include    = hidclass.inf
+Needs      = HID_Inst.NT.Services
+
+[Himax_Service]
+DisplayName    = %Desc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %13%\himax-hx83121.sys
+
+[Himax_Copy]
+himax-hx83121.sys
+
+[DestinationDirs]
+Himax_Copy = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+himax-hx83121.sys = 1
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu Himax HX83121"
+Disk = "dagu Himax"

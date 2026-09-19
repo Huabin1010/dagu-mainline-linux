@@ -1,0 +1,44 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Battery
+ClassGuid   = {72631e54-78a4-11d0-bcf7-00aa00b7b32a}
+Provider    = %Mfg%
+DriverVer   = 09/19/2026,1.0.0.0
+CatalogFile = p9418.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Pen_Inst, ACPI\IDTP9418
+
+[Pen_Inst.NT]
+CopyFiles = Pen_Copy
+
+[Pen_Inst.NT.Services]
+AddService = dagu_p9418, 0x00000002, Pen_Service
+
+[Pen_Service]
+DisplayName    = %Desc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %13%\p9418.sys
+
+[Pen_Copy]
+p9418.sys
+
+[DestinationDirs]
+Pen_Copy = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+p9418.sys = 1
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu P9418 Smart Pen TX"
+Disk = "dagu P9418"

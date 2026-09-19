@@ -39,7 +39,7 @@ SM8250 (U3100)
 | 内核 console | `console=ttyMSM0,115200n8` |
 | 主线 7.0 | `CONFIG_SERIAL_QCOM_GENI_CONSOLE` 已开 |
 
-> 仓库 `tools/test/uart_expectations.py` 中的 `qup_uart@988000`（GPIO117/118）是 **UEFI 固件构建配置**，与本板飞线焊点无关。
+> UEFI（Unified Extensible Firmware Interface，统一可扩展固件接口）`PcdDebugUartPortBase` 已对齐本焊点 `0xA90000`。`0x988000` 是键盘 I2C（Inter-Integrated Circuit，内部集成电路），不要当调试串口。Type-C 看 printk 用 [`dagu-usb-serial-console.md`](dagu-usb-serial-console.md)。
 
 ### 2.2 可选：Type-C SBU 复用
 

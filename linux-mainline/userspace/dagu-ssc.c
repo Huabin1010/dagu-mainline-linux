@@ -108,10 +108,12 @@ static uint8_t rxbuf[65536];
 static uint16_t txn_id = 1;
 static int uifd = -1;
 static int als_fd = -1;
+static int prox_fd = -1;
 static uint64_t accel_lo, accel_hi;
 static uint64_t gyro_lo, gyro_hi;
 static uint64_t als_lo, als_hi;
-static int have_accel, have_gyro, have_als;
+static uint64_t prox_lo, prox_hi;
+static int have_accel, have_gyro, have_als, have_prox;
 
 static void pb_init(struct pb *b, uint8_t *p, size_t n)
 {
@@ -570,6 +572,23 @@ static void emit_accel(float x, float y, float z)
 	}
 }
 
+static void emit_prox(float near)
+{
+	char buf[64];
+	int n;
+
+	if (prox_fd < 0)
+		return;
+	n = snprintf(buf, sizeof(buf), "%.3f\n", near);
+	if (n < 0)
+		return;
+	lseek(prox_fd, 0, SEEK_SET);
+	if (ftruncate(prox_fd, 0) < 0)
+		return;
+	if (write(prox_fd, buf, (size_t)n) < 0)
+		return;
+}
+
 static void emit_als(float lux)
 {
 	char buf[64];
@@ -668,7 +687,7 @@ static void handle_one_event(uint64_t slo, uint64_t shi, uint32_t msgid,
 	int nv;
 
 	if (msgid == MSG_SUID_EVENT) {
-		int i, na, ng, nl;
+		int i, na, ng, nl, np;
 		static unsigned suid_log;
 
 		if (suid_log < 24) {
@@ -704,6 +723,21 @@ static void handle_one_event(uint64_t slo, uint64_t shi, uint32_t msgid,
 			fprintf(stderr, "dagu-ssc: als suid %016llx:%016llx\n",
 				(unsigned long long)hi, (unsigned long long)lo);
 		}
+		np = parse_suid_event(payload, plen, "proximity", &lo, &hi);
+		if (np == 1) {
+			prox_lo = lo;
+			prox_hi = hi;
+			have_prox = 1;
+			fprintf(stderr, "dagu-ssc: proximity suid %016llx:%016llx\n",
+				(unsigned long long)hi, (unsigned long long)lo);
+		} else if (np == -2) {
+			static int prox_empty;
+
+			if (!prox_empty) {
+				fprintf(stderr, "dagu-ssc: SEE has no proximity instance; folio cover is GPIO110 SW_LID\n");
+				prox_empty = 1;
+			}
+		}
 		return;
 	}
 	if (msgid != MSG_STD_EVENT) {
@@ -731,6 +765,8 @@ static void handle_one_event(uint64_t slo, uint64_t shi, uint32_t msgid,
 	}
 	if (have_als && slo == als_lo && shi == als_hi && nv >= 1)
 		emit_als(v[0]);
+	if (have_prox && slo == prox_lo && shi == prox_hi && nv >= 1)
+		emit_prox(v[0]);
 }
 
 static void handle_pb(const uint8_t *p, size_t n)
@@ -919,6 +955,7 @@ int main(void)
 	if (mkdir("/run/dagu-ssc", 0755) < 0 && errno != EEXIST)
 		perror("dagu-ssc: mkdir");
 	als_fd = open("/run/dagu-ssc/lux", O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+	prox_fd = open("/run/dagu-ssc/proximity", O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
 
 	wait_sdsp_node();
 	sns_fd = attach_sns_pd();
@@ -967,7 +1004,7 @@ int main(void)
 		struct sockaddr_qrtr from;
 		socklen_t flen = sizeof(from);
 		ssize_t n;
-		static int accel_on, als_on, suid_tries;
+		static int accel_on, als_on, prox_on, suid_tries;
 		static time_t last_suid;
 		time_t now;
 
@@ -983,6 +1020,12 @@ int main(void)
 			send_suid(fd, &svc, "accel");
 			send_suid(fd, &svc, "gyro");
 			send_suid(fd, &svc, "ambient_light");
+			/* Optical proximity is not on this SLPI image.
+			 * Folio sleep is gpio-keys GPIO110 SW_LID. Query
+			 * once so the empty ads are visible, then stop.
+			 */
+			if (suid_tries == 0)
+				send_suid(fd, &svc, "proximity");
 			suid_tries++;
 			last_suid = now;
 		}
@@ -995,6 +1038,11 @@ int main(void)
 			if (send_enable(fd, &svc, als_lo, als_hi, 1, 0) == 0)
 				fprintf(stderr, "dagu-ssc: als on-change\n");
 			als_on = 1;
+		}
+		if (!prox_on && have_prox) {
+			if (send_enable(fd, &svc, prox_lo, prox_hi, 1, 0) == 0)
+				fprintf(stderr, "dagu-ssc: proximity on-change\n");
+			prox_on = 1;
 		}
 	}
 }

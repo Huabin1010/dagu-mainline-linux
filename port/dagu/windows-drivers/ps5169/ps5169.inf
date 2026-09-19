@@ -1,0 +1,44 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = USB
+ClassGuid   = {36fc9e60-c465-11cf-8056-444553540000}
+Provider    = %Mfg%
+DriverVer   = 09/19/2026,1.0.0.0
+CatalogFile = ps5169.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Ps_Inst, ACPI\PRS5169
+
+[Ps_Inst.NT]
+CopyFiles = Ps_Copy
+
+[Ps_Inst.NT.Services]
+AddService = dagu_ps5169, 0x00000002, Ps_Service
+
+[Ps_Service]
+DisplayName    = %Desc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %13%\ps5169.sys
+
+[Ps_Copy]
+ps5169.sys
+
+[DestinationDirs]
+Ps_Copy = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+ps5169.sys = 1
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu PS5169 USB3/DP redriver"
+Disk = "dagu PS5169"

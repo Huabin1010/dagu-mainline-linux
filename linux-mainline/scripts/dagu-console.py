@@ -30,6 +30,16 @@ PORT_DEFAULT = "/dev/ttyACM0"
 PASS_FILE = Path(__file__).resolve().parent.parent / "out" / "root-password"
 
 
+def default_port() -> str:
+	env = os.environ.get("DAGU_TTY")
+	if env:
+		return env
+	for p in ("/dev/ttyACM0", "/dev/ttyACM1"):
+		if Path(p).exists():
+			return p
+	return PORT_DEFAULT
+
+
 def open_tty(port: str) -> int:
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     attrs = termios.tcgetattr(fd)
@@ -99,31 +109,63 @@ def load_password() -> str:
     return PASS_FILE.read_text().strip()
 
 
+def _auth_pairs() -> list[tuple[str, str]]:
+    # Public prebuilt is dagu/dagu (rootfs-guide). Local image uses
+    # out/root-password for both users. Try the live pair first so a
+    # wrong file password does not burn the getty attempt.
+    pairs: list[tuple[str, str]] = [("dagu", "dagu"), ("root", "dagu")]
+    if PASS_FILE.is_file():
+        local = PASS_FILE.read_text().strip()
+        if local and local != "dagu":
+            pairs.extend([("dagu", local), ("root", local)])
+    return pairs
+
+
 def login(fd: int) -> None:
     # DTR already raised. Drain issue/login — do not send CR first or
     # agetty treats it as an empty username ("登录不正确").
     out = wait_for(
         fd,
-        ("login:", "login：", "登录：", "Password:", "密码：", "# ", PROMPT),
+        ("login:", "login：", "登录：", "Password:", "密码：", "# ", "$ ", PROMPT),
         3.0,
     )
     if not any(
         s in out
-        for s in ("login:", "login：", "登录：", "Password:", "密码：", "# ", PROMPT)
+        for s in ("login:", "login：", "登录：", "Password:", "密码：", "# ", "$ ", PROMPT)
     ):
         write_line(fd, "")
         out = wait_for(
             fd,
-            ("login:", "login：", "登录：", "Password:", "密码：", "# ", PROMPT),
+            ("login:", "login：", "登录：", "Password:", "密码：", "# ", "$ ", PROMPT),
             2.0,
         )
-    if any(s in out for s in ("login:", "login：", "登录：")):
-        write_line(fd, "root")
-        out = wait_for(fd, ("Password:", "密码：", "# ", PROMPT), 3.0)
-    if "Password:" in out or "密码：" in out:
-        write_line(fd, load_password())
-        out = wait_for(fd, ("# ", "$ ", "密码：", "登录：", PROMPT), 8.0)
-        if "密码：" in out or "登录：" in out:
+    if any(s in out for s in ("# ", "$ ", PROMPT)):
+        pass
+    elif any(s in out for s in ("login:", "login：", "登录：", "Password:", "密码：")):
+        authed = False
+        if "Password:" in out or "密码：" in out:
+            # Leftover password prompt from a prior empty username.
+            write_line(fd, "x")
+            out = wait_for(fd, ("login:", "login：", "登录："), 5.0)
+        for user, pw in _auth_pairs():
+            if authed:
+                break
+            if not any(s in out for s in ("login:", "login：", "登录：")):
+                break
+            write_line(fd, user)
+            out = wait_for(fd, ("Password:", "密码：", "# ", "$ ", PROMPT), 3.0)
+            if any(s in out for s in ("# ", "$ ", PROMPT)):
+                authed = True
+                break
+            if "Password:" not in out and "密码：" not in out:
+                continue
+            write_line(fd, pw)
+            out = wait_for(fd, ("# ", "$ ", "密码：", "登录：", PROMPT), 8.0)
+            if any(s in out for s in ("# ", "$ ", PROMPT)):
+                authed = True
+                break
+            # Login incorrect returns a username prompt; try the next pair.
+        if not authed:
             raise SystemExit("serial login failed — bad password")
     # Do not wait for PROMPT in the echoed PS1= line. Require a real command.
     write_line(
@@ -228,7 +270,7 @@ def stream(fd: int, cmd: str) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="dagu USB serial helper")
-    ap.add_argument("--port", default=os.environ.get("DAGU_TTY", PORT_DEFAULT))
+    ap.add_argument("--port", default=default_port())
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_run = sub.add_parser("run")
     p_run.add_argument("command")

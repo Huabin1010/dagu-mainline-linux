@@ -1,24 +1,10 @@
 //
-// NOTE: The 3rd parameter (i.e. ComplianceRevision) must be >=2 for 64-bit integer support.
+// dagu DSDT. OEM ID is SM8250 (kona), not the SDM850 placeholder.
+// qcom,msm-id = <0x164 ...> in dumps/dagu-20260826-210700-root/dt/fdt.dts
 //
-DefinitionBlock("DSDT.AML", "DSDT", 0x02, "QCOMM ", "SDM850 ", 3)
+DefinitionBlock("DSDT.AML", "DSDT", 0x02, "QCOMM ", "SM8250 ", 3)
 {
     Scope(\_SB_) {
-
-		// Include("addSub.asl")
         Include("dsdt_common.asl")
-		// Include("cust_dsdt.asl") 
-
-        // Include("usb.asl")
-
-		//
-        // Buttons
-		//
-        // Include("cust_arraybutton.asl")
-
-        //
-        // Bluetooth
-        //
-        // Include("wcnss_bt.asl")
-   }
+    }
 }

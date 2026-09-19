@@ -38,6 +38,7 @@ if [[ "${TESTLAB_ON}" -eq 0 ]]; then
     [[ -f "${f}" ]] && sed -i '/TestLabBridgeDxe/d' "${f}"
   done
 fi
+# Keep DaguUsbCdcAcmDxe — Type-C CDC-ACM boot log on UsbfnDwc3, not MSC.
 
 # Do not ship LinuxSimpleMassStorage in the dagu FV (MSC path abandoned).
 echo "[apply-dagu-port] strip LinuxSimpleMassStorage from sm8250 FDF/DSC"

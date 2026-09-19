@@ -68,7 +68,7 @@
 | 后摄 s5kjn1 | **已通（预览）** | live D-PHY 4-lane RAW10 4080×3060，SoftISP skip 4×4 → 1020×764 @~30fps。桌面 `/dev/video21` |
 | 前摄 imx596 | **已通（预览）** | D-PHY 4-lane RAW10 2592×1952，SoftISP skip 2×2 → 1296×976 @~30fps。桌面 `/dev/video20`。硬件 PIX 未过门：`dagu-front-camera-pipeline-status.md` |
 | CAMSS RDI / SMMU | **已通** | CSIPHY→CSID→VFE RDI 出 RAW。CSID TPG 也曾出完整 1 帧（约 15.6 MB） |
-| CAMSS IFE PIX | **部分** | `#365` 后置 IFE1 线性 NV12 ≥3 帧非零。前置 `#420` Demux `0x3058` 已粘仍 0 字节；`#421` 活 DS411 C `0x5504`。产品预览继续 SoftISP。后置图 `dagu-ife-pipeline-status.md`；前置图 `dagu-ife-front-pipeline-status.md` |
+| CAMSS（Camera Subsystem，相机子系统） IFE（Image Front End，图像前端） PIX（Pixel path，像素通路） | **部分** | `#500` 后置复测 **9331200 = 3×3110400**，`r0114=0x300`。前置 `#501`：紧包 2320 末行 4K 停写（4591616）；步长 4096 交出 **一整帧 8110080**，UV（chroma，色度）mean 128，末行满。30s 仍 1 帧。禁止 `ALIGN_UP FRAME_INCR`。产品预览继续 SoftISP（Software Image Signal Processor，软件图像信号处理器）。后置图 `dagu-ife-pipeline-status.md`；前置图 `dagu-ife-front-pipeline-status.md` |
 | 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6。`#333` `hci0` UP RUNNING PSCAN，HCI 5.2。BLE HOG + 经典 HID（`ClassicBondedOnly=false`）。`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。A2DP 走 Q6 `SLIMBUS_7_RX`（`hw:0,3`），见 `dagu-adsp-voice.md` |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
 | 双电芯电量 | **已通** | 双 BQ27Z561 走 GENI I2C SE0/SE13 + `xiaomi-dual-fg`。`#333` `bms` Battery SoC（桌面跟 bms）。gpio `fg_i2c_se0` / `fg_i2c_se13` 保持 disabled |

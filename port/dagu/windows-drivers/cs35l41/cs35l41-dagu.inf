@@ -1,0 +1,50 @@
+; CS35L41 x4 on dagu. PCM is ADSP (QCOM24A8), not HDA.
+; map220v/cs35l41_win matches ACPI\10133541 and is x64 HDA — do not install
+; that binary on ARM64. This INF binds CIRR0041 for our I2C init KMDF.
+; Firmware wmfw/bin still comes from the Cirrus pack when the ADSP path
+; is wired.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Media
+ClassGuid   = {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider    = %Mfg%
+DriverVer   = 09/19/2026,1.0.0.0
+CatalogFile = cs35l41-dagu.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Amp_Inst, ACPI\CIRR0041
+
+[Amp_Inst.NT]
+CopyFiles = Amp_Copy
+
+[Amp_Inst.NT.Services]
+AddService = dagu_cs35l41, 0x00000002, Amp_Service
+
+[Amp_Service]
+DisplayName    = %Desc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %13%\cs35l41-dagu.sys
+
+[Amp_Copy]
+cs35l41-dagu.sys
+
+[DestinationDirs]
+Amp_Copy = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+cs35l41-dagu.sys = 1
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu CS35L41 speaker amp"
+Disk = "dagu CS35L41"

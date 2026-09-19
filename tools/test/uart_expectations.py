@@ -1,9 +1,10 @@
 """dagu TestLab UART expectations — shared by tests and serial_log preflight."""
 from __future__ import annotations
 
-# DTB alias: serial0 = "/soc/qcom,qup_uart@988000"
-DTB_SERIAL0_NODE = "qcom,qup_uart@988000"
-DTB_SERIAL0_MMIO = 0x988000
+# Debug console SE: live FDT qcom,qup_uart@a90000 (QUP12 / GPIO34+35).
+# 0x988000 is the keyboard I2C engine — do not use it as the debug UART.
+DTB_SERIAL0_NODE = "qcom,qup_uart@a90000"
+DTB_SERIAL0_MMIO = 0xA90000
 
 SERIAL_BAUD = 115200
 SERIAL_DATA_BITS = 8

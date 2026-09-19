@@ -4,3 +4,9 @@
 # Bluetooth HID keyboard has ID_BUS=bluetooth and repeats).
 ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
   ATTRS{id/bustype}=="0018", ATTRS{id/vendor}=="15d9", ENV{ID_BUS}="i2c"
+
+# GPIO46 wake line used to be a KEY_WAKEUP input. Ignore leftover nodes
+# so mutter cannot start compositor repeat on 0x8f and steal the folio key.
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{name}=="xiaomi keyboard WakeUp", \
+  ENV{ID_INPUT}="0", ENV{ID_INPUT_KEY}="0", ENV{LIBINPUT_IGNORE_DEVICE}="1"

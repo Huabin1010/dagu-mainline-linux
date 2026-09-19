@@ -1,0 +1,27 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Display
+ClassGuid   = {4d36e968-e325-11ce-bfc1-08002be10318}
+Provider    = %Mfg%
+DriverVer   = 09/19/2026,1.0.0.0
+CatalogFile = l81a.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Pnl_Inst, ACPI\XIA00001
+
+[Pnl_Inst.NT]
+; Panel facts for WDDM: 1600x2560, 120 Hz, DSC, dual-DPHY.
+; Reset GPIO75, tp-reset GPIO100 (panel, not Himax), HWEN GPIO139.
+; Not elish NT36523 C-PHY. UEFI SimpleFb is not this INF.
+
+[Pnl_Inst.NT.Services]
+AddService = , 0x00000002
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu L81A 1600x2560 120Hz DSC"
+Disk = "dagu L81A"

@@ -1,0 +1,81 @@
+From: dagu
+Subject: [PATCH] native seat: do not cancel hold-repeat on another key's release
+
+Against mutter 50.1 (Ubuntu libmutter-18). Matches mutter 51.rc
+meta_seat_impl_notify_key_in_impl (GNOME #4675 / Ubuntu #2150377).
+
+mutter 50 cleared the compositor repeat timer on any key release
+or on a non-repeating press. Hold A, press B (B repeats), release
+A then stopped B even though B stayed down. Folio leftover KEY_UP
+made this the default path; Bluetooth/USB chords hid it.
+
+Only the repeating key's release on the same device cancels the
+timer. A non-repeating press (Ctrl) must not clear an already-
+repeating key. RustDesk uinput KEY_UP of the same evdev code must
+not cancel a folio hold. KEY_WAKEUP (folio GPIO46 wake line) must
+not start or steal compositor hold-repeat.
+
+---
+ src/backends/native/meta-seat-impl.c | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/src/backends/native/meta-seat-impl.c b/src/backends/native/meta-seat-impl.c
+index 0000000..1111111 100644
+--- a/src/backends/native/meta-seat-impl.c
++++ b/src/backends/native/meta-seat-impl.c
+@@ -687,11 +687,29 @@ meta_seat_impl_notify_key_in_impl (MetaSeatImpl       *seat_impl,
+       queue_event (seat_impl, state_event);
+     }
+ 
+-  if (state == 0 ||             /* key release */
+-      !seat_impl->repeat ||
+-      !xkb_keymap_key_repeats (xkb_state_get_keymap (seat_impl->xkb),
++  /* mutter 50 cleared the timer on any release. Hold A, press B
++   * (B repeats), release A then stopped B (GNOME #4675 / Ubuntu
++   * #2150377, fixed in 51.rc). Only the repeating key's release
++   * cancels compositor hold-repeat.
++   */
++  /* Folio GPIO46 is a wake line. KEY_WAKEUP must not steal repeat. */
++  if (key == KEY_WAKEUP)
++    return;
++
++  if (state == 0)
++    {
++      /* Another seat keyboard (RustDesk uinput) releasing the same
++       * evdev code is not a release of the folio key that started
++       * the timer.
++       */
++      if (seat_impl->repeat_key == key &&
++          (!seat_impl->repeat_device ||
++           seat_impl->repeat_device == device))
++        {
++          seat_impl->repeat_count = 0;
++          meta_seat_impl_clear_repeat_source (seat_impl);
++        }
++      else if (seat_impl->repeat_source)
++        {
++          syslog (LOG_NOTICE,
++                  "dagu folio: KEY_UP 0x%x keeps repeat key=0x%x",
++                  key, seat_impl->repeat_key);
++        }
++      return;
++    }
++
++  if (!seat_impl->repeat)
++    {
++      seat_impl->repeat_count = 0;
++      meta_seat_impl_clear_repeat_source (seat_impl);
++      return;
++    }
++
++  /* 51.rc: Ctrl / other non-repeating press must not cancel. */
++  if (!xkb_keymap_key_repeats (xkb_state_get_keymap (seat_impl->xkb),
+                                keycode))
+-    {
+-      seat_impl->repeat_count = 0;
+-      meta_seat_impl_clear_repeat_source (seat_impl);
+       return;
+-    }
+ 
+   if (state == 1)               /* key press */
+     seat_impl->repeat_count = 0;

@@ -67,10 +67,31 @@ rm -rf "$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback"
 cp -a "$ROOT/userspace" "$ROOTFS/tmp/dagu-userspace"
 cp -a "$ROOT/camera-loopback" "$ROOTFS/tmp/dagu-camera-loopback"
 install -m 755 "$ROOT/scripts/rootfs-desktop-setup.sh" "$ROOTFS/tmp/rootfs-desktop-setup.sh"
+install -m 755 "$ROOT/scripts/dagu-folio-repeat-verify.py" \
+	"$ROOTFS/usr/local/sbin/dagu-folio-repeat-verify.py"
+install -m 755 "$ROOT/scripts/dagu-mutter-repeat-keep.sh" \
+	"$ROOTFS/usr/local/sbin/dagu-mutter-repeat-keep.sh"
+if [[ -f "$ROOT/out/libmutter-18.so.0.0.0-dagu" ]]; then
+	mkdir -p "$ROOTFS/usr/local/lib/dagu-mutter"
+	install -m 644 "$ROOT/out/libmutter-18.so.0.0.0-dagu" \
+		"$ROOTFS/usr/local/lib/dagu-mutter/libmutter-18.so.0.0.0"
+fi
+mkdir -p "$ROOTFS/tmp/dagu-bluez-hid"
+install -m 755 "$ROOT/scripts/dagu-bluez-hid-wait-incoming.py" \
+	"$ROOTFS/tmp/dagu-bluez-hid/dagu-bluez-hid-wait-incoming.py"
+install -m 755 "$ROOT/scripts/dagu-build-bluez-hid.sh" \
+		"$ROOTFS/tmp/dagu-bluez-hid/dagu-build-bluez-hid.sh"
+mkdir -p "$ROOTFS/tmp/dagu-gnome-bt"
+install -m 755 "$ROOT/scripts/dagu-gnome-bt-setup-unnamed.py" \
+		"$ROOTFS/tmp/dagu-gnome-bt/dagu-gnome-bt-setup-unnamed.py"
+install -m 755 "$ROOT/scripts/dagu-build-gnome-bt.sh" \
+		"$ROOTFS/tmp/dagu-gnome-bt/dagu-build-gnome-bt.sh"
 chroot "$ROOTFS" env ROOT_PASSWORD="$PASS" SUITE="$SUITE" MIRROR="$MIRROR" \
+	DAGU_PATCH_BLUEZ="${DAGU_PATCH_BLUEZ:-0}" \
 	/bin/bash /tmp/rootfs-desktop-setup.sh
 rm -rf "$ROOTFS/tmp/rootfs-desktop-setup.sh" \
-	"$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback"
+	"$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback" \
+	"$ROOTFS/tmp/dagu-bluez-hid"
 
 # Public image: no builder SSH keys, new machine-id on first boot.
 rm -rf "$ROOTFS/root/.ssh"

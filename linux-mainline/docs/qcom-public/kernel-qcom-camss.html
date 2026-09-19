@@ -1,0 +1,379 @@
+
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="generator" content="Docutils 0.19: https://docutils.sourceforge.io/" />
+
+    <title>7.16. Qualcomm Camera Subsystem driver &#8212; The Linux Kernel  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js"></script>
+    <script src="../../_static/jquery.js"></script>
+    <script src="../../_static/underscore.js"></script>
+    <script src="../../_static/_sphinx_javascript_frameworks_compat.js"></script>
+    <script src="../../_static/doctools.js"></script>
+    <script src="../../_static/sphinx_highlight.js"></script>
+    <link rel="shortcut icon" href="../../_static/logo.svg"/>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="7.17. Raspberry Pi PiSP Back End Memory-to-Memory ISP (pisp-be)" href="raspberrypi-pisp-be.html" />
+    <link rel="prev" title="7.15. Philips webcams (pwc driver)" href="philips.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  <div class="document">
+    
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+            <p class="logo"><a href="../../index.html">
+              <img class="logo" src="../../_static/logo.svg" alt="Logo"/>
+            </a></p>
+<h1 class="logo"><a href="../../index.html">The Linux Kernel</a></h1>
+
+
+
+<p class="blurb">7.3.0-rc3</p>
+
+
+
+
+
+
+
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+<p>
+<h3 class="kernel-toc-contents">Contents</h3>
+<input type="checkbox" class="kernel-toc-toggle" id = "kernel-toc-toggle" checked>
+<label class="kernel-toc-title" for="kernel-toc-toggle"></label>
+
+<div class="kerneltoc" id="kerneltoc">
+<p class="caption" role="heading"><span class="caption-text">Working with the development community</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../process/development-process.html">Development process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../process/submitting-patches.html">Submitting patches</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../process/code-of-conduct.html">Code of conduct</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../maintainer/index.html">Maintainer handbook</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../process/index.html">All development-process docs</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Internal API manuals</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../core-api/index.html">Core API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../driver-api/index.html">Driver APIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../subsystem-apis.html">Subsystems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../locking/index.html">Locking</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Development tools and processes</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../process/license-rules.html">Licensing rules</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../doc-guide/index.html">Writing documentation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../dev-tools/index.html">Development tools</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../dev-tools/testing-overview.html">Testing guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../kernel-hacking/index.html">Hacking guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../trace/index.html">Tracing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../fault-injection/index.html">Fault injection</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../livepatch/index.html">Livepatching</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../rust/index.html">Rust</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">User-oriented documentation</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="reference internal" href="../index.html">Administration</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="../index.html#general-guides-to-kernel-administration">General guides to kernel administration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../index.html#booting-the-kernel">Booting the kernel</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../index.html#tracking-down-and-identifying-problems">Tracking down and identifying problems</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../index.html#core-kernel-subsystems">Core-kernel subsystems</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../index.html#block-layer-and-filesystem-administration">Block-layer and filesystem administration</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="../index.html#device-specific-guides">Device-specific guides</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="../acpi/index.html">ACPI Support</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../aoe/index.html">ATA over Ethernet (AoE)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../auxdisplay/index.html">Auxiliary Display Support</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../braille-console.html">Linux Braille Console</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../btmrvl.html">btmrvl driver</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../dell_rbu.html">Dell Remote BIOS Update driver (dell_rbu)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../edid.html">EDID</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../gpio/index.html">GPIO</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../hw_random.html">Hardware random number generators</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../laptops/index.html">Laptop Drivers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../lcd-panel-cgram.html">Parallel port LCD/Keypad Panel support</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="index.html">Media subsystem admin and user guide</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../nvme-multipath.html">Linux NVMe multipath</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../parport.html">Parport</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../pnp.html">Linux Plug and Play Documentation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../rapidio.html">RapidIO Subsystem Guide</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../rtc.html">Real Time Clock (RTC) Drivers for Linux</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../serial-console.html">Linux Serial Console</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../svga.html">Video Mode Selection Support 2.13</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../thermal/index.html">Thermal Subsystem</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../thunderbolt.html">USB4 and Thunderbolt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../vga-softcursor.html">Software cursor for VGA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../video-output.html">Video Output Switcher Control</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../index.html#workload-analysis">Workload analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../index.html#everything-else">Everything else</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../kbuild/index.html">Build system</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reporting-issues.html">Reporting issues</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tools/index.html">Userspace tools</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../userspace-api/index.html">Userspace API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Firmware-related documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../firmware-guide/index.html">Firmware</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../devicetree/index.html">Firmware and Devicetree</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Architecture-specific documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../arch/index.html">CPU architectures</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Other documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../staging/index.html">Unsorted documentation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Translations</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../translations/index.html">Translations</a></li>
+</ul>
+
+</div>
+
+<script type="text/javascript"> <!--
+  var sbar = document.getElementsByClassName("sphinxsidebar")[0];
+  let currents = document.getElementsByClassName("current")
+  if (currents.length) {
+    sbar.scrollTop = currents[currents.length - 1].offsetTop;
+  }
+  --> </script>
+  <div role="note" aria-label="source link">
+    <h3>This Page</h3>
+    <ul class="this-page-menu">
+      <li><a href="../../_sources/admin-guide/media/qcom_camss.rst.txt"
+            rel="nofollow">Show Source</a></li>
+    </ul>
+   </div>
+        </div>
+      </div>
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  
+
+
+
+<section id="qualcomm-camera-subsystem-driver">
+<h1><span class="section-number">7.16. </span>Qualcomm Camera Subsystem driver<a class="headerlink" href="#qualcomm-camera-subsystem-driver" title="Permalink to this heading">¶</a></h1>
+<section id="introduction">
+<h2><span class="section-number">7.16.1. </span>Introduction<a class="headerlink" href="#introduction" title="Permalink to this heading">¶</a></h2>
+<p>This file documents the Qualcomm Camera Subsystem driver located under
+drivers/media/platform/qcom/camss.</p>
+<p>The current version of the driver supports the Camera Subsystem found on
+Qualcomm MSM8916/APQ8016 and MSM8996/APQ8096 processors.</p>
+<p>The driver implements V4L2, Media controller and V4L2 subdev interfaces.
+Camera sensor using V4L2 subdev interface in the kernel is supported.</p>
+<p>The driver is implemented using as a reference the Qualcomm Camera Subsystem
+driver for Android as found in Code Linaro <a class="footnote-reference brackets" href="#f1" id="id1" role="doc-noteref"><span class="fn-bracket">[</span>1<span class="fn-bracket">]</span></a> <a class="footnote-reference brackets" href="#f2" id="id2" role="doc-noteref"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></a>.</p>
+</section>
+<section id="qualcomm-camera-subsystem-hardware">
+<h2><span class="section-number">7.16.2. </span>Qualcomm Camera Subsystem hardware<a class="headerlink" href="#qualcomm-camera-subsystem-hardware" title="Permalink to this heading">¶</a></h2>
+<p>The Camera Subsystem hardware found on 8x16 / 8x96 processors and supported by
+the driver consists of:</p>
+<ul class="simple">
+<li><p>2 / 3 CSIPHY modules. They handle the Physical layer of the CSI2 receivers.
+A separate camera sensor can be connected to each of the CSIPHY module;</p></li>
+<li><p>2 / 4 CSID (CSI Decoder) modules. They handle the Protocol and Application
+layer of the CSI2 receivers. A CSID can decode data stream from any of the
+CSIPHY. Each CSID also contains a TG (Test Generator) block which can generate
+artificial input data for test purposes;</p></li>
+<li><p>ISPIF (ISP Interface) module. Handles the routing of the data streams from
+the CSIDs to the inputs of the VFE;</p></li>
+<li><p>1 / 2 VFE (Video Front End) module(s). Contain a pipeline of image processing
+hardware blocks. The VFE has different input interfaces. The PIX (Pixel) input
+interface feeds the input data to the image processing pipeline. The image
+processing pipeline contains also a scale and crop module at the end. Three
+RDI (Raw Dump Interface) input interfaces bypass the image processing
+pipeline. The VFE also contains the AXI bus interface which writes the output
+data to memory.</p></li>
+</ul>
+</section>
+<section id="supported-functionality">
+<h2><span class="section-number">7.16.3. </span>Supported functionality<a class="headerlink" href="#supported-functionality" title="Permalink to this heading">¶</a></h2>
+<p>The current version of the driver supports:</p>
+<ul>
+<li><p>Input from camera sensor via CSIPHY;</p></li>
+<li><p>Generation of test input data by the TG in CSID;</p></li>
+<li><p>RDI interface of VFE</p>
+<ul>
+<li><p>Raw dump of the input data to memory.</p>
+<p>Supported formats:</p>
+<ul class="simple">
+<li><p>YUYV/UYVY/YVYU/VYUY (packed YUV 4:2:2 - V4L2_PIX_FMT_YUYV /
+V4L2_PIX_FMT_UYVY / V4L2_PIX_FMT_YVYU / V4L2_PIX_FMT_VYUY);</p></li>
+<li><p>MIPI RAW8 (8bit Bayer RAW - V4L2_PIX_FMT_SRGGB8 /
+V4L2_PIX_FMT_SGRBG8 / V4L2_PIX_FMT_SGBRG8 / V4L2_PIX_FMT_SBGGR8);</p></li>
+<li><p>MIPI RAW10 (10bit packed Bayer RAW - V4L2_PIX_FMT_SBGGR10P /
+V4L2_PIX_FMT_SGBRG10P / V4L2_PIX_FMT_SGRBG10P / V4L2_PIX_FMT_SRGGB10P /
+V4L2_PIX_FMT_Y10P);</p></li>
+<li><p>MIPI RAW12 (12bit packed Bayer RAW - V4L2_PIX_FMT_SRGGB12P /
+V4L2_PIX_FMT_SGBRG12P / V4L2_PIX_FMT_SGRBG12P / V4L2_PIX_FMT_SRGGB12P).</p></li>
+<li><p>(8x96 only) MIPI RAW14 (14bit packed Bayer RAW - V4L2_PIX_FMT_SRGGB14P /
+V4L2_PIX_FMT_SGBRG14P / V4L2_PIX_FMT_SGRBG14P / V4L2_PIX_FMT_SRGGB14P).</p></li>
+</ul>
+</li>
+<li><p>(8x96 only) Format conversion of the input data.</p>
+<p>Supported input formats:</p>
+<ul class="simple">
+<li><p>MIPI RAW10 (10bit packed Bayer RAW - V4L2_PIX_FMT_SBGGR10P / V4L2_PIX_FMT_Y10P).</p></li>
+</ul>
+<p>Supported output formats:</p>
+<ul class="simple">
+<li><p>Plain16 RAW10 (10bit unpacked Bayer RAW - V4L2_PIX_FMT_SBGGR10 / V4L2_PIX_FMT_Y10).</p></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><p>PIX interface of VFE</p>
+<ul>
+<li><p>Format conversion of the input data.</p>
+<p>Supported input formats:</p>
+<ul class="simple">
+<li><p>YUYV/UYVY/YVYU/VYUY (packed YUV 4:2:2 - V4L2_PIX_FMT_YUYV /
+V4L2_PIX_FMT_UYVY / V4L2_PIX_FMT_YVYU / V4L2_PIX_FMT_VYUY).</p></li>
+</ul>
+<p>Supported output formats:</p>
+<ul class="simple">
+<li><p>NV12/NV21 (two plane YUV 4:2:0 - V4L2_PIX_FMT_NV12 / V4L2_PIX_FMT_NV21);</p></li>
+<li><p>NV16/NV61 (two plane YUV 4:2:2 - V4L2_PIX_FMT_NV16 / V4L2_PIX_FMT_NV61).</p></li>
+<li><p>(8x96 only) YUYV/UYVY/YVYU/VYUY (packed YUV 4:2:2 - V4L2_PIX_FMT_YUYV /
+V4L2_PIX_FMT_UYVY / V4L2_PIX_FMT_YVYU / V4L2_PIX_FMT_VYUY).</p></li>
+</ul>
+</li>
+<li><p>Scaling support. Configuration of the VFE Encoder Scale module
+for downscalling with ratio up to 16x.</p></li>
+<li><p>Cropping support. Configuration of the VFE Encoder Crop module.</p></li>
+</ul>
+</li>
+<li><p>Concurrent and independent usage of two (8x96: three) data inputs -
+could be camera sensors and/or TG.</p></li>
+</ul>
+</section>
+<section id="driver-architecture-and-design">
+<h2><span class="section-number">7.16.4. </span>Driver Architecture and Design<a class="headerlink" href="#driver-architecture-and-design" title="Permalink to this heading">¶</a></h2>
+<p>The driver implements the V4L2 subdev interface. With the goal to model the
+hardware links between the modules and to expose a clean, logical and usable
+interface, the driver is split into V4L2 sub-devices as follows (8x16 / 8x96):</p>
+<ul class="simple">
+<li><p>2 / 3 CSIPHY sub-devices - each CSIPHY is represented by a single sub-device;</p></li>
+<li><p>2 / 4 CSID sub-devices - each CSID is represented by a single sub-device;</p></li>
+<li><p>2 / 4 ISPIF sub-devices - ISPIF is represented by a number of sub-devices
+equal to the number of CSID sub-devices;</p></li>
+<li><p>4 / 8 VFE sub-devices - VFE is represented by a number of sub-devices equal to
+the number of the input interfaces (3 RDI and 1 PIX for each VFE).</p></li>
+</ul>
+<p>The considerations to split the driver in this particular way are as follows:</p>
+<ul class="simple">
+<li><p>representing CSIPHY and CSID modules by a separate sub-device for each module
+allows to model the hardware links between these modules;</p></li>
+<li><p>representing VFE by a separate sub-devices for each input interface allows
+to use the input interfaces concurrently and independently as this is
+supported by the hardware;</p></li>
+<li><p>representing ISPIF by a number of sub-devices equal to the number of CSID
+sub-devices allows to create linear media controller pipelines when using two
+cameras simultaneously. This avoids branches in the pipelines which otherwise
+will require a) userspace and b) media framework (e.g. power on/off
+operations) to  make assumptions about the data flow from a sink pad to a
+source pad on a single media entity.</p></li>
+</ul>
+<p>Each VFE sub-device is linked to a separate video device node.</p>
+<p>The media controller pipeline graph is as follows (with connected two / three
+OV5645 camera sensors):</p>
+<figure class="align-center" id="id3">
+<img alt="qcom_camss_graph.dot" src="../../_images/qcom_camss_graph.svg" /><figcaption>
+<p><span class="caption-text">Media pipeline graph 8x16</span><a class="headerlink" href="#id3" title="Permalink to this image">¶</a></p>
+</figcaption>
+</figure>
+<figure class="align-center" id="id4">
+<img alt="qcom_camss_8x96_graph.dot" src="../../_images/qcom_camss_8x96_graph.svg" /><figcaption>
+<p><span class="caption-text">Media pipeline graph 8x96</span><a class="headerlink" href="#id4" title="Permalink to this image">¶</a></p>
+</figcaption>
+</figure>
+</section>
+<section id="implementation">
+<h2><span class="section-number">7.16.5. </span>Implementation<a class="headerlink" href="#implementation" title="Permalink to this heading">¶</a></h2>
+<p>Runtime configuration of the hardware (updating settings while streaming) is
+not required to implement the currently supported functionality. The complete
+configuration on each hardware module is applied on STREAMON ioctl based on
+the current active media links, formats and controls set.</p>
+<p>The output size of the scaler module in the VFE is configured with the actual
+compose selection rectangle on the sink pad of the ‘msm_vfe0_pix’ entity.</p>
+<p>The crop output area of the crop module in the VFE is configured with the actual
+crop selection rectangle on the source pad of the ‘msm_vfe0_pix’ entity.</p>
+</section>
+<section id="documentation">
+<h2><span class="section-number">7.16.6. </span>Documentation<a class="headerlink" href="#documentation" title="Permalink to this heading">¶</a></h2>
+<p>APQ8016 Specification:
+<a class="reference external" href="https://developer.qualcomm.com/download/sd410/snapdragon-410-processor-device-specification.pdf">https://developer.qualcomm.com/download/sd410/snapdragon-410-processor-device-specification.pdf</a>
+Referenced 2016-11-24.</p>
+<p>APQ8096 Specification:
+<a class="reference external" href="https://developer.qualcomm.com/download/sd820e/qualcomm-snapdragon-820e-processor-apq8096sge-device-specification.pdf">https://developer.qualcomm.com/download/sd820e/qualcomm-snapdragon-820e-processor-apq8096sge-device-specification.pdf</a>
+Referenced 2018-06-22.</p>
+</section>
+<section id="references">
+<h2><span class="section-number">7.16.7. </span>References<a class="headerlink" href="#references" title="Permalink to this heading">¶</a></h2>
+<aside class="footnote-list brackets">
+<aside class="footnote brackets" id="f1" role="note">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">1</a><span class="fn-bracket">]</span></span>
+<p><a class="reference external" href="https://git.codelinaro.org/clo/la/kernel/msm-3.10/">https://git.codelinaro.org/clo/la/kernel/msm-3.10/</a></p>
+</aside>
+<aside class="footnote brackets" id="f2" role="note">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id2">2</a><span class="fn-bracket">]</span></span>
+<p><a class="reference external" href="https://git.codelinaro.org/clo/la/kernel/msm-3.18/">https://git.codelinaro.org/clo/la/kernel/msm-3.18/</a></p>
+</aside>
+</aside>
+</section>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+    <div class="clearer"></div>
+  </div>
+    <div class="footer">
+      &#169;The kernel development community.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 5.3.0</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 0.7.16</a>
+      
+      |
+      <a href="../../_sources/admin-guide/media/qcom_camss.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

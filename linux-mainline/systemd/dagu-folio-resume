@@ -1,0 +1,17 @@
+#!/bin/sh
+# $1 = pre|post
+# Cover close already reaches s2idle. Folio MCU chatter and SLPI
+# sensor_process crash abort it in the same second. Stop SEE
+# before freeze. MCU sleep GPIO155 is the kernel nanosic_suspend.
+
+set -eu
+
+case "${1-}" in
+pre)
+	systemctl stop dagu-ssc.service >/dev/null 2>&1 || true
+	;;
+post)
+	systemctl start dagu-ssc.service >/dev/null 2>&1 || true
+	loginctl unlock-sessions >/dev/null 2>&1 || true
+	;;
+esac

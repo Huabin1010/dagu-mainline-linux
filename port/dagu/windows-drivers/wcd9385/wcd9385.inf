@@ -1,0 +1,26 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = MEDIA
+ClassGuid   = {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider    = %Mfg%
+DriverVer   = 09/19/2026,1.0.0.0
+CatalogFile = wcd9385.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Wcd_Inst, ACPI\QCOM24AA
+
+[Wcd_Inst.NT]
+; WCD9385 mics: AMIC5 / ADC4 INP5. Reset GPIO32. SoundWire on LPASS.
+; PCM stays on ADSP QCOM24A8. No 3.5mm jack. Do not use inbox HDA.
+
+[Wcd_Inst.NT.Services]
+AddService = , 0x00000002
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu WCD9385 (ADSP + SoundWire)"
+Disk = "dagu WCD9385"

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # STREAMON Titan 480 PIX: CSID IPP → CAMIF → CLC → DISP linear NV12.
-# Rear HyperOS path is CSID1 + IFE1 (IFE0 idle). Front Camera ID 1 is
-# the same IFE1/CSID1, CSIPHY4, 2592×1952 identity NV12
-# (#412 Camera ID 1 live WM 2592×1952 / 2592×976; Display Full
-# pix_wh = '2320x1320' was mashed 640+CamX).
+# Rear HyperOS path is CSID1 + IFE1 (IFE0 idle). Front Camera ID 1
+# Linux dest is Display Full linear 2320×1320 (full FOV downsample).
+# Sensor pad stays 2592×1952 SBGGR10. Identity pix_wh = '2592x1952'
+# mixed first-list is abandoned (#412 AXI silent).
 # (#386 RC+WM pad around MNDS 2314×1314; #384 WM-only 2320 falsified).
 # Do not dual STREAMON with DebayerCpu / loopback.
 # Do not copy rear Crop last 0xfef0bf3 onto imx596.
@@ -65,21 +65,27 @@ print(f'===sensor {sensor}===')
 
 # HyperOS: Camera ID 0 and 1 both use CSID1 + IFE1 (IFE0 idle).
 # Rear CSIPHY1, front CSIPHY4. CSID pad 1 is RDI0. PIX is pad 4.
-run(['media-ctl', '-d', MC, '-l', '"msm_csid0":4 -> "msm_vfe0_pix":0[0]'])
-run(['media-ctl', '-d', MC, '-l', '"msm_csiphy1":1 -> "msm_csid0":0[0]'])
-run(['media-ctl', '-d', MC, '-l', '"msm_csid0":1 -> "msm_vfe0_rdi0":0[0]'])
-run(['media-ctl', '-d', MC, '-l', '"msm_csid1":1 -> "msm_vfe1_rdi0":0[0]'])
-run(['media-ctl', '-d', MC, '-l', '"msm_csiphy1":1 -> "msm_csid1":0[0]'])
-run(['media-ctl', '-d', MC, '-l', '"msm_csiphy4":1 -> "msm_csid1":0[0]'])
+# SoftISP leaves the other PHY on CSID1:0. Enable-without-reset → EPIPE -32.
+run(['media-ctl', '-d', MC, '-r'])
 phy = 'msm_csiphy4' if FRONT else 'msm_csiphy1'
 run(['media-ctl', '-d', MC, '-l', f'"{phy}":1 -> "msm_csid1":0[1]'], check=True)
 run(['media-ctl', '-d', MC, '-l', '"msm_csid1":4 -> "msm_vfe1_pix":0[1]'], check=True)
 
+# Sensor pad is source of truth. Forcing SGBRG onto s5kjn1 while the
+# driver keeps SGRBG makes media_pipeline_start return EPIPE -32.
+got = run(['media-ctl', '-d', MC, '--get-v4l2', f'"{sensor}":0'])
+code = None
+wh = None
+m = re.search(r'fmt:([A-Z0-9_]+)/(\d+x\d+)', got.stdout)
+if m:
+    code, wh = m.group(1), m.group(2)
+    print(f'===sensor-fmt {code}/{wh}===')
 if FRONT:
-    fmt = 'fmt:SBGGR10_1X10/2592x1952 field:none'
-    pix_wh = '2592x1952'
+    fmt = f'fmt:{code or "SBGGR10_1X10"}/{wh or "2592x1952"} field:none'
+    pix_wh = '2320x1320'
+    # identity was pix_wh = '2592x1952' — mixed first-list, AXI silent
 else:
-    fmt = 'fmt:SGBRG10_1X10/4080x3060 field:none'
+    fmt = f'fmt:{code or "SGBRG10_1X10"}/{wh or "4080x3060"} field:none'
     pix_wh = '1920x1080'
 for spec in (
     f'"{sensor}":0[' + fmt + ']',
@@ -116,10 +122,15 @@ try:
     os.remove('/tmp/pix.nv12')
 except FileNotFoundError:
     pass
+fmt = '--set-fmt-video=width=%s,height=%s,pixelformat=NV12' % (
+    '2320' if FRONT else '1920', '1320' if FRONT else '1080')
+# #501: 2320 tight last chroma line stops at 4K leftover 336.
+# stride 4096 puts that line on a page; one complete NV12 8110080.
+if FRONT:
+    fmt += ',bytesperline=4096'
 r = run([
     'timeout', '--kill-after=2', '12', 'v4l2-ctl', '-d', pix,
-    '--set-fmt-video=width=%s,height=%s,pixelformat=NV12' % (
-        '2592' if FRONT else '1920', '1952' if FRONT else '1080'),
+    fmt,
     '--stream-mmap', '--stream-count=3', '--stream-to=/tmp/pix.nv12',
 ])
 print(f'streamon_rc={r.returncode}')
@@ -149,6 +160,13 @@ ipp_irq = re.findall(r'dagu csid ipp irq=(0x[0-9a-f]+)', log)
 bp = [i for i in ipp_irq if int(i, 16) & (1 << 17)]
 print('ipp_bp=%s' % (bp[-1] if bp else 'False'))
 print('pix_store=%s' % (bool(int(cfg[-1], 16) & (1 << 7)) if cfg else '?'))
+recrop = re.findall(
+    r'dagu csid ipp sof recrop h=(0x[0-9a-f]+) v=(0x[0-9a-f]+) meas=(0x[0-9a-f]+)/(0x[0-9a-f]+)',
+    log)
+if recrop:
+    print('sof_recrop=%s/%s meas=%s/%s n=%d' % (*recrop[-1], len(recrop)))
+else:
+    print('sof_recrop=False')
 burst5 = re.findall(r'dagu ife\d+ pix stop .* burst5=(0x[0-9a-f]+)', log)
 if burst5:
     print(f'burst5={burst5[-1]}')
@@ -173,6 +191,33 @@ if vstc:
 vphc = re.findall(r'dagu ife\d+ mnds_c .* vph=(0x[0-9a-f]+)', log)
 if vphc:
     print(f'mnds_c_vph={vphc[-1]}')
+hsty = re.findall(r'dagu ife\d+ mnds_y .* hst=(0x[0-9a-f]+)', log)
+if hsty:
+    print(f'mnds_y_hst={hsty[-1]}')
+vphy = re.findall(r'dagu ife\d+ mnds_y .* vph=(0x[0-9a-f]+)', log)
+if vphy:
+    print(f'mnds_y_vph={vphy[-1]}')
+cyvph = re.findall(r'dagu ife\d+ rndclamp=.* crop_yvph=(0x[0-9a-f]+)', log)
+if cyvph:
+    print(f'crop_y_vph={cyvph[-1]}')
+cyvsz = re.findall(r'dagu ife\d+ rndclamp=.* crop_yvsz=(0x[0-9a-f]+)', log)
+if cyvsz:
+    print(f'crop_y_vsz={cyvsz[-1]}')
+cyvst = re.findall(r'dagu ife\d+ rndclamp=.* crop=0x[0-9a-f]+/0x[0-9a-f]+/0x[0-9a-f]+/0x[0-9a-f]+/0x[0-9a-f]+/(0x[0-9a-f]+)', log)
+if cyvst:
+    print(f'crop_y_vst={cyvst[-1]}')
+ccvst = re.findall(r'dagu ife\d+ rndclamp=.* crop_c=0x[0-9a-f]+/0x[0-9a-f]+/0x[0-9a-f]+/0x[0-9a-f]+/0x[0-9a-f]+/(0x[0-9a-f]+)', log)
+if ccvst:
+    print(f'crop_c_vst={ccvst[-1]}')
+ccvph = re.findall(r'dagu ife\d+ rndclamp=.* crop_cvph=(0x[0-9a-f]+)', log)
+if ccvph:
+    print(f'crop_c_vph={ccvph[-1]}')
+ccvsz = re.findall(r'dagu ife\d+ rndclamp=.* crop_cvsz=(0x[0-9a-f]+)', log)
+if ccvsz:
+    print(f'crop_c_vsz={ccvsz[-1]}')
+cchst = re.findall(r'dagu ife\d+ rndclamp=.* crop_chst=(0x[0-9a-f]+)', log)
+if cchst:
+    print(f'crop_c_hst={cchst[-1]}')
 hstc = re.findall(r'dagu ife\d+ mnds_c .* hst=(0x[0-9a-f]+)', log)
 if hstc:
     print(f'mnds_c_hst={hstc[-1]}')
@@ -271,13 +316,16 @@ if remote 'test -s /tmp/pix.nv12'; then
 from pathlib import Path
 p = Path("$ROOT/out/camera/pix.nv12")
 raw = p.read_bytes()
-w, h = (2592, 1952) if "$PIX_CAM" == "front" else (1920, 1080)
-need = w * h * 3 // 2
+w, h = (2320, 1320) if "$PIX_CAM" == "front" else (1920, 1080)
+bpl = 4096 if "$PIX_CAM" == "front" else w
+need = bpl * h * 3 // 2
 n = len(raw) // need
-print(f"nv12 bytes={len(raw)} frames={n} expect={need}")
+print(f"nv12 bytes={len(raw)} frames={n} expect={need} bpl={bpl}")
 if n:
     frame = raw[:need]
-    y = frame[:w*h]
+    y = bytearray()
+    for i in range(h):
+        y.extend(frame[i * bpl : i * bpl + w])
     # crude luma PNG via PIL if present, else skip
     try:
         from PIL import Image
@@ -296,10 +344,7 @@ import subprocess
 def run(args):
     subprocess.run(args)
 # Drop PIX. SoftISP: rear csiphy1→csid0→vfe0_rdi0, front csiphy4→csid1→vfe1_rdi0.
-run(['media-ctl', '-d', '/dev/media0', '-l',
-     '"msm_csid1":4 -> "msm_vfe1_pix":0[0]'])
-run(['media-ctl', '-d', '/dev/media0', '-l',
-     '"msm_csiphy1":1 -> "msm_csid1":0[0]'])
+run(['media-ctl', '-d', '/dev/media0', '-r'])
 run(['media-ctl', '-d', '/dev/media0', '-l',
      '"msm_csiphy1":1 -> "msm_csid0":0[1]'])
 run(['media-ctl', '-d', '/dev/media0', '-l',

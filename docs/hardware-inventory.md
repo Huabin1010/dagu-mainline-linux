@@ -48,19 +48,32 @@
 
 ## SoC 与子系统
 
-| 子系统 | 型号 / 节点 | 证据 | WoA |
+| 子系统 | 型号 / 节点 | 证据 | WoA（Windows on ARM，ARM 上的 Windows）源码 |
 |--------|-------------|------|-----|
-| CPU | Kryo 585 ×8, ARMv8 atomics | cpuinfo | ⬜ |
-| GPU | **Adreno650v3** | kgsl sysfs | ⬜ |
-| UFS | **1d84000.ufshc**, SM8 UFS | getprop + fastboot variant | ⬜ |
-| USB | **a600000.dwc3** | `/sys/class/udc/` | ⬜ |
-| 显示 | **2560×1600** LCD | dumpsys display | ⬜ |
-| 面板 DT | `dsi-panel-l81a-42-04-0a` | [MiCode dagu-s-oss](https://github.com/MiCode/kernel_devicetree/tree/dagu-s-oss) | ⬜ |
-| 触控 | **himax-touchscreen** + Xiaomi Touch | getevent | ⬜ |
-| 音频 | **kona-mtp-snd-card** | getevent；overlay 见 `dagu-audio-overlay.dtsi` | ⬜ |
-| Wi-Fi | **cnss_pci** | wlan0 driver | ⬜ |
-| IMU | **lsm6dso** (STMicro) | sensorservice | ⬜ |
-| 光线 | **tcs3701**, **rohm_bu27030** | sensorservice | ⬜ |
+| CPU | Kryo 585 ×8, ARMv8 atomics | cpuinfo | [`Pep_lpi.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/Pep_lpi.asl) + [`pep0.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/pep0.asl) |
+| GPU（Graphics Processing Unit，图形处理器） | **Adreno650v3** | kgsl sysfs | [`graphics.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/graphics.asl) |
+| UFS（Universal Flash Storage，通用闪存） | **1d84000.ufshc**, SM8 UFS（Universal Flash Storage，通用闪存） | getprop + fastboot variant | [`ufs.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/ufs.asl) |
+| USB（Universal Serial Bus，通用串行总线） | **a600000.dwc3** | `/sys/class/udc/` | [`usb.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/usb.asl) + [`typec.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/typec.asl)；UEFI（Unified Extensible Firmware Interface，统一可扩展固件接口）日志走 [`DaguUsbCdcAcmDxe`](../port/dagu/Silicon/Qualcomm/QcomPkg/Drivers/DaguUsbCdcAcmDxe/DaguUsbCdcAcmDxe.c) `0525:a4a7` |
+| 显示 | **2560×1600** LCD | dumpsys display | [`display.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/display.asl) + SimpleFb + [`backlight.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/backlight.asl) |
+| 面板 DT（Device Tree，设备树） | `dsi-panel-l81a-42-04-0a` | [MiCode dagu-s-oss](https://github.com/MiCode/kernel_devicetree/tree/dagu-s-oss) | `dagu.dsc` 1600×2560 |
+| 触控 | **himax-touchscreen** + Xiaomi Touch | getevent | [`himax.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/himax.asl) 占位 |
+| 音频 | **kona-mtp-snd-card** | getevent；overlay 见 `dagu-audio-overlay.dtsi` | [`audio.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/audio.asl) |
+| Wi-Fi | **cnss_pci** | wlan0 driver | [`pcie.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/pcie.asl) QCA6390 |
+| 蓝牙 | **qca6390-bt** uart6 | DT（Device Tree，设备树）`&uart6` | [`bluetooth.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/bluetooth.asl) |
+| 键盘 | **nanosic,803** | overlay HID（Human Interface Device，人机接口设备）`15d9:00a3` | [`keyboard.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/keyboard.asl) |
+| 电池 | 双 BQ27Z561 + SMB5 | dual-fg / charger overlay | [`battery.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/battery.asl) |
+| IMU（Inertial Measurement Unit，惯性测量单元） | **lsm6dso** (STMicro) | sensorservice | [`sensors.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/sensors.asl) SLPI（Sensor Low Power Island，传感器低功耗岛） |
+| 光线 | **tcs3701**, **rohm_bu27030** | sensorservice | 同上 SLPI（Sensor Low Power Island，传感器低功耗岛） |
+| 视频 | Venus `aa00000` | [`dagu-venus.md`](../linux-mainline/docs/dagu-venus.md) | [`venus.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/venus.asl) |
+| CDSP（Compute DSP，计算数字信号处理器） | Hexagon 698 `cdsp.mbn` | Linux `&cdsp` | [`cdsp.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/cdsp.asl) |
+| SPMI（System Power Management Interface，系统电源管理接口） | `spmi@c440000` | iomem `0c440000` | [`pmic.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/pmic.asl) |
+| LPASS（Low Power Audio Subsystem，低功耗音频子系统） | rxmacro / SoundWire | 麦克风 AMIC5 | [`lpass.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/lpass.asl) |
+| SMMU（System Memory Management Unit，系统内存管理单元） | `apps` + Adreno | iomem `15000000` / `03da0000` | [`smmu.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/smmu.asl) |
+| 霍尔 / 按键 | GPIO（General Purpose Input/Output，通用输入输出）110/121 + PON | gpio-keys | [`buttons.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/buttons.asl) |
+| 笔充 | IDT P9418 | overlay | [`pen.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/pen.asl) |
+| 马达 | PM8150B LRA | `haptics@c000` | [`haptics.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/haptics.asl) |
+| 手电筒 | `white:flash` | `pm8150l_flash` | [`led.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/led.asl)（不是相机） |
+| USB3 redriver | PS5169 | 产品 DT（Device Tree，设备树）disabled | [`usb.asl`](../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu/usb.asl) `RDV0` `_STA=0` |
 
 ---
 
@@ -108,11 +121,13 @@ verified boot state: orange (post-unlock)
 
 ## 下一步（Phase 1）
 
-1. [ ] 克隆 [edk2-msm](https://github.com/edk2-porting/edk2-msm)，基于 j716f 模板添加 `dagu` 配置  
-2. [ ] 从 [MiCode dagu-s-oss](https://github.com/MiCode/kernel_devicetree/tree/dagu-s-oss) 提取 DTB/内存映射参考  
-3. [ ] `fastboot boot boot-dagu.img` 验证 UEFI Shell（**不要 flash boot**）  
-4. [ ] （可选）刷入 Magisk 获取 root，补采 `/proc/iomem` 与 live DTB
+源码侧对照已在 [dagu-woa-linux-source-map.md](dagu-woa-linux-source-map.md)：内存映射 / ACPI（Advanced Configuration and Power Interface，高级配置与电源接口）/ 活 FDT（Flattened Device Tree，扁平设备树）。
+
+1. [x] `dagu` 设备配置 + Linux reserved-memory 内存映射  
+2. [x] 活 FDT（Flattened Device Tree，扁平设备树）替换临时 elish DTB（Device Tree Blob，设备树二进制）  
+3. [ ] `fastboot boot boot-dagu.img` 验证 UEFI（Unified Extensible Firmware Interface，统一可扩展固件接口）Shell（**不要 flash boot**；本阶段不链载）  
+4. [x] Magisk root 已采 `/proc/iomem` 与 live DTB（Device Tree Blob，设备树二进制）
 
 ---
 
-**最后更新：** 2026-08-26（Magisk root 全量 dump）
+**最后更新：** 2026-09-19（WoA（Windows on ARM，ARM 上的 Windows）ACPI（Advanced Configuration and Power Interface，高级配置与电源接口）对照加宽；dump 日期仍是 2026-08-26）

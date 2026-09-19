@@ -1,8 +1,12 @@
 #!/bin/sh
 # Tablet HID host for GNOME Settings. After Forget, only BLE mice remain
-# bonded — whitelist no longer enables SCAN_PAGE. GNOME never writes
-# Pairable, so keep connectable/bondable/FastConnectable (PSCAN only, not
-# ISCAN). Do not StopDiscovery and do not kill gnome-control-center.
+# bonded — whitelist no longer enables SCAN_PAGE. GNOME setup-mode writes
+# Pairable off when the user clicks Connect, and an HCI Hardware Failure
+# (Add Device 0x03) re-runs QCA setup without udev add. Keep
+# connectable/bondable/FastConnectable (PSCAN only, not ISCAN).
+# Device-initiated HID (K380): GNOME Connect must not outgoing-page;
+# bluetoothd waits for the keypress while this script keeps PSCAN.
+# Do not StopDiscovery and do not kill gnome-control-center.
 # btmgmt/bluetoothctl can block on a down mgmt socket; cap each call so
 # bluetooth.service ExecStartPost cannot time out the daemon.
 set -eu

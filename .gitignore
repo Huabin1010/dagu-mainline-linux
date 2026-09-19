@@ -5,6 +5,7 @@ backups/golden/*
 logs/
 dumps/
 tools/downloads/
+tools/bin/
 tools/mi-unlock-cn/
 tools/platform-tools/
 

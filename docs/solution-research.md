@@ -199,21 +199,22 @@ Renegade 官网对 nabu 的说明也明确：**安装请跟 GitHub 指南，不�
 ## 6. 本项目建议路线图（基于调研修订）
 
 - [x] **调研社区方案**（本文档）
-- [ ] **Phase 0 — 硬件摸底**
-  - [ ] fastboot / ADB 收集分区表、 `/proc/iomem`、 DTB
-  - [ ] 确认触控、Wi-Fi、音频芯片型号
-  - [ ] 确认 Bootloader 解锁与救砖路径 (EDL)
+- [x] **Phase 0 — 硬件摸底（源码侧）**
+  - [x] 分区表 / `/proc/iomem` / 活 DTB（Device Tree Blob，设备树二进制）已在 `dumps/`；对照见 [dagu-woa-linux-source-map.md](dagu-woa-linux-source-map.md)
+  - [x] 触控 Himax HX83121、Wi-Fi QCA6390、音频 CS35L41 已由 Linux 总表确认
+  - [x] Bootloader 解锁与 EDL 救砖路径已有文档
 - [ ] **Phase 1 — UEFI (edk2-msm)**
-  - [ ] 创建 `dagu` 设备配置，编译 `boot-dagu.img`
-  - [ ] fastboot 链式引导 → UEFI Shell / SimpleFb
-  - [ ] 启用 Mass Storage Mode
+  - [x] 创建 `dagu` 设备配置；内存映射 / ACPI（Advanced Configuration and Power Interface，高级配置与电源接口）/ 活 FDT（Flattened Device Tree，扁平设备树）已按 Linux 补齐（不刷机）
+  - [x] 本机编译 `boot-dagu.img`（`build-dagu-uefi.sh`，GCC5；**未** flash / **未** `fastboot boot`）
+  - [ ] fastboot 链式引导 → UEFI Shell / SimpleFb（**尚未做**）
+  - [x] Mass Storage Mode **已放弃**（改 WinPE）
 - [ ] **Phase 2 — Windows bring-up**
   - [ ] 参考 nabu 流程改造 GPT 分区
-  - [ ] Mass Storage 或 PE 方式部署 Win11 ARM64
+  - [ ] PE 方式部署 Win11 ARM64（不走 LSMS）
   - [ ] WOA-Drivers extract + DriverUpdater 灌入基础驱动
 - [ ] **Phase 3 — ACPI 与外设**
-  - [ ] 编写/移植 dagu ACPI（基于 Cedros/SM8250）
-  - [ ] 触控、Wi-Fi、音频、USB
+  - [x] dagu ACPI（Advanced Configuration and Power Interface，高级配置与电源接口）源码：PEP（Power Engine Plugin，电源引擎插件）/ UFS（Universal Flash Storage，通用闪存）/ GPU（Graphics Processing Unit，图形处理器）/ Himax / Wi‑Fi / 蓝牙 / USB（Universal Serial Bus，通用串行总线）/ 音频 / 键盘 / 电池 / 亮度 / 霍尔 / SLPI（Sensor Low Power Island，传感器低功耗岛）/ 热 / Venus / 笔 / Type-C（USB Type-C，USB C 型接口）/ 马达（未上板；相机不进表）
+  - [ ] 触控真正出点、Wi‑Fi、音频、USB（Universal Serial Bus，通用串行总线）主机口（板上）
 - [ ] **Phase 4 — GPU 与体验**
   - [ ] Adreno 650 WDDM 社区驱动适配
   - [ ] 亮度、旋转、休眠；双系统切换工具

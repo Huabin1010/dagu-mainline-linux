@@ -121,6 +121,7 @@ class TestSerialLogTool(unittest.TestCase):
         )
         self.assertIn(f"PcdDebugUartPortBase|{DTB_SERIAL0_MMIO:#x}", dsc)
         self.assertIn("TestLabBridgeDxe.inf", dsc)
+        self.assertIn("DaguUsbCdcAcmDxe.inf", dsc)
 
     def test_dtb_blob_mentions_serial0_node(self) -> None:
         dtb = ROOT / "port/dagu/Platform/Xiaomi/sm8250/FdtBlob_compat/dagu.dtb"

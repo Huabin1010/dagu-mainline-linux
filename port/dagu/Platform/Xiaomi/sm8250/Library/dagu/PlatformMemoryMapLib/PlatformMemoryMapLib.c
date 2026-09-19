@@ -1,19 +1,35 @@
 #include <Library/BaseLib.h>
 #include <Library/PlatformMemoryMapLib.h>
 
+/*
+ * dagu RAM / carveouts from Linux reserved-memory, not j716f/elish.
+ *
+ * Sources (read-only):
+ *   linux-mainline/dts/dagu-reserved-memory-stock.dtsi
+ *   linux-mainline/dts/sm8250-xiaomi-dagu.dts  memory { reg }
+ *   dumps/dagu-20260826-210700-root/memory/iomem.txt
+ *
+ * Bank0  0x80000000 + 0x3BB00000 -> 0xBBB00000
+ * Bank1  0xC0000000 + 0x1C0000000 -> 0x280000000
+ */
+
 static ARM_MEMORY_REGION_DESCRIPTOR_EX gDeviceMemoryDescriptorEx[] = {
-	/* Hypervisor seems needed for windows boot? */
 	{"Hypervisor",       0x80000000, 0x00600000, AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, NS_DEVICE},
-	{"HLOS 1",           0x80600000, 0x00100000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
-	{"AOP",              0x80700000, 0x00160000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
+	/* linux xbl_aop_region@80600000 size 0x260000 (covers old HLOS1+AOP split) */
+	{"XBL AOP",          0x80600000, 0x00260000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
 	{"AOP CMD DB",       0x80860000, 0x00020000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
 	{"XBL Log Buffer",   0x80880000, 0x00014000, AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, WRITE_BACK_XN},
 	{"HLOS 2",           0x80894000, 0x0006C000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
 	{"SMEM",             0x80900000, 0x00200000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
-	{"Removed Mem",      0x80b00000, 0x05700000, AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, NS_DEVICE},
-	{"PIL Reserved",     0x86200000, 0x05D00000, AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, UNCACHED_UNBUFFERED_XN},
-	{"HLOS 3",           0x8BF00000, 0x10100000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
-	{"Display Reserved", 0x9C000000, 0x02400000, AddMem, MEM_RES, SYS_MEM_CAP, Reserv, WRITE_THROUGH_XN},
+	/* linux removed_region@80b00000 size 0x5300000 */
+	{"Removed Mem",      0x80b00000, 0x05300000, AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, NS_DEVICE},
+	{"HLOS gap",         0x85E00000, 0x00400000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
+	/* PIL camera@86200000 .. cdsp_secure@8e100000+0x4600000 = 0x92700000 */
+	{"PIL Reserved",     0x86200000, 0x0C500000, AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, UNCACHED_UNBUFFERED_XN},
+	{"HLOS 3",           0x92700000, 0x09900000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
+	/* linux cont_splash_region@9c000000 size 0x2300000 */
+	{"Display Reserved", 0x9C000000, 0x02300000, AddMem, MEM_RES, SYS_MEM_CAP, Reserv, WRITE_THROUGH_XN},
+	{"DFPS",             0x9E300000, 0x00100000, AddMem, MEM_RES, SYS_MEM_CAP, Reserv, WRITE_BACK_XN},
 	{"DBI Dump",         0x9E400000, 0x00F00000, NoHob,  MMAP_IO, INITIALIZED, Conv,   UNCACHED_UNBUFFERED_XN},
 	{"HLOS 4",           0x9F300000, 0x00C00000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
 	{"SEC Heap",         0x9FF00000, 0x0008C000, AddMem, SYS_MEM, SYS_MEM_CAP, BsData, WRITE_BACK_XN},
@@ -25,33 +41,44 @@ static ARM_MEMORY_REGION_DESCRIPTOR_EX gDeviceMemoryDescriptorEx[] = {
 	{"Info Blk",         0x9FFFF000, 0x00001000, AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, WRITE_BACK_XN},
 
 	{"HLOS 6",           0xA0000000, 0x10000000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
-	/* Set pstore size to 0x00500000, otherwise OnePlus 8 Pro will crashdump. */
-	{"PSTORE",           0xB0000000, 0x00500000, AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, WRITE_BACK_XN},
-	{"HLOS 7",           0xB0400000, 0x0C800000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
+	/* linux-mainline/dts/sm8250-xiaomi-dagu.dts ramoops@b0000000 size 0x400000 */
+	{"PSTORE",           0xB0000000, 0x00400000, AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, WRITE_BACK_XN},
+	/* linux disp_rdump_region@b0400000 size 0x1000000 */
+	{"Disp rdump",       0xB0400000, 0x01000000, AddMem, MEM_RES, SYS_MEM_CAP, Reserv, NS_DEVICE},
+	{"HLOS 7",           0xB1400000, 0x0A700000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
 
 	{"DXE Heap",         0xC0000000, 0x0E000000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
 	{"UEFI FD",          0xCE000000, 0x02000000, AddMem, SYS_MEM, SYS_MEM_CAP, BsData, WRITE_BACK},
 
-	{"RAM Partition",    0xD0000000,0x130000000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
+	/* Bank1 remainder: 0x280000000 - 0xD0000000 = 0x1B0000000 */
+	{"RAM Partition",    0xD0000000,0x1B0000000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK_XN},
 
-	/* Other memory regions */
 	{"IMEM Base",        0x14680000, 0x00040000, NoHob,  MMAP_IO, INITIALIZED, Conv,   NS_DEVICE},
 	{"IMEM Cookie Base", 0x146BF000, 0x00001000, AddDev, MMAP_IO, INITIALIZED, Conv,   NS_DEVICE},
 
-	/* Register regions */
 	{"IPC_ROUTER_TOP",   0x00400000, 0x00100000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"SECURITY CONTROL", 0x00780000, 0x00007000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"QUPV3_2_GSI",      0x00800000, 0x000D0000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"QUPV3_0_GSI",      0x00900000, 0x000D0000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"QUPV3_1_GSI",      0x00A00000, 0x000D0000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"PRNG_CFG_PRNG",    0x00790000, 0x00010000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
+	{"PCIE0 PARF",       0x01C00000, 0x00004000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
+	{"UFS HC",           0x01D84000, 0x0001C000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
+	{"PCIE0 MEM",        0x60000000, 0x04000000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"CRYPTO0 CRYPTO",   0x01DC0000, 0x00040000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"TCSR_TCSR_REGS",   0x01FC0000, 0x00030000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"GPU_GMU_CX_BLK",   0x02C7D000, 0x00002000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"GPU_CC",           0x02C90000, 0x0000A000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
+	{"GPU KGSL",         0x03D00000, 0x00040000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
+	{"ADRENO SMMU",      0x03DA0000, 0x00010000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
+	{"LPASS RX",         0x03200000, 0x00052000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
+	{"SLPI PAS",         0x05C00000, 0x00004000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
+	{"CDSP PAS",         0x08300000, 0x00010000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
+	{"MDSS",             0x0AE00000, 0x000C0000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"QUPV3_SSC_GSI",    0x05A00000, 0x000D0000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"PERIPH_SS",        0x08800000, 0x00200000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"USB30_PRIM",       0x0A600000, 0x0011B000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
+	{"VENUS",            0x0AA00000, 0x00100000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"USB_RUMI",         0x0A720000, 0x00010000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"USB30_SEC",        0x0A800000, 0x0011B000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},
 	{"AOSS",             0x0B000000, 0x04000000, AddDev, MMAP_IO, UNCACHEABLE, MmIO, NS_DEVICE},

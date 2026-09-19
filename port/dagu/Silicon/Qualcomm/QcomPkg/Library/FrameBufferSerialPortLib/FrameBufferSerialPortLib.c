@@ -11,6 +11,7 @@
 #include <Resources/font5x12.h>
 
 #include "Library/FrameBufferSerialPortLib.h"
+#include <Library/DaguDebugLog.h>
 #include <Library/TimerLib.h>
 
 FBCON_POSITION m_Position;
@@ -159,6 +160,7 @@ SerialPortInitialize(VOID)
   ArmDisableInterrupts();
 
   FbConReset();
+  DaguDebugLogInit();
 
   m_Initialized = TRUE;
 
@@ -392,6 +394,7 @@ SerialPortWrite(IN UINT8 *Buffer, IN UINTN NumberOfBytes)
   UINTN        InterruptState = ArmGetInterruptState();
   ArmDisableInterrupts();
 
+  DaguDebugLogAppend(Buffer, NumberOfBytes);
   while (Buffer < Final) {
     FbConPutCharWithFactor(*Buffer++, FBCON_COMMON_MSG, mDrawScale);
   }
@@ -413,6 +416,7 @@ SerialPortWriteCritical(IN UINT8 *Buffer, IN UINTN NumberOfBytes)
   ArmDisableInterrupts();
   m_Color.Foreground = FB_BGRA8888_YELLOW;
 
+  DaguDebugLogAppend(Buffer, NumberOfBytes);
   while (Buffer < Final) {
     FbConPutCharWithFactor(*Buffer++, FBCON_COMMON_MSG, mDrawScale);
   }

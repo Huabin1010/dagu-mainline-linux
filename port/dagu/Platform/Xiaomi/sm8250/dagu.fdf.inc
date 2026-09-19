@@ -18,8 +18,17 @@ FILE FREEFORM = 7E374E25-8E01-4FEE-87F2-390C23C606CD {
   SECTION UI = "AcpiTables"
 }
 
+// Live HyperOS FDT from dumps/dagu-20260826-210700-root/dt/fdt.dtb
+// (install: tools/install-dagu-fdt.sh). Not the Linux 7.0 product DTS.
+FILE FREEFORM = 25462CDA-221F-47DF-AC1D-259CFAA4E326 {
+  SECTION RAW = Platform/Xiaomi/sm8250/FdtBlob_compat/dagu.dtb
+}
+
 # Popup boot menu (Vol+/- select, Power confirm) — must match PcdBootManagerMenuFile
 INF MdeModulePkg/Application/BootManagerMenuApp/BootManagerMenuApp.inf
+
+# USB CDC-ACM debug console on UsbfnDwc3 (not Mass Storage / LSMS).
+INF Silicon/Qualcomm/QcomPkg/Drivers/DaguUsbCdcAcmDxe/DaguUsbCdcAcmDxe.inf
 
 # TestLabBridge OFF (ramdisk alloc was OOR). MSC/LSMS path removed.
 # INF Silicon/Qualcomm/QcomPkg/Drivers/TestLabBridgeDxe/TestLabBridgeDxe.inf

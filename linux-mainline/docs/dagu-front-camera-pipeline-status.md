@@ -1,6 +1,6 @@
 # dagu：前置 imx596 还要走的流水线
 
-对照 **`#437`**（2026-09-18 15:54 CST）。`#420` 活 Demux `0x3058` **仍 0 字节**。后置 s5kjn1 **IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）门已过**（`#360` / `#365`）。本文件只画 **前置还没走完的门**，按顺序，缺一不准跳。
+对照 **`#449`**（2026-09-19 00:11 CST）。`#431` 第一表 `0x6070` **仍 0 字节** `img=0xc0`。后置 s5kjn1 **IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）门已过**（`#360` / `#365`）。本文件只画 **前置还没走完的门**，按顺序，缺一不准跳。
 
 卡死细账（已刷刀、证伪清单）：`dagu-ife-front-pipeline-status.md`。后置总图：`dagu-ife-pipeline-status.md`。总表：`dagu-adaptation-status.md`。飞行规则：`.cursor/rules/dagu-camera-front.mdc`。
 
@@ -10,14 +10,14 @@
 
 ## 0. 一句话
 
-桌面前置 **能看**：RDI（Raw Dump Interface，原始旁路出口）+ SoftISP skip 2×2 → 1296×976 @~30fps，`/dev/video20`。  
-硬件 PIX **不能交**：1 帧非零 NV12 **4591616 / 4593600**（chroma 差 1984）。门过之前，Viewfinder **不准**离开 `DebayerCpu`。
+桌面前置 **能看**：RDI（Raw Dump Interface，原始旁路出口）+ SoftISP（Software Image Signal Processor，软件图像信号处理器） skip 2×2 → 1296×976 @~30fps，`/dev/video20`。  
+硬件 PIX（Pixel path，像素通路） **不能交**：产品口是 Display Full 线性 **2320×1320**，门 `/tmp/pix.nv12` **≥3×4593600**。identity 2592 混合第一表已放弃（`#412` 起 AXI（Advanced eXtensible Interface，高级可扩展接口） 0 字节）。门过之前，Viewfinder **不准**离开 `DebayerCpu`。
 
 ```mermaid
 flowchart LR
   A["① 传感器 / PHY / RDI<br/>已通"]
   B["② SoftISP 预览<br/>正在飞 · 不是终点"]
-  C["③ IFE PIX ≥3 帧满幅 NV12<br/>卡死 · 差 1984"]
+  C["③ IFE PIX Display Full ≥3×4593600<br/>卡死 · chroma 1984"]
   D["④ Viewfinder 离开 DebayerCpu<br/>门过才允许"]
   E["⑤ 饱和度 / 3A / 多分辨率<br/>更后"]
   F["IPE / UBWC<br/>Linux 热路径不做"]
@@ -91,17 +91,17 @@ flowchart TB
 |---|---|---|---|---|
 | ① | 传感器 + CSIPHY4 D-PHY | **已通** | `r0114=3`，`chip id 0x0596`，DT `MEDIA_BUS_TYPE_CSI2_DPHY` | 禁止改成 C-PHY / `0x0114=0x0301` |
 | ② | RDI + SoftISP 预览 | **已通（软）** | skip 2×2 → **1296×976** @~30，`/dev/video20` | 禁止拿掉 `/2` 上限再 /2 变成 648×488；禁止 PipeWire 1920 把 skip 打回 1×1 |
-| ③ | IFE PIX ≥3 帧满幅 NV12 | **卡死** | 要 `/tmp/pix.nv12` **≥3×7593696**，UV~128，`viol≠19`，`g_serial` >30s | 不准切 Viewfinder 离 `DebayerCpu` |
+| ③ | IFE PIX ≥3 帧 Display Full NV12 | **卡死** | 要 `/tmp/pix.nv12` **≥3×4593600**（2320×1320），UV~128，`viol≠19`，`g_serial` >30s | 不准切 Viewfinder 离 `DebayerCpu`；禁止再灌 identity 2592 混合第一表 / 未测 `0x7e60` |
 | ④ | 预览吃 IFE NV12 | **未做** | Snapshot / PipeWire 打开 `msm_vfe1_video3`，不再 STREAMON RDI+CPU | 禁止双路 loopback + PIX 同时 STREAMON（EBUSY） |
 | ⑤ | 几何 / 3A / 饱和度 | **未做** | 全 FOV 2320×1320（CamX Display Full 2304×1296 垫齐），不是 1920 中心裁 | 后置饱和度 `#366` 不是本刀；Linux 不搬 IPE（Image Processing Engine，图像处理引擎） |
 
-③ 的现况：identity **0 字节**。`#420` Demux `0x3058` 第一表已粘仍静默。下一刀 `#421` 只改 DS411 C `0x5504` identity `{0x79f,0xa1f}`。禁止再扩 640 dest。禁止只改 WM 成 2592。禁止 WM 640。禁止 Dual-IFE `COMP_CFG`。禁止 `0x04df04df`。禁止抄 `0x5d04` 488×648。禁止再写 H_SIZE dest `0x090f0a1f`。禁止再写 H_PHASE `0xc047b058`。禁止写非 0 `IMAGE_CFG_1`。禁止把 `0xc081999a` 打进 MNDS `0x4c60`。禁止刷 `53dcc70`。
+③ 的现况：`#488`/`#498` Display Full 线性 2320×1320 已写出 **4591616**（差 chroma 1984），UV（chroma，色度） avg 128.0，`viol=0`，无 PIXEL PIPE OVERFLOW。安卓 Camera ID 1 活流 `RealTimeFeatureZSLPreviewRaw` 是 IFE（Image Front End，图像前端）→ UBWC（Universal Bandwidth Compression，高通带宽压缩）2592 → IPE（Image Processing Engine，图像处理引擎），不是 Linux CAMSS（Camera Subsystem，相机子系统）产品口。`#412`–`#462` identity 混合第一表证伪为 AXI（Advanced eXtensible Interface，高级可扩展接口） 0 字节。`#465` MNDS（MN Down Scaler，M/N 下采样器） Y H_PHASE `0xc023d82c` 同样 0 字节，已撤回。`#466` MNDS（MN Down Scaler，M/N 下采样器） Y H_STRIPE `0x090f0000`、`#467` MNDS（MN Down Scaler，M/N 下采样器） Y V_PHASE `0x0011d7a9`、`#468` Crop Y V_PHASE `0xc023d909`、`#469` Crop Y V_STRIPE `0x02df0000`、`#470` Crop C V_STRIPE `0x016f0000`、`#471` Crop C V_PHASE `0xc047b212`、`#472` Crop C V_SIZE `0x016f0000`、`#473` Crop Y V_SIZE `0x02df0000` 粘住仍 4591616，**不是**缺口。禁止刷未测 `#463` `0x7e60`。禁止再扩 640 dest。禁止只改 WM（Write Master，AXI 写通道）成 2592。禁止 Dual-IFE `COMP_CFG`。禁止把 `0xc081999a` 打进 MNDS（MN Down Scaler，M/N 下采样器） `0x4c60`。禁止抄 UBWC（Universal Bandwidth Compression，高通带宽压缩） stride 3584。禁止 `0x2e58` EN。禁止刷 `53dcc70`。禁止再写 MNDS（MN Down Scaler，M/N 下采样器） Y H_PHASE `0xc023d82c`。禁止再拿 MNDS（MN Down Scaler，M/N 下采样器） Y H_STRIPE / Y V_PHASE / Crop Y V_PHASE / Crop Y V_STRIPE / Crop C V_STRIPE / Crop C V_PHASE / Crop C V_SIZE / Crop Y V_SIZE 当缺口。禁止把 `0xc047b212` 写回 MNDS（MN Down Scaler，M/N 下采样器） H_PAD。禁止 identity H_STRIPE `0x0a1f0000`。
 
 验收 ③：
 
 ```bash
 DAGU_IFE_PIX=front linux-mainline/scripts/dagu-ife-pix-test.sh
-# 板上 /tmp/pix.nv12 须 ≥3×7593696，dmesg 无 OVERFLOW、viol 不是 19
+# 板上 /tmp/pix.nv12 须 ≥3×4593600，dmesg 无 OVERFLOW、viol 不是 19
 ```
 
 ## 3. 本阶段不做

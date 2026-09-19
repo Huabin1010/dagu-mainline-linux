@@ -1,0 +1,44 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Battery
+ClassGuid   = {72631e54-78a4-11d0-bcf7-00aa00b7b32a}
+Provider    = %Mfg%
+DriverVer   = 09/19/2026,1.0.0.0
+CatalogFile = dual-fg.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Dfg_Inst, ACPI\ACPI0003
+
+[Dfg_Inst.NT]
+CopyFiles = Dfg_Copy
+
+[Dfg_Inst.NT.Services]
+AddService = dagu_dual_fg, 0x00000002, Dfg_Service
+
+[Dfg_Service]
+DisplayName    = %Desc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %13%\dual-fg.sys
+
+[Dfg_Copy]
+dual-fg.sys
+
+[DestinationDirs]
+Dfg_Copy = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+dual-fg.sys = 1
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu dual BQ27Z561 BMS"
+Disk = "dagu dual-fg"

@@ -1,0 +1,46 @@
+; Kinetic KTZ8866 x2. ACPI\KTZ8866. Monitor brightness IOCTL later.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Display
+ClassGuid   = {4d36e968-e325-11ce-bfc1-08002be10318}
+Provider    = %Mfg%
+DriverVer   = 09/19/2026,1.0.0.0
+CatalogFile = ktz8866.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Ktz_Inst, ACPI\KTZ8866
+
+[Ktz_Inst.NT]
+CopyFiles = Ktz_Copy
+
+[Ktz_Inst.NT.Services]
+AddService = dagu_ktz8866, 0x00000002, Ktz_Service
+
+[Ktz_Service]
+DisplayName    = %Desc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %13%\ktz8866.sys
+
+[Ktz_Copy]
+ktz8866.sys
+
+[DestinationDirs]
+Ktz_Copy = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+ktz8866.sys = 1
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu KTZ8866 backlight"
+Disk = "dagu KTZ8866"

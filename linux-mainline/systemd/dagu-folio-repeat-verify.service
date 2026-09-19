@@ -1,0 +1,12 @@
+[Unit]
+Description=dagu folio evdev hold-repeat verdict
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/dagu-folio-repeat-verify.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

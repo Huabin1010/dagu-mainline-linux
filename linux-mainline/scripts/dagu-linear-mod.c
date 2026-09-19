@@ -1,11 +1,14 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <link.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -306,9 +309,27 @@ static int is_window_rgba(uint32_t format)
 	       format == GBM_FORMAT_ABGR8888 || format == GBM_FORMAT_XBGR8888;
 }
 
+static int linear_window_env(void)
+{
+	static int cached = -1;
+	const char *e;
+
+	if (cached >= 0)
+		return cached;
+	e = getenv("DAGU_LINEAR_WINDOW");
+	cached = (e && e[0] == '1') ? 1 : 0;
+	return cached;
+}
+
 /*
  * Only the Wayland window (near-scanout AR24/XR24) is forced LINEAR.
  * R8 glyph atlases and UI icon atlases (<=1024²) stay TILE/UBWC.
+ *
+ * DAGU_LINEAR_WINDOW=1: this process is a small exported wl_buffer
+ * (zenity / Adwaita card, both sides <=512). a6xx A2D has no window
+ * offset, so the last GMEM bin of a QCOM_COMPRESSED dest destiles.
+ * Honest LINEAR + dagu-mesa event-store is the hardware path. Never
+ * set this in gnome-shell.
  */
 static int should_force_linear(uint32_t width, uint32_t height,
 			       uint32_t format, uint32_t flags)
@@ -316,6 +337,8 @@ static int should_force_linear(uint32_t width, uint32_t height,
 	(void)flags;
 	if (format == GBM_FORMAT_R8)
 		return 0;
+	if (linear_window_env() && is_window_rgba(format))
+		return 1;
 	/* Atlas / icon FBO: both sides <=1024. A 1819x89 tab strip is
 	 * exported to Wayland as LINEAR — must stay LINEAR pixels.
 	 */
@@ -434,14 +457,26 @@ static EGLBoolean dagu_eglQueryDmaBufModifiersEXT(EGLDisplay dpy, EGLint format,
 					     external_only, &n);
 	if (!ok)
 		return ok;
-	/* Do not collapse to LINEAR-only. That made ANGLE create every
-	 * icon/atlas as LINEAR-only; a650 then destiled those 25x25
-	 * BOs into 1-bit bricks. Window pixels stay LINEAR via GBM.
+	/* DAGU_LINEAR_WINDOW: GTK/EGL WSI never calls libgbm. Collapse
+	 * the advertised list so Mesa allocates honest LINEAR pixels
+	 * and tags wayland LINEAR. Chrome must not set this env — that
+	 * is the 1-bit atlas brick.
 	 */
+	if (linear_window_env()) {
+		if (modifiers && max > 0)
+			modifiers[0] = DRM_FORMAT_MOD_LINEAR;
+		if (external_only && max > 0)
+			external_only[0] = 0;
+		n = 1;
+		dlog("mesa eglQueryDmaBufModifiersEXT LINEAR-only",
+		     (uint32_t)format, (uint32_t)n, (unsigned)n, 1u, 0);
+	} else {
+		dlog("mesa eglQueryDmaBufModifiersEXT passthrough",
+		     (uint32_t)format, (uint32_t)n, (unsigned)n, (unsigned)n,
+		     0);
+	}
 	if (count)
 		*count = n;
-	dlog("mesa eglQueryDmaBufModifiersEXT passthrough", (uint32_t)format,
-	     (uint32_t)n, (unsigned)n, (unsigned)n, 0);
 	return ok;
 }
 
@@ -798,6 +833,179 @@ int gbm_bo_get_fd_for_plane(struct gbm_bo *bo, int plane)
 	return fd;
 }
 
+/*
+ * GTK4 / Mesa EGL Wayland WSI picks QCOM_TILED3 from dmabuf feedback,
+ * not from libgbm. When DAGU_LINEAR_WINDOW=1, rewrite the format table
+ * and modifier events to LINEAR so allocation and the wayland tag match.
+ */
+struct dagu_wl_wrap {
+	void (**orig)(void);
+	void *data;
+	void *impl_copy[8];
+};
+
+static int (*real_wl_proxy_add_listener)(void *proxy, void (**impl)(void),
+					 void *data);
+static const char *(*real_wl_proxy_get_class)(void *proxy);
+
+static void *real_wayland(const char *name)
+{
+	static void *lib;
+
+	if (!real_dlsym)
+		dagu_linear_init();
+	if (!lib) {
+		lib = dlopen("libwayland-client.so.0", RTLD_NOW | RTLD_NOLOAD);
+		if (!lib)
+			lib = dlopen("libwayland-client.so.0", RTLD_NOW);
+	}
+	return (real_dlsym && lib) ? real_dlsym(lib, name) : NULL;
+}
+
+static int format_table_linear_fd(int fd, uint32_t size)
+{
+	unsigned char *src, *dst;
+	int nfd;
+	uint32_t i;
+	uint64_t lin = DRM_FORMAT_MOD_LINEAR;
+
+	if (fd < 0 || size < 16 || size > 1u << 20)
+		return fd;
+	src = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (src == MAP_FAILED)
+		return fd;
+	nfd = memfd_create("dagu-linear-fmt", 0);
+	if (nfd < 0) {
+		munmap(src, size);
+		return fd;
+	}
+	if (ftruncate(nfd, size) != 0) {
+		close(nfd);
+		munmap(src, size);
+		return fd;
+	}
+	dst = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, nfd, 0);
+	if (dst == MAP_FAILED) {
+		close(nfd);
+		munmap(src, size);
+		return fd;
+	}
+	memcpy(dst, src, size);
+	for (i = 0; i + 16 <= size; i += 16)
+		memcpy(dst + i + 8, &lin, 8);
+	munmap(src, size);
+	munmap(dst, size);
+	if (lseek(nfd, 0, SEEK_SET) < 0) {
+		close(nfd);
+		return fd;
+	}
+	close(fd);
+	dlog("feedback format_table -> LINEAR", size, 0, 0, 0, 0);
+	return nfd;
+}
+
+static void wrap_fb_done(void *data, void *feedback)
+{
+	struct dagu_wl_wrap *w = data;
+	typedef void (*fn_t)(void *, void *);
+	fn_t fn = (fn_t)w->orig[0];
+
+	if (fn)
+		fn(w->data, feedback);
+}
+
+static void wrap_fb_format_table(void *data, void *feedback, int32_t fd,
+				 uint32_t size)
+{
+	struct dagu_wl_wrap *w = data;
+	typedef void (*fn_t)(void *, void *, int32_t, uint32_t);
+	fn_t fn = (fn_t)w->orig[1];
+
+	if (fn)
+		fn(w->data, feedback, format_table_linear_fd(fd, size), size);
+}
+
+static void wrap_fb_main_device(void *data, void *feedback, void *device)
+{
+	struct dagu_wl_wrap *w = data;
+	typedef void (*fn_t)(void *, void *, void *);
+	fn_t fn = (fn_t)w->orig[2];
+
+	if (fn)
+		fn(w->data, feedback, device);
+}
+
+static void wrap_fb_tranche_done(void *data, void *feedback)
+{
+	struct dagu_wl_wrap *w = data;
+	typedef void (*fn_t)(void *, void *);
+	fn_t fn = (fn_t)w->orig[3];
+
+	if (fn)
+		fn(w->data, feedback);
+}
+
+static void wrap_fb_tranche_target(void *data, void *feedback, void *device)
+{
+	struct dagu_wl_wrap *w = data;
+	typedef void (*fn_t)(void *, void *, void *);
+	fn_t fn = (fn_t)w->orig[4];
+
+	if (fn)
+		fn(w->data, feedback, device);
+}
+
+static void wrap_fb_tranche_formats(void *data, void *feedback, void *indices)
+{
+	struct dagu_wl_wrap *w = data;
+	typedef void (*fn_t)(void *, void *, void *);
+	fn_t fn = (fn_t)w->orig[5];
+
+	if (fn)
+		fn(w->data, feedback, indices);
+}
+
+static void wrap_fb_tranche_flags(void *data, void *feedback, uint32_t flags)
+{
+	struct dagu_wl_wrap *w = data;
+	typedef void (*fn_t)(void *, void *, uint32_t);
+	fn_t fn = (fn_t)w->orig[6];
+
+	if (fn)
+		fn(w->data, feedback, flags);
+}
+
+int wl_proxy_add_listener(void *proxy, void (**impl)(void), void *data)
+{
+	struct dagu_wl_wrap *w;
+	const char *cls;
+
+	if (!real_wl_proxy_add_listener)
+		real_wl_proxy_add_listener = real_wayland("wl_proxy_add_listener");
+	if (!real_wl_proxy_get_class)
+		real_wl_proxy_get_class = real_wayland("wl_proxy_get_class");
+	if (!real_wl_proxy_add_listener)
+		return -1;
+	if (!linear_window_env() || !impl || !real_wl_proxy_get_class)
+		return real_wl_proxy_add_listener(proxy, impl, data);
+	cls = real_wl_proxy_get_class(proxy);
+	if (!cls || strcmp(cls, "zwp_linux_dmabuf_feedback_v1") != 0)
+		return real_wl_proxy_add_listener(proxy, impl, data);
+	w = calloc(1, sizeof(*w));
+	if (!w)
+		return real_wl_proxy_add_listener(proxy, impl, data);
+	w->orig = impl;
+	w->data = data;
+	w->impl_copy[0] = (void *)wrap_fb_done;
+	w->impl_copy[1] = (void *)wrap_fb_format_table;
+	w->impl_copy[2] = (void *)wrap_fb_main_device;
+	w->impl_copy[3] = (void *)wrap_fb_tranche_done;
+	w->impl_copy[4] = (void *)wrap_fb_tranche_target;
+	w->impl_copy[5] = (void *)wrap_fb_tranche_formats;
+	w->impl_copy[6] = (void *)wrap_fb_tranche_flags;
+	return real_wl_proxy_add_listener(proxy, (void (**)(void))w->impl_copy, w);
+}
+
 void gbm_bo_destroy(struct gbm_bo *bo)
 {
 	typedef void (*fn_t)(struct gbm_bo *);
@@ -859,6 +1067,8 @@ void *dlsym(void *handle, const char *symbol)
 		return (void *)unsetenv;
 	if (!strcmp(symbol, "putenv"))
 		return (void *)putenv;
+	if (!strcmp(symbol, "wl_proxy_add_listener"))
+		return (void *)wl_proxy_add_listener;
 	if (!real_dlsym)
 		dagu_linear_init();
 	sym = real_dlsym ? real_dlsym(handle, symbol) : NULL;

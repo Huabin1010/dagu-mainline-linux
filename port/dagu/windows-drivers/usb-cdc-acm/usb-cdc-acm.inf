@@ -1,0 +1,44 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = USB
+ClassGuid   = {36fc9e60-c465-11cf-8056-444553540000}
+Provider    = %Mfg%
+DriverVer   = 09/19/2026,1.0.0.0
+CatalogFile = usb-cdc-acm.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Acm_Inst, ACPI\QCOM24CC
+
+[Acm_Inst.NT]
+CopyFiles = Acm_Copy
+
+[Acm_Inst.NT.Services]
+AddService = dagu_cdc_acm, 0x00000002, Acm_Service
+
+[Acm_Service]
+DisplayName    = %Desc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %13%\usb-cdc-acm.sys
+
+[Acm_Copy]
+usb-cdc-acm.sys
+
+[DestinationDirs]
+Acm_Copy = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+usb-cdc-acm.sys = 1
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu USB CDC-ACM console (UsbFn, 0525:a4a7)"
+Disk = "dagu USB CDC-ACM"

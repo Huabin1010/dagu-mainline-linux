@@ -138,11 +138,42 @@ bt_main_set TemporaryTimeout 180
 bt_main_set JustWorksRepairing always
 bt_main_set Privacy off
 bt_main_set PairableTimeout 0
+# GNOME setup-mode writes Pairable=no when the user clicks Connect, then
+# Pair/Connect. AlwaysPairable keeps outgoing/incoming pairing alive.
+# hid-host still restores bondable/PSCAN after QCA HCI reset (0x03).
+bt_main_set AlwaysPairable true
 bt_main_set MinConnectionInterval 24
 bt_main_set MaxConnectionInterval 40
+# Device-initiated classic HID (K380 ReconnectMode=device): GNOME
+# Device1.Connect must wait for the keypress page. Outgoing page drops
+# PSCAN on QCA6390. Rebuild bluetoothd with dagu-build-bluez-hid.sh
+# (DAGU_PATCH_BLUEZ=1 during image build, or live on the tablet).
+if [ -f /tmp/dagu-bluez-hid/dagu-bluez-hid-wait-incoming.py ]; then
+	install -m 755 /tmp/dagu-bluez-hid/dagu-bluez-hid-wait-incoming.py \
+		/usr/local/sbin/dagu-bluez-hid-wait-incoming.py
+	install -m 755 /tmp/dagu-bluez-hid/dagu-build-bluez-hid.sh \
+		/usr/local/sbin/dagu-build-bluez-hid.sh
+	if [ "${DAGU_PATCH_BLUEZ:-0}" = 1 ]; then
+		DAGU_BLUEZ_BUILD=/usr/local/src/dagu-bluez-hid \
+			/usr/local/sbin/dagu-build-bluez-hid.sh || true
+	fi
+fi
+# GNOME 未设置: unnamed LE rows must Pair immediately; Connect after Pair
+# has 25s (DAGU_PATCH_GNOMEBT=1 during image build, or live on the tablet).
+if [ -f /tmp/dagu-gnome-bt/dagu-gnome-bt-setup-unnamed.py ]; then
+	install -m 755 /tmp/dagu-gnome-bt/dagu-gnome-bt-setup-unnamed.py \
+		/usr/local/sbin/dagu-gnome-bt-setup-unnamed.py
+	install -m 755 /tmp/dagu-gnome-bt/dagu-build-gnome-bt.sh \
+		/usr/local/sbin/dagu-build-gnome-bt.sh
+	if [ "${DAGU_PATCH_GNOMEBT:-0}" = 1 ]; then
+		DAGU_GNOMEBT_BUILD=/usr/local/src/dagu-gnome-bt \
+			/usr/local/sbin/dagu-build-gnome-bt.sh || true
+	fi
+fi
 # Keep HCI_CONNECTABLE / bondable after GNOME closes the bluetooth panel.
 # Forget of the last classic HID device otherwise drops SCAN_PAGE and the
 # next K380 pair attempt is Create Connection with Pairable=no → device gone.
+# Re-run on udev change: QCA setup after Add Device 0x03 is not udev add.
 cat >/usr/local/sbin/dagu-bt-hid-host.sh <<'EOF'
 #!/bin/sh
 set -eu
@@ -164,8 +195,27 @@ cat >/etc/systemd/system/bluetooth.service.d/dagu-hid-host.conf <<'EOF'
 [Service]
 ExecStartPost=/usr/local/sbin/dagu-bt-hid-host.sh
 EOF
+cat >/etc/systemd/system/dagu-bt-hid-host.service <<'EOF'
+[Unit]
+Description=dagu Bluetooth HID host pairable/PSCAN after QCA setup
+After=bluetooth.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-bt-hid-host.sh
+EOF
+cat >/etc/systemd/system/dagu-bt-hid-host.timer <<'EOF'
+[Unit]
+Description=Re-apply dagu Bluetooth HID host after HCI UP race
+[Timer]
+OnBootSec=20
+AccuracySec=1s
+Unit=dagu-bt-hid-host.service
+[Install]
+WantedBy=timers.target
+EOF
+systemctl enable dagu-bt-hid-host.timer >/dev/null 2>&1 || true
 cat >/etc/udev/rules.d/90-dagu-bt-hid-host.rules <<'EOF'
-ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci0", RUN+="/usr/local/sbin/dagu-bt-hid-host.sh"
+ACTION!="remove", SUBSYSTEM=="bluetooth", KERNEL=="hci[0-9]*", RUN+="/usr/local/sbin/dagu-bt-hid-host.sh"
 EOF
 
 
@@ -508,6 +558,71 @@ EOF
 ln -sf /etc/systemd/system/dagu-fcitx5-shift-tap.service \
 	/etc/systemd/system/multi-user.target.wants/dagu-fcitx5-shift-tap.service
 systemctl enable dagu-fcitx5-shift-tap.service >/dev/null 2>&1 || true
+
+# Folio hold-repeat verdict: evdev KEY stays down ≥500ms and two-key handoff.
+# Does not grab the device. JSON at /tmp/folio-repeat-verify.json.
+if [ -f /usr/local/sbin/dagu-folio-repeat-verify.py ]; then
+	cat >/etc/systemd/system/dagu-folio-repeat-verify.service <<'EOF'
+[Unit]
+Description=dagu folio evdev hold-repeat verdict
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/dagu-folio-repeat-verify.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	ln -sf /etc/systemd/system/dagu-folio-repeat-verify.service \
+		/etc/systemd/system/multi-user.target.wants/dagu-folio-repeat-verify.service
+	systemctl enable dagu-folio-repeat-verify.service >/dev/null 2>&1 || true
+fi
+
+if [ -f /usr/local/sbin/folio-hold-live.py ]; then
+	cat >/etc/systemd/system/dagu-folio-hold-live.service <<'EOF'
+[Unit]
+Description=dagu folio evdev hold logger
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/folio-hold-live.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	ln -sf /etc/systemd/system/dagu-folio-hold-live.service \
+		/etc/systemd/system/multi-user.target.wants/dagu-folio-hold-live.service
+	systemctl enable dagu-folio-hold-live.service >/dev/null 2>&1 || true
+fi
+
+# mutter 50.1: only the repeating key's release clears compositor EV_REP.
+# Stock 50.1 cancels on any release (GNOME #4675). Keep the patched so.
+if [ -x /usr/local/sbin/dagu-mutter-repeat-keep.sh ]; then
+	cat >/etc/systemd/system/dagu-mutter-repeat-keep.service <<'EOF'
+[Unit]
+Description=dagu mutter 50.1 keep compositor hold-repeat
+DefaultDependencies=no
+After=local-fs.target
+Before=gdm.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-mutter-repeat-keep.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	ln -sf /etc/systemd/system/dagu-mutter-repeat-keep.service \
+		/etc/systemd/system/multi-user.target.wants/dagu-mutter-repeat-keep.service
+	systemctl enable dagu-mutter-repeat-keep.service >/dev/null 2>&1 || true
+	/usr/local/sbin/dagu-mutter-repeat-keep.sh || true
+fi
 
 # Mineradio is Electron + Three.js WebGL + CSS backdrop-filter. Same Ozone
 # / LINEAR / grayscale-DPR contract as Chrome. Never notile (WebGL hang).
@@ -1190,7 +1305,10 @@ ubuntu-lock-on-suspend=false
 [org/gnome/settings-daemon/plugins/power]
 sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
-power-button-action='nothing'
+power-button-action='suspend'
+lid-close-ac-action='suspend'
+lid-close-battery-action='suspend'
+lid-close-suspend-with-external-monitor=true
 idle-dim=false
 ambient-enabled=false
 
@@ -1204,6 +1322,31 @@ cat >/etc/dconf/db/local.d/locks/dagu-brightness <<'EOF'
 /org/gnome/settings-daemon/plugins/power/idle-dim
 /org/gnome/settings-daemon/plugins/power/ambient-enabled
 /org/gnome/desktop/session/idle-delay
+EOF
+cat >/etc/dconf/db/local.d/00-dagu-power <<'EOF'
+[org/gnome/settings-daemon/plugins/power]
+power-button-action='suspend'
+lid-close-ac-action='suspend'
+lid-close-battery-action='suspend'
+lid-close-suspend-with-external-monitor=true
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='nothing'
+idle-dim=false
+ambient-enabled=false
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+ubuntu-lock-on-suspend=false
+EOF
+cat >/etc/dconf/db/local.d/locks/dagu-power <<'EOF'
+/org/gnome/settings-daemon/plugins/power/power-button-action
+/org/gnome/settings-daemon/plugins/power/lid-close-ac-action
+/org/gnome/settings-daemon/plugins/power/lid-close-battery-action
+/org/gnome/settings-daemon/plugins/power/lid-close-suspend-with-external-monitor
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-type
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-type
+/org/gnome/desktop/screensaver/lock-enabled
+/org/gnome/desktop/screensaver/ubuntu-lock-on-suspend
 EOF
 dconf update 2>/dev/null || true
 mkdir -p /etc/fonts/conf.d
@@ -1219,51 +1362,36 @@ cat >/etc/fonts/conf.d/99-dagu-gray-fonts.conf <<'EOF'
 </fontconfig>
 EOF
 
-# Short power key: logind lock is a no-op when already locked, so the
-# tablet cannot unblank. Ignore the key here; dagu-power-button toggles.
+# GPIO110 hall is SW_LID. Folio close and short KEY_POWER are s2idle.
+# Panel disable/unprepare are no-ops (no GPIO139 HWEN drop, no DCS 0x51).
+# Do not grab the pwrkey. Do not ship a power card.
 mkdir -p /etc/systemd/logind.conf.d /etc/xdg/autostart /usr/local/bin /usr/local/sbin
 cat >/etc/systemd/logind.conf.d/dagu-power.conf <<'EOF'
 [Login]
-HandlePowerKey=ignore
-HandlePowerKeyLongPress=poweroff
-HandleSuspendKey=ignore
+HandlePowerKey=suspend
+HandlePowerKeyLongPress=ignore
+HandleSuspendKey=suspend
 HandleHibernateKey=ignore
+HandleLidSwitch=suspend
+HandleLidSwitchExternalPower=suspend
+HandleLidSwitchDocked=suspend
+LidSwitchIgnoreInhibited=yes
+HoldoffTimeoutSec=2s
 IdleAction=ignore
 EOF
-systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
+systemctl unmask sleep.target suspend.target >/dev/null 2>&1 || true
+systemctl mask hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
 systemctl unmask systemd-backlight@backlight:l81a-wled.service >/dev/null 2>&1 || true
-# Short power key: C daemon toggles Mutter PowerSaveMode (DCS 0x51 times out).
-# Hall SW_TABLET_MODE is gpio-keys in DT — do not inject from userspace.
-is_elf /usr/local/sbin/dagu-power-button || {
-	echo "rootfs-desktop-setup: missing dagu-power-button" >&2
-	exit 1
-}
-cat >/etc/systemd/system/dagu-power-button.service <<'EOF'
-[Unit]
-Description=dagu power key toggles mutter DPMS
-After=systemd-logind.service
-Wants=systemd-logind.service
-
-[Service]
-Type=simple
-User=dagu
-Group=dagu
-SupplementaryGroups=input
-Environment=XDG_RUNTIME_DIR=/run/user/1001
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus
-ExecStart=/usr/local/sbin/dagu-power-button
-Restart=always
-RestartSec=1
-
-[Install]
-WantedBy=multi-user.target
-EOF
-ln -sf /etc/systemd/system/dagu-power-button.service \
-	/etc/systemd/system/multi-user.target.wants/dagu-power-button.service
-rm -f /usr/local/sbin/dagu-power-button.py \
+# Hall SW_LID / SW_TABLET_MODE are gpio-keys in DT — do not inject.
+rm -f /usr/local/sbin/dagu-power-menu \
+	/usr/share/applications/org.dagu.PowerMenu.desktop \
+	/usr/local/sbin/dagu-power-button.py \
 	/usr/local/sbin/dagu-tablet-mode.py \
 	/etc/systemd/system/dagu-tablet-mode.service \
-	/etc/systemd/system/multi-user.target.wants/dagu-tablet-mode.service
+	/etc/systemd/system/multi-user.target.wants/dagu-tablet-mode.service \
+	/etc/systemd/system/dagu-power-button.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-power-button.service
+systemctl disable --now dagu-power-button.service >/dev/null 2>&1 || true
 cat >/usr/local/bin/dagu-blank-on-lock <<'EOF'
 #!/bin/sh
 # Intentionally empty: writing l81a-wled (DCS 0x51) ETIMEDOUTs and racing
@@ -1336,6 +1464,59 @@ ExecStart=-/usr/sbin/agetty -L --noreset --noclear --keep-baud 115200,57600,3840
 EOF
 systemctl enable ssh.service || true
 systemctl enable NetworkManager.service || true
+# QCA6390 stays associated across s2idle (ath11k wowlan + NM).
+# Folio open is gpio-keys GPIO110 wakeup; unlock on resume.
+mkdir -p /etc/NetworkManager/conf.d /etc/udev/rules.d \
+	/usr/lib/systemd/system-sleep /usr/local/sbin
+cat >/etc/NetworkManager/conf.d/20-dagu-wifi-wowlan.conf <<'EOF'
+[connection]
+wifi.wake-on-wlan=disconnect,magic,gtk-rekey-failure
+EOF
+cat >/etc/udev/rules.d/70-dagu-wifi-wakeup.rules <<'EOF'
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x17cb", ATTR{device}=="0x1101", ATTR{power/wakeup}="enabled"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x17cb", ATTR{device}=="0x010b", ATTR{power/wakeup}="enabled"
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlp1s0", ATTR{device/power/wakeup}="enabled"
+EOF
+cat >/usr/lib/systemd/system-sleep/dagu-folio-resume <<'EOF'
+#!/bin/sh
+[ "${1-}" = post ] || exit 0
+loginctl unlock-sessions >/dev/null 2>&1 || true
+EOF
+chmod 755 /usr/lib/systemd/system-sleep/dagu-folio-resume
+cat >/usr/local/sbin/dagu-wifi-wowlan-apply <<'EOF'
+#!/bin/sh
+set -eu
+WOW='disconnect,magic,gtk-rekey-failure'
+for pci in /sys/bus/pci/devices/*; do
+	[ -f "$pci/vendor" ] || continue
+	v=$(cat "$pci/vendor")
+	id=$(cat "$pci/device")
+	if [ "$v" = "0x17cb" ] && { [ "$id" = "0x1101" ] || [ "$id" = "0x010b" ]; }; then
+		echo enabled >"$pci/power/wakeup" 2>/dev/null || true
+	fi
+done
+if [ -f /sys/class/net/wlp1s0/device/power/wakeup ]; then
+	echo enabled >/sys/class/net/wlp1s0/device/power/wakeup
+fi
+command -v nmcli >/dev/null 2>&1 || exit 0
+nmcli -t -f UUID,TYPE connection show | while IFS=: read -r uuid type; do
+	[ "$type" = "802-11-wireless" ] || continue
+	cur=$(nmcli -g 802-11-wireless.wake-on-wlan connection show "$uuid" 2>/dev/null || true)
+	case $cur in
+	*disconnect*) ;;
+	*)
+		nmcli connection modify "$uuid" \
+			802-11-wireless.wake-on-wlan "$WOW" || true
+		;;
+	esac
+done
+if command -v iw >/dev/null 2>&1 && [ -d /sys/class/ieee80211/phy0 ]; then
+	iw phy phy0 wowlan enable disconnect magic-packet gtk-rekey-failure \
+		>/dev/null 2>&1 || true
+fi
+EOF
+chmod 755 /usr/local/sbin/dagu-wifi-wowlan-apply
+/usr/local/sbin/dagu-wifi-wowlan-apply || true
 
 mkdir -p /usr/local/sbin /etc/systemd/system /etc/systemd/system/multi-user.target.wants
 cat >/usr/local/sbin/dagu-resize-root.sh <<'EOF'
@@ -1434,6 +1615,9 @@ EOF
 cat >/etc/udev/rules.d/90-dagu-nanosic-keyboard.rules <<'EOF'
 ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
   ATTRS{id/bustype}=="0018", ATTRS{id/vendor}=="15d9", ENV{ID_BUS}="i2c"
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{name}=="xiaomi keyboard WakeUp", \
+  ENV{ID_INPUT}="0", ENV{ID_INPUT_KEY}="0", ENV{LIBINPUT_IGNORE_DEVICE}="1"
 EOF
 
 # Speakers: ACP has no analog-stereo path for Q6 TDM, so PipeWire stayed
@@ -1834,6 +2018,43 @@ monitor.v4l2.rules = [
   }
 ]
 EOF
+# Chrome getUserMedia on Wayland uses portal Camera.AccessCamera.
+# Snapshot already had devices/camera=yes; Chromium/Chrome did not.
+cat >/usr/local/sbin/dagu-camera-portal-perm.py <<'EOF'
+#!/usr/bin/env python3
+import sys
+try:
+    import dbus
+except ImportError as e:
+    raise SystemExit(f"need python3-dbus: {e}")
+APPS = (
+    "",
+    "org.gnome.Snapshot",
+    "org.chromium.Chromium",
+    "org.chromium.Chromium.desktop",
+    "google-chrome",
+    "com.google.Chrome",
+    "chromium",
+)
+bus = dbus.SessionBus()
+store = bus.get_object(
+    "org.freedesktop.impl.portal.PermissionStore",
+    "/org/freedesktop/impl/portal/PermissionStore",
+)
+iface = dbus.Interface(store, "org.freedesktop.impl.portal.PermissionStore")
+for app in APPS:
+    iface.SetPermission("devices", True, "camera", app, ["yes"])
+EOF
+chmod 755 /usr/local/sbin/dagu-camera-portal-perm.py
+mkdir -p /etc/xdg/autostart
+cat >/etc/xdg/autostart/dagu-camera-portal-perm.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=dagu camera portal permission
+Exec=/usr/local/sbin/dagu-camera-portal-perm.py
+X-GNOME-Autostart-Phase=Application
+NoDisplay=true
+EOF
 # SIGKILL/WP-only restart leaves CSIPHY→CSID enabled; next match is EBUSY
 # and Snapshot shows No Camera Found. Reset mutable links before PW/WP.
 cat >/usr/local/sbin/dagu-camss-graph-reset.sh <<'EOF'
@@ -1957,8 +2178,8 @@ cat >/etc/dconf/db/local.d/locks/dagu-brightness <<'EOF'
 EOF
 dconf update 2>/dev/null || true
 cat >/etc/udev/rules.d/90-dagu-v4l2loopback.rules <<'EOF'
-SUBSYSTEM=="video4linux", ATTR{name}=="dagu-front", GROUP="video", MODE="0660"
-SUBSYSTEM=="video4linux", ATTR{name}=="dagu-rear", GROUP="video", MODE="0660"
+SUBSYSTEM=="video4linux", ATTR{name}=="dagu-front", GROUP="video", MODE="0660", ENV{ID_V4L_CAPABILITIES}=":capture:"
+SUBSYSTEM=="video4linux", ATTR{name}=="dagu-rear", GROUP="video", MODE="0660", ENV{ID_V4L_CAPABILITIES}=":capture:"
 SUBSYSTEM=="video4linux", ATTR{name}=="msm_vfe*", GROUP="root", MODE="0600", TAG-="uaccess"
 EOF
 # RustDesk 1.4.9 single-display uinput uses DRM physical 1600x2560. Daily
@@ -2075,10 +2296,10 @@ cat >/etc/udev/rules.d/90-dagu-rustdesk-uinput.rules <<'EOF'
 ACTION=="add", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="mouce-library-fake-mouse", IMPORT{program}="/usr/local/sbin/dagu-rustdesk-uinput-abs /dev/input/%k"
 EOF
 cat >/etc/modprobe.d/v4l2loopback.conf <<'EOF'
-# exclusive_caps=0: on-demand producer starts after the V4L2 client opens.
-# PipeWire lists video20/21. spa-libcamera is disabled.
+# exclusive_caps=1: Chrome V4L2 skips Capture+Output nodes.
+# Watch stamps YUYV 1280x720 so capture is listed before SoftISP STREAMON.
 # max_buffers=8: xcast/webrtc REQBUFS(4). Default 2 → meeting preview black.
-options v4l2loopback devices=2 video_nr=20,21 exclusive_caps=0 max_buffers=8 card_label=dagu-front,dagu-rear
+options v4l2loopback devices=2 video_nr=20,21 exclusive_caps=1,1 max_buffers=8 card_label=dagu-front,dagu-rear
 EOF
 echo v4l2loopback >/etc/modules-load.d/dagu-v4l2loopback.conf
 # Product camera path is the Rust+C++ ELF. Do not cat the lab .sh here.

@@ -1,0 +1,5 @@
+# QCA6390 PME must reach the CPU so ath11k wowlan can keep
+# the association instead of a full MHI power-off.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x17cb", ATTR{device}=="0x1101", ATTR{power/wakeup}="enabled"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x17cb", ATTR{device}=="0x010b", ATTR{power/wakeup}="enabled"
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlp1s0", ATTR{device/power/wakeup}="enabled"

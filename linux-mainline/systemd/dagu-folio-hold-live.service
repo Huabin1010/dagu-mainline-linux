@@ -1,0 +1,12 @@
+[Unit]
+Description=dagu folio evdev hold logger
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/folio-hold-live.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

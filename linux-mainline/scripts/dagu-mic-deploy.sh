@@ -21,7 +21,7 @@ copy_ssh() {
 		/usr/share/alsa/ucm2/conf.d/sm8250 \
 		/usr/share/alsa/ucm2/conf.d/snd-sm8250 \
 		/etc/wireplumber/wireplumber.conf.d \
-		/usr/local/sbin'
+		/usr/local/sbin /usr/local/bin /usr/share/applications'
 	"${SCP[@]}" \
 		"$ROOT/alsa/ucm2/Xiaomi-dagu/HiFi.conf" \
 		"root@$HOST:/usr/share/alsa/ucm2/Xiaomi-dagu/HiFi.conf"
@@ -45,19 +45,33 @@ copy_ssh() {
 	"${SCP[@]}" \
 		"$ROOT/alsa/50-dagu-bt-offload.conf" \
 		"root@$HOST:/etc/wireplumber/wireplumber.conf.d/50-dagu-bt-offload.conf"
+	"${SCP[@]}" \
+		"$ROOT/scripts/dagu-mic-test.py" \
+		"root@$HOST:/usr/local/bin/dagu-mic-test"
+	"${SCP[@]}" \
+		"$ROOT/alsa/org.dagu.MicTest.desktop" \
+		"root@$HOST:/usr/share/applications/org.dagu.MicTest.desktop"
 	"${SSH[@]}" 'set -e
 		chmod 755 /usr/local/sbin/dagu-mic-route.sh \
 			/usr/local/sbin/dagu-speaker-route.sh \
 			/usr/local/sbin/dagu-audio-up.sh \
 			/usr/local/sbin/dagu-va-route.sh \
 			/usr/local/sbin/dagu-bt-a2dp-route.sh \
-			/usr/local/sbin/dagu-adsp-voice-test.sh
+			/usr/local/sbin/dagu-adsp-voice-test.sh \
+			/usr/local/bin/dagu-mic-test
+		update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 		alsaucm -c hw:0 reload 2>/dev/null || true
 		/usr/local/sbin/dagu-mic-route.sh || true
 		if [ -d /run/user/1001 ]; then
 			sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 \
 				DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \
-				systemctl --user try-restart wireplumber.service || true
+				systemctl --user try-restart \
+					pipewire.service pipewire-pulse.service \
+					wireplumber.service || true
+			sleep 4
+			sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 \
+				DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \
+				/usr/local/sbin/dagu-audio-up.sh || true
 		fi
 		echo DAGU_MIC_DEPLOY_OK
 	'
@@ -86,7 +100,7 @@ copy_serial() {
 		/usr/local/sbin/dagu-adsp-voice-test.sh
 	"${CONSOLE[@]}" put "$ROOT/alsa/50-dagu-bt-offload.conf" \
 		/etc/wireplumber/wireplumber.conf.d/50-dagu-bt-offload.conf
-	"${CONSOLE[@]}" run 'chmod 755 /usr/local/sbin/dagu-mic-route.sh /usr/local/sbin/dagu-speaker-route.sh /usr/local/sbin/dagu-audio-up.sh /usr/local/sbin/dagu-va-route.sh /usr/local/sbin/dagu-bt-a2dp-route.sh /usr/local/sbin/dagu-adsp-voice-test.sh; mkdir -p /usr/share/alsa/ucm2/Xiaomi-dagu /usr/share/alsa/ucm2/conf.d/sm8250 /usr/share/alsa/ucm2/conf.d/snd-sm8250 /etc/wireplumber/wireplumber.conf.d; alsaucm -c hw:0 reload; /usr/local/sbin/dagu-mic-route.sh; if [ -d /run/user/1001 ]; then sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus systemctl --user try-restart wireplumber.service; fi; echo DAGU_MIC_DEPLOY_OK'
+	"${CONSOLE[@]}" run 'chmod 755 /usr/local/sbin/dagu-mic-route.sh /usr/local/sbin/dagu-speaker-route.sh /usr/local/sbin/dagu-audio-up.sh /usr/local/sbin/dagu-va-route.sh /usr/local/sbin/dagu-bt-a2dp-route.sh /usr/local/sbin/dagu-adsp-voice-test.sh; mkdir -p /usr/share/alsa/ucm2/Xiaomi-dagu /usr/share/alsa/ucm2/conf.d/sm8250 /usr/share/alsa/ucm2/conf.d/snd-sm8250 /etc/wireplumber/wireplumber.conf.d; alsaucm -c hw:0 reload; /usr/local/sbin/dagu-mic-route.sh; if [ -d /run/user/1001 ]; then sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus systemctl --user try-restart pipewire.service pipewire-pulse.service wireplumber.service; sleep 4; sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus /usr/local/sbin/dagu-audio-up.sh; fi; echo DAGU_MIC_DEPLOY_OK'
 }
 
 if have_ssh; then

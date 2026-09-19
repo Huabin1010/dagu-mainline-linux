@@ -61,6 +61,25 @@ echo ===arecord===
 arecord -D hw:0,1 -c 1 -r 48000 -f S16_LE -d 2 /tmp/mic.wav || \
   arecord -D plughw:0,1 -c 1 -r 48000 -f S16_LE -d 2 /tmp/mic.wav || true
 ls -l /tmp/mic.wav 2>/dev/null || true
+echo ===pw-mic-source===
+sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 \
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \
+  wpctl status 2>/dev/null | sed -n '/Sources:/,/Filters:/p' || true
+sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 pw-dump 2>/dev/null | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+got=False
+for o in d:
+    p=(o.get("info") or {}).get("props") or {}
+    name=p.get("node.name") or ""
+    if p.get("media.class")=="Audio/Source" and (
+            "HiFi__Mic" in name or name=="dagu-builtin-mic"):
+        print("PASS", name, p.get("node.description"))
+        got=True
+if not got:
+    print("FAIL no PipeWire Audio/Source mic")
+    sys.exit(1)
+' || true
 python3 - <<'PY' || true
 import struct, math, wave
 try:

@@ -1701,71 +1701,10 @@ SectionDevice."Speaker" {
 		# No PlaybackMixerElem: GNOME must not move Digital PCM.
 	}
 }
-
-SectionDevice."Mic" {
-	Comment "Built-in microphone (WCD9385 AMIC5)"
-	EnableSequence [
-		cset "name='MultiMedia2 Mixer TX_CODEC_DMA_TX_3' on"
-		cset "name='TX DEC0 MUX' SWR_MIC"
-		cset "name='TX SMIC MUX0' ADC3"
-		cset "name='TX_AIF1_CAP Mixer DEC0' 1"
-		cset "name='ADC4_MIXER Switch' on"
-		cset "name='ADC4 MUX' INP5"
-		cset "name='ADC4 Switch' on"
-		cset "name='TX3 MODE' ADC_NORMAL"
-		cset "name='ADC4 Volume' 12"
-		cset "name='Fluence AEC NS' AEC_NS"
-	]
-	DisableSequence [
-		cset "name='ADC4 Switch' off"
-		cset "name='ADC4_MIXER Switch' off"
-		cset "name='TX SMIC MUX0' ZERO"
-		cset "name='TX_AIF1_CAP Mixer DEC0' 0"
-		cset "name='TX3 MODE' ADC_INVALID"
-		cset "name='MultiMedia2 Mixer TX_CODEC_DMA_TX_3' off"
-		cset "name='Fluence AEC NS' Off"
-	]
-	Value {
-		CapturePriority 200
-		CapturePCM "hw:${CardId},1"
-		CaptureChannels 1
-		CaptureRate 48000
-		# No CaptureMixerElem: GNOME must not slam ADC4 Volume.
-	}
-}
-
-SectionDevice."VoiceUI" {
-	Comment "ADSP VA macro capture (keyword-spotting frontend, not CPU KWS)"
-	EnableSequence [
-		cset "name='MultiMedia3 Mixer VA_CODEC_DMA_TX_0' on"
-	]
-	DisableSequence [
-		cset "name='MultiMedia3 Mixer VA_CODEC_DMA_TX_0' off"
-	]
-	Value {
-		CapturePriority 100
-		CapturePCM "hw:${CardId},2"
-		CaptureChannels 1
-		CaptureRate 48000
-	}
-}
-
-SectionDevice."Bluetooth" {
-	Comment "Q6 SLIMBUS_7_RX A2DP offload (not HCI SBC on the AP)"
-	EnableSequence [
-		cset "name='SLIMBUS_7_RX Audio Mixer MultiMedia4' on"
-	]
-	DisableSequence [
-		cset "name='SLIMBUS_7_RX Audio Mixer MultiMedia4' off"
-	]
-	Value {
-		PlaybackPriority 150
-		PlaybackPCM "hw:${CardId},3"
-		PlaybackChannels 2
-		PlaybackRate 48000
-		PlaybackFormat "S24_LE"
-	}
-}
+# Mic CapturePCM is not in this verb. ACP probes every UCM device while
+# Speaker PCM is held; Mic hw_params EINVAL drops the whole HiFi profile
+# (Dummy, no speakers, no mic). Capture is MultiMedia2 hw:0,1 published
+# by dagu-audio-up.sh after the card exists.
 EOF
 cat >/usr/local/sbin/dagu-speaker-route.sh <<'EOF'
 #!/bin/sh
@@ -1831,7 +1770,8 @@ CARD="${DAGU_ALSA_CARD:-0}"
 cset() {
 	amixer -c "$CARD" cset "name=$1" "$2" >/dev/null 2>&1 || true
 }
-cset "MultiMedia2 Mixer TX_CODEC_DMA_TX_3" on
+cset "MultiMedia2 Mixer TX_CODEC_DMA_TX_3" off
+cset "MultiMedia3 Mixer TX_CODEC_DMA_TX_3" on
 cset "TX DEC0 MUX" SWR_MIC
 cset "TX SMIC MUX0" ADC3
 cset "TX_AIF1_CAP Mixer DEC0" 1
@@ -1841,7 +1781,7 @@ cset "ADC4 Switch" 1
 cset "TX3 MODE" ADC_NORMAL
 cset "ADC4 Volume" 12
 cset "TX_DEC0 Volume" 84
-cset "Fluence AEC NS" AEC_NS
+cset "Fluence AEC NS" Off
 exit 0
 EOF
 chmod 755 /usr/local/sbin/dagu-mic-route.sh
@@ -1945,12 +1885,17 @@ monitor.alsa.rules = [
   {
     matches = [
       { node.name = "~alsa_input.platform-sound.*" }
+      { node.name = "dagu-builtin-mic" }
     ]
     actions = {
       update-props = {
-        audio.channels = 1
+        audio.channels = 2
         audio.rate = 48000
+        alsa.resolution_bits = 24
+        audio.position = [ FL FR ]
         api.alsa.soft-mixer = true
+        api.alsa.disable-tsched = true
+        session.suspend-timeout-seconds = 0
         node.nick = "Microphone"
         node.description = "Built-in Microphone"
         priority.session = 2000
@@ -2460,9 +2405,13 @@ rm -f /etc/pipewire/pipewire.conf.d/50-dagu-alsa-sink.conf
 install -m755 /usr/local/sbin/dagu-audio-up.sh /usr/local/sbin/dagu-audio-up.sh 2>/dev/null || true
 cat >/usr/local/sbin/dagu-audio-up.sh <<'EOF'
 #!/bin/sh
+# Mic is MultiMedia2 hw:0,1. ACP probes every UCM device while Speaker
+# PCM is held; Mic hw_params EINVAL drops HiFi. HiFi is Speaker-only;
+# this script publishes the capture PCM as a linger PipeWire source.
 set -eu
 CARD="${DAGU_ALSA_CARD:-0}"
 PCM="/dev/snd/pcmC${CARD}D0p"
+MICPCM="/dev/snd/pcmC${CARD}D2c"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1001}"
 export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
 i=0
@@ -2472,6 +2421,7 @@ while [ ! -e "$PCM" ]; do
 	sleep 0.5
 done
 [ -x /usr/local/sbin/dagu-speaker-route.sh ] && /usr/local/sbin/dagu-speaker-route.sh || true
+[ -x /usr/local/sbin/dagu-mic-route.sh ] && /usr/local/sbin/dagu-mic-route.sh || true
 if [ "$(id -u)" -eq 0 ]; then
 	exec sudo -u dagu env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
 		DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
@@ -2482,10 +2432,56 @@ systemctl --user reset-failed pipewire.service pipewire.socket \
 systemctl --user start pipewire.socket pipewire.service \
 	pipewire-pulse.socket pipewire-pulse.service wireplumber.service
 j=0
-while [ "$j" -lt 20 ]; do
+while [ "$j" -lt 28 ]; do
 	wpctl status >/dev/null 2>&1 && break
 	j=$((j + 1)); sleep 0.25
 done
+if wpctl status 2>/dev/null | grep -q 'Dummy Output'; then
+	systemctl --user try-restart \
+		pipewire.service pipewire-pulse.service wireplumber.service \
+		>/dev/null 2>&1 || true
+	k=0
+	while [ "$k" -lt 28 ]; do
+		wpctl status >/dev/null 2>&1 && \
+			! wpctl status 2>/dev/null | grep -q 'Dummy Output' && break
+		k=$((k + 1)); sleep 0.25
+	done
+fi
+mic_listed() {
+	wpctl status 2>/dev/null | awk '
+		$0 ~ /Sources:/{s=1}
+		s && /Filters:/{exit}
+		s && /Streams:/{exit}
+		s && /Video/{exit}
+		s && /Microphone|dagu-builtin-mic/ { found=1 }
+		END { exit found ? 0 : 1 }
+	'
+}
+publish_mic() {
+	if mic_listed; then
+		return 0
+	fi
+	n=0
+	while [ ! -e "$MICPCM" ]; do
+		n=$((n + 1))
+		[ "$n" -gt 20 ] && { echo "dagu-audio-up: no $MICPCM" >&2; return 1; }
+		sleep 0.25
+	done
+	pw-cli create-node adapter "{ factory.name=api.alsa.pcm.source node.name=dagu-builtin-mic node.nick=Microphone node.description=Microphone media.class=Audio/Source api.alsa.path=\"hw:${CARD},2\" audio.rate=48000 audio.channels=2 alsa.resolution_bits=24 object.linger=true priority.session=2000 api.alsa.disable-tsched=true session.suspend-timeout-seconds=0 }" \
+		>/tmp/dagu-mic-pw-node.log 2>&1 || {
+		echo "dagu-audio-up: pw-cli create-node mic failed" >&2
+		cat /tmp/dagu-mic-pw-node.log >&2 || true
+		return 1
+	}
+	m=0
+	while [ "$m" -lt 20 ]; do
+		mic_listed && return 0
+		m=$((m + 1)); sleep 0.25
+	done
+	echo "dagu-audio-up: mic node not in wpctl after create-node" >&2
+	return 1
+}
+publish_mic || true
 id=$(wpctl status 2>/dev/null | awk '
 	$0 ~ /Sinks:/{s=1}
 	s && /Audio\/Source/{exit}
@@ -2496,14 +2492,13 @@ id=$(wpctl status 2>/dev/null | awk '
 ')
 if [ -n "${id:-}" ]; then
 	wpctl set-default "$id" >/dev/null 2>&1 || true
-	# Volume/mute live in WirePlumber default-routes. Do not slam 100%.
 fi
 src=$(wpctl status 2>/dev/null | awk '
 	$0 ~ /Sources:/{s=1}
 	s && /Filters:/{exit}
 	s && /Streams:/{exit}
 	s && /Video/{exit}
-	s && /Microphone|Mic/ {
+	s && /Microphone|dagu-builtin-mic/ {
 		for (i=1;i<=NF;i++)
 			if ($i ~ /^[0-9]+\.?$/) { gsub(/\./,"",$i); print $i; exit }
 	}
@@ -2512,9 +2507,22 @@ if [ -n "${src:-}" ]; then
 	wpctl set-default "$src" >/dev/null 2>&1 || true
 	wpctl set-mute "$src" 0 >/dev/null 2>&1 || true
 fi
+wpctl status 2>/dev/null | sed -n '/Audio/,/Video/p' || true
 exit 0
 EOF
 chmod 755 /usr/local/sbin/dagu-audio-up.sh
+cat >/usr/share/applications/org.dagu.MicTest.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=麦克风测试
+Comment=录音再从喇叭回放，检查内置麦克风
+Exec=/usr/local/bin/dagu-mic-test
+Icon=audio-input-microphone
+Terminal=false
+Categories=AudioVideo;Audio;Utility;
+StartupNotify=true
+EOF
+# python body is linux-mainline/scripts/dagu-mic-test.py — live deploy copies it.
 mkdir -p /etc/systemd/user/pipewire.service.d \
 	/etc/systemd/user/graphical-session.target.wants \
 	/etc/systemd/user/default.target.wants

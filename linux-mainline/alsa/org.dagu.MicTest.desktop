@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=麦克风测试
+Name[en]=Microphone Test
+Comment=录音再从喇叭回放，检查内置麦克风
+Comment[en]=Record the built-in mic and play it on the speakers
+Exec=/usr/local/bin/dagu-mic-test
+Icon=audio-input-microphone
+Terminal=false
+Categories=AudioVideo;Audio;Utility;
+StartupNotify=true
+X-GNOME-UsesNotifications=false

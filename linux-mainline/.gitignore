@@ -26,6 +26,7 @@
 /camera-loopback/*.o
 /camera-loopback/*.a
 /camera-loopback/dagu-camera-loopback
+/camera-loopback/tests/test_app_v4l2
 /userspace/dagu-touch-boost
 /userspace/dagu-power-button
 /userspace/dagu-fcitx5-shift-tap

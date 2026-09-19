@@ -2,9 +2,14 @@
 # Bring desktop audio back after the CS35L41 card exists.
 # Do NOT put hw:0,0 in pipewire context.objects: a missing card makes
 # PipeWire exit 234, systemd hits start-limit, and the session stays silent.
+# Mic is MultiMedia2 hw:0,1. ACP (ALSA Card Profile) probes every UCM
+# device while Speaker PCM is held; Mic hw_params then EINVAL and HiFi
+# is dropped (Dummy, no speakers, no mic). HiFi is Speaker-only; this
+# script publishes the capture PCM as a linger PipeWire source.
 set -eu
 CARD="${DAGU_ALSA_CARD:-0}"
 PCM="/dev/snd/pcmC${CARD}D0p"
+MICPCM="/dev/snd/pcmC${CARD}D2c"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1001}"
 export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
 
@@ -20,6 +25,9 @@ done
 
 if [ -x /usr/local/sbin/dagu-speaker-route.sh ]; then
 	/usr/local/sbin/dagu-speaker-route.sh || true
+fi
+if [ -x /usr/local/sbin/dagu-mic-route.sh ]; then
+	/usr/local/sbin/dagu-mic-route.sh || true
 fi
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -40,7 +48,7 @@ systemctl --user start \
 	wireplumber.service
 
 j=0
-while [ "$j" -lt 20 ]; do
+while [ "$j" -lt 28 ]; do
 	if wpctl status >/dev/null 2>&1; then
 		break
 	fi
@@ -48,7 +56,70 @@ while [ "$j" -lt 20 ]; do
 	sleep 0.25
 done
 
-# No pactl on this rootfs. UCM HiFi appears once PipeWire starts
+# Dummy means ACP rejected HiFi. Restart PW+WP together so Speaker-only
+# HiFi can probe with no leftover SETUP on pcm1c.
+if wpctl status 2>/dev/null | grep -q 'Dummy Output'; then
+	systemctl --user try-restart \
+		pipewire.service pipewire-pulse.service wireplumber.service \
+		>/dev/null 2>&1 || true
+	k=0
+	while [ "$k" -lt 28 ]; do
+		wpctl status >/dev/null 2>&1 && \
+			! wpctl status 2>/dev/null | grep -q 'Dummy Output' && break
+		k=$((k + 1))
+		sleep 0.25
+	done
+fi
+
+mic_listed() {
+	wpctl status 2>/dev/null | awk '
+		$0 ~ /Sources:/{s=1}
+		s && /Filters:/{exit}
+		s && /Streams:/{exit}
+		s && /Video/{exit}
+		s && /Microphone|dagu-builtin-mic/ { found=1 }
+		END { exit found ? 0 : 1 }
+	'
+}
+
+publish_mic() {
+	if mic_listed; then
+		return 0
+	fi
+	n=0
+	while [ ! -e "$MICPCM" ]; do
+		n=$((n + 1))
+		[ "$n" -gt 20 ] && {
+			echo "dagu-audio-up: no $MICPCM" >&2
+			return 1
+		}
+		sleep 0.25
+	done
+	# SPA JSON: commas in hw:0,2 must be quoted. object.linger keeps
+	# the node after pw-cli exits. No audio.format: spa picks the
+	# native 24-bit slot; pinning packed S24_LE silenced Meeting S16.
+	# hw:0,2 is MultiMedia3 — MM2 ASM session leaks on suspend until
+	# the q6asm close() patch is on the running kernel. Never suspend
+	# this node (timeout 0) so OPEN_READ is not issued twice.
+	pw-cli create-node adapter "{ factory.name=api.alsa.pcm.source node.name=dagu-builtin-mic node.nick=Microphone node.description=Microphone media.class=Audio/Source api.alsa.path=\"hw:${CARD},2\" audio.rate=48000 audio.channels=2 alsa.resolution_bits=24 object.linger=true priority.session=2000 api.alsa.disable-tsched=true session.suspend-timeout-seconds=0 }" \
+		>/tmp/dagu-mic-pw-node.log 2>&1 || {
+		echo "dagu-audio-up: pw-cli create-node mic failed" >&2
+		cat /tmp/dagu-mic-pw-node.log >&2 || true
+		return 1
+	}
+	m=0
+	while [ "$m" -lt 20 ]; do
+		mic_listed && return 0
+		m=$((m + 1))
+		sleep 0.25
+	done
+	echo "dagu-audio-up: mic node not in wpctl after create-node" >&2
+	return 1
+}
+
+publish_mic || true
+
+# No pactl on this rootfs. UCM HiFi Speakers appear once PipeWire starts
 # after /dev/snd/pcmC0D0p exists (do not use context.objects).
 id=$(wpctl status 2>/dev/null | awk '
 	$0 ~ /Sinks:/{s=1}
@@ -68,7 +139,7 @@ src=$(wpctl status 2>/dev/null | awk '
 	s && /Filters:/{exit}
 	s && /Streams:/{exit}
 	s && /Video/{exit}
-	s && /Microphone|Mic/ {
+	s && /Microphone|dagu-builtin-mic/ {
 		for (i=1;i<=NF;i++)
 			if ($i ~ /^[0-9]+\.?$/) { gsub(/\./,"",$i); print $i; exit }
 	}

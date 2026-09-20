@@ -1,0 +1,33 @@
+说明：Mineradio CSS backdrop-filter 卡 / 队列抽屉被误判成 Skia 页瓦或「单边超 1024 的图集」。
+
+活 so：/usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so
+备份：同目录 .bak-pre-glass-card（md5 1692b76711bbf09812093d97c0605a3a）
+新 md5：06eb57c64c9aa2bac09066851e2378ac
+仓库副本：linux-mainline/out/libgallium-26.0.8-1ubuntu0.3.so
+单元测试：python3 linux-mainline/tests/test_dagu_glass_layout.py
+
+板上 hunt（修前）：
+  640x384  fbread=0 draws=1 tile=3   歌单卡快照
+  1024x512 fbread=1 draws=3 tile=3   同卡 blur / FB fetch
+ANGLE 按 LINEAR 采 TILE6_3 → 玻璃雪花。
+512x256 / 256x256 已在 glass-not-icon 里走 LINEAR，所以只有「两边都 ≥384 的非方卡」花。
+
+页瓦分类（get_best_layout 调 0x7d1e80）：
+  非方、宽 >383、高 ∈ [384, 1024]、宽 ≤1024 → TILE
+那条带把 640x384 / 1024x512 玻璃和 832x576 页瓦混在一起。
+
+改：高度下限 384 → 576（sub w1,#0x180 → #0x240 @ 0x7d1f28）。
+  832x576 仍 TILE（页瓦）
+  640x384 / 1024x512 落到 linear-ui（两边 ≤1024）→ LINEAR
+  2496x416 玻璃条仍走 [2000,2600]×[300,450] 特例
+
+第二刀（队列抽屉 1536x896 / 1536x256 仍 TILE）：
+get_best_layout 里 linear-ui（0x7d20c0 尾）原先「两边都 ≤1024 才 LINEAR」，
+单边 >1024 掉进 TILE。1536 宽的抽屉正是这条。
+改成：4bpp 默认 LINEAR；仅 long≥2048 且 short≤400 当图集 TILE（3840x360）。
+832x576 仍由页瓦分类（7d1e80）先截走。
+
+不要覆盖发行版 libgallium。不要给 gnome-shell 装这个 so。
+不要关 backdrop-filter / GPU raster。
+
+源码等价见 linux-mainline/scripts/dagu_glass_layout.py（单元测试锁表）。

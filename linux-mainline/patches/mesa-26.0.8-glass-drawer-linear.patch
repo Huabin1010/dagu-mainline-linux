@@ -1,0 +1,36 @@
+说明：Mineradio 歌单/队列抽屉 CSS backdrop-filter 被当成「单边 >1024 的图集」，铺 TILE6_3。
+
+活 so：/usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so
+md5：06eb57c64c9aa2bac09066851e2378ac
+备份：.bak-pre-glass-drawer（卡修 md5 0c4ea0b1062660e4768997f88113f727）
+仓库副本：linux-mainline/out/libgallium-26.0.8-1ubuntu0.3.so
+
+板上 hunt（修前 tile=3，修后 tile=0）：
+  1536x896  b8g8r8a8  抽屉面板
+  1536x256  b8g8r8a8  抽屉顶栏
+  1536x864  r8g8b8a8  同面板另一 backing
+
+linear-ui 尾（文件偏移 0x7d21b0）原先「宽和高都 ≤1024 才 LINEAR」。
+1536 宽掉进 TILE；ANGLE 按 LINEAR 采 → 玻璃雪花。
+
+改成 4bpp 默认 LINEAR；仅宽≥2048 且高≤400 当 Skia 图集 TILE（3840x360）。
+2496x416 玻璃条高 416，不进图集。
+832x576 仍由页瓦分类 0x7d1e80 先截走。
+R8 字形仍 TILE（bpp==1 门）。
+
+指令（0x7d21b0）：
+  mov w3, #2048
+  cmp w0, w3
+  mov w3, #400
+  ccmp w1, w3, #2, hs
+  cset w2, hi
+  nop
+  nop
+  mov w0, w2
+
+不要覆盖发行版 libgallium。不要给 gnome-shell 装这个 so。
+不要关 backdrop-filter / GPU raster。
+
+源码等价与锁表：
+  python3 linux-mainline/tests/test_dagu_glass_layout.py
+  linux-mainline/scripts/dagu_glass_layout.py

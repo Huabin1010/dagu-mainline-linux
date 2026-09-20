@@ -1385,6 +1385,7 @@ HandleLidSwitchExternalPower=suspend
 HandleLidSwitchDocked=suspend
 LidSwitchIgnoreInhibited=yes
 HoldoffTimeoutSec=2s
+InhibitDelayMaxSec=20s
 IdleAction=ignore
 EOF
 systemctl unmask sleep.target suspend.target >/dev/null 2>&1 || true
@@ -1400,6 +1401,110 @@ rm -f /usr/local/sbin/dagu-power-menu \
 	/etc/systemd/system/dagu-power-button.service \
 	/etc/systemd/system/multi-user.target.wants/dagu-power-button.service
 systemctl disable --now dagu-power-button.service >/dev/null 2>&1 || true
+
+# Off-mode charging: Android charger-mode on this board. Gate runs before
+# GDM. Poweroff-with-VBUS isolates dagu-charger.target. Plug after a real
+# poweroff uses the pending flag (+ ABL androidboot.mode/bootreason / PON).
+if [ -f /tmp/dagu-offmode-charger.py ]; then
+	install -m755 /tmp/dagu-offmode-charger.py /usr/local/sbin/dagu-offmode-charger
+fi
+if [ -x /usr/local/sbin/dagu-offmode-charger ]; then
+	mkdir -p /var/lib/dagu /etc/systemd/system/gdm.service.d \
+		/etc/systemd/system/poweroff.target.wants \
+		/etc/systemd/system/dagu-charger.target.wants \
+		/etc/systemd/system/multi-user.target.wants
+	cat >/etc/systemd/system/dagu-charger.target <<'EOF'
+[Unit]
+Description=dagu off-mode charging
+Documentation=file:///usr/local/sbin/dagu-offmode-charger
+AllowIsolate=yes
+Conflicts=graphical.target
+After=multi-user.target
+Wants=dagu-offmode-charger.service
+EOF
+	cat >/etc/systemd/system/dagu-offmode-gate.service <<'EOF'
+[Unit]
+Description=dagu off-mode charger gate (before GDM)
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=gdm.service gdm3.service display-manager.service graphical.target
+Wants=systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-offmode-charger gate
+RemainAfterExit=yes
+TimeoutStartSec=25
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	cat >/etc/systemd/system/dagu-offmode-charger.service <<'EOF'
+[Unit]
+Description=dagu off-mode charger UI
+Documentation=file:///usr/local/sbin/dagu-offmode-charger
+After=dagu-offmode-gate.service systemd-udevd.service
+Before=gdm.service gdm3.service display-manager.service
+ConditionPathExists=/run/dagu-charger-mode
+Conflicts=gdm.service gdm3.service display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-offmode-charger ui
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=dagu-charger.target
+EOF
+	cat >/etc/systemd/system/dagu-offmode-daemon.service <<'EOF'
+[Unit]
+Description=dagu off-mode charger: divert poweroff-on-cable
+After=multi-user.target
+ConditionPathExists=!/run/dagu-charger-mode
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-offmode-charger daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	cat >/etc/systemd/system/dagu-offmode-pending.service <<'EOF'
+[Unit]
+Description=dagu: remember poweroff for charger-plug wake
+DefaultDependencies=no
+Before=shutdown.target umount.target
+Conflicts=reboot.target halt.target kexec.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-offmode-charger mark-pending
+TimeoutStartSec=5
+
+[Install]
+WantedBy=poweroff.target
+EOF
+	cat >/etc/systemd/system/gdm.service.d/dagu-charger.conf <<'EOF'
+[Unit]
+After=dagu-offmode-gate.service
+EOF
+	ln -sf /etc/systemd/system/dagu-offmode-gate.service \
+		/etc/systemd/system/multi-user.target.wants/dagu-offmode-gate.service
+	ln -sf /etc/systemd/system/dagu-offmode-charger.service \
+		/etc/systemd/system/multi-user.target.wants/dagu-offmode-charger.service
+	ln -sf /etc/systemd/system/dagu-offmode-daemon.service \
+		/etc/systemd/system/multi-user.target.wants/dagu-offmode-daemon.service
+	ln -sf /etc/systemd/system/dagu-offmode-pending.service \
+		/etc/systemd/system/poweroff.target.wants/dagu-offmode-pending.service
+	ln -sf /etc/systemd/system/dagu-offmode-charger.service \
+		/etc/systemd/system/dagu-charger.target.wants/dagu-offmode-charger.service
+fi
 cat >/usr/local/bin/dagu-blank-on-lock <<'EOF'
 #!/bin/sh
 # Intentionally empty: writing l81a-wled (DCS 0x51) ETIMEDOUTs and racing

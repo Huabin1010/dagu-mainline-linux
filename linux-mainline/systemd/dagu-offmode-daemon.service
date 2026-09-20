@@ -1,0 +1,13 @@
+[Unit]
+Description=dagu off-mode charger: divert poweroff-on-cable
+After=multi-user.target
+ConditionPathExists=!/run/dagu-charger-mode
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-offmode-charger daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

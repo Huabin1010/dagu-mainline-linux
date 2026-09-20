@@ -1,0 +1,15 @@
+[Unit]
+Description=dagu off-mode charger gate (before GDM)
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=gdm.service gdm3.service display-manager.service graphical.target
+Wants=systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-offmode-charger gate
+RemainAfterExit=yes
+TimeoutStartSec=25
+
+[Install]
+WantedBy=multi-user.target

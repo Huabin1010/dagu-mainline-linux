@@ -1,0 +1,13 @@
+[Unit]
+Description=dagu: remember poweroff for charger-plug wake
+DefaultDependencies=no
+Before=shutdown.target umount.target
+Conflicts=reboot.target halt.target kexec.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-offmode-charger mark-pending
+TimeoutStartSec=5
+
+[Install]
+WantedBy=poweroff.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=dagu off-mode charging
+Documentation=file:///usr/local/sbin/dagu-offmode-charger
+AllowIsolate=yes
+Conflicts=graphical.target
+After=multi-user.target
+Wants=dagu-offmode-charger.service

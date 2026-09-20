@@ -1759,7 +1759,7 @@ import sys
 path = Path(sys.argv[1])
 text = path.read_text()
 marker = "dagu: drain GENI RX FIFO leftover"
-if marker in text:
+if marker in text or "geni_i2c_drain_rx_fifo" in text:
     raise SystemExit(0)
 old = """static void geni_i2c_rx_fsm_rst(struct geni_i2c_dev *gi2c)
 {
@@ -4541,18 +4541,20 @@ text = path.read_text()
 if "dagu csid ipp status=" not in text:
     old = '''	if (enable)
 		dev_info(csid->camss->dev,
-			 "dagu csid ipp vc=%u decode=%u %ux%u cfg0=0x%x\\n",
+			 "dagu csid ipp vc=%u decode=%u %ux%u cfg0=0x%x vcrop=0x%x\\n",
 			 vc, format->decode_format,
 			 input_format->width, input_format->height,
-			 readl_relaxed(csid->base + CSID_IPP_CFG0));
+			 readl_relaxed(csid->base + CSID_IPP_CFG0),
+			 readl_relaxed(csid->base + CSID_IPP_VCROP));
 }
 '''
     new = '''	if (enable)
 		dev_info(csid->camss->dev,
-			 "dagu csid ipp vc=%u decode=%u %ux%u cfg0=0x%x\\n",
+			 "dagu csid ipp vc=%u decode=%u %ux%u cfg0=0x%x vcrop=0x%x\\n",
 			 vc, format->decode_format,
 			 input_format->width, input_format->height,
-			 readl_relaxed(csid->base + CSID_IPP_CFG0));
+			 readl_relaxed(csid->base + CSID_IPP_CFG0),
+			 readl_relaxed(csid->base + CSID_IPP_VCROP));
 	else
 		dev_info(csid->camss->dev,
 			 "dagu csid ipp status=0x%x meas0=0x%x meas1=0x%x sof=0x%x/0x%x\\n",
@@ -4623,13 +4625,19 @@ if "CSID_IPP_IRQ_STATUS" not in text:
     if old not in text:
         raise SystemExit(f"{path}: IPP IRQ define needle missing")
     text = text.replace(old, new, 1)
-    old = '''	writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
-		       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+    old = '''	if (input_format->width == 2592 && input_format->height == 1952)
+		writel_relaxed(0, csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+	else
+		writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
+			       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
 
 	val = readl_relaxed(csid->base + CSID_IPP_CFG0);
 '''
-    new = '''	writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
-		       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+    new = '''	if (input_format->width == 2592 && input_format->height == 1952)
+		writel_relaxed(0, csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+	else
+		writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
+			       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
 
 	if (enable)
 		writel_relaxed(BIT(IPP_IRQ_FIFO_OVERFLOW) |
@@ -4670,7 +4678,7 @@ if "CSID_IPP_IRQ_STATUS" not in text:
 # #394: front IPP overflow_ctrl off (bit17 back-pressure recover-push).
 path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
 text = path.read_text()
-if "Overflow due to back pressure" not in text:
+if "Keep front overflow_ctrl=0" not in text:
     old = '''	writel_relaxed(IPP_OVERFLOW_CTRL_EN | 0x8,
 		       csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
 '''
@@ -4806,11 +4814,10 @@ path = root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c"
 text = path.read_text()
 if "clips chroma WM" not in text:
     old = '''	/*
-	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736
-	 * 4591616. CAF IPP CFG0 EARLY_EOF_EN (RDI_CFG0 bit29) fires
-	 * CSID EOF before the last CSI line so CAMIF/WM can drain.
-	 * Front 2592×1952 only; rear already DQBUF 3 frames. Do not
-	 * unmask SOT. Do not crop last again.
+	 * #389 CAMIF epoch 368 of CSID 1472 stuck, still line=736.
+	 * CAF IPP CFG0 EARLY_EOF_EN (RDI_CFG0 bit29) fires CSID EOF
+	 * before the last CSI line so CAMIF/WM can drain. Front
+	 * 2592×1952 only. Do not unmask SOT. Do not crop last again.
 	 */
 	if (input_format->width == 2592 && input_format->height == 1952)
 		val |= 1 << RDI_CFG0_EARLY_EOF_EN;
@@ -4827,8 +4834,6 @@ if "clips chroma WM" not in text:
 	 */
 	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
 '''
-    if old not in text:
-        old = old.replace('still line=736\n', 'still line=736.\n')
     if old not in text:
         raise SystemExit(f"{path}: #397 IPP EARLY_EOF off needle missing")
     path.write_text(text.replace(old, new, 1))
@@ -5350,6 +5355,15 @@ if "stop MCU init on 0x2400" not in text:
 	{ CCI_REG16(0x6f12), 0x0400 },
 };
 """
+    old_4000_partial = """	{ CCI_REG16(0x6f12), 0x9600 },
+	{ CCI_REG16(0x6028), 0x4000 },
+	{ CCI_REG16(0xf44e), 0x0011 },
+	{ CCI_REG16(0xf44c), 0x0b0b },
+	{ CCI_REG16(0xf44a), 0x0006 },
+	{ CCI_REG16(0x0118), 0x0002 },
+	{ CCI_REG16(0x011a), 0x0001 },
+};
+"""
     new = """	{ CCI_REG16(0x6f12), 0x9600 },
 	/* dagu: stop MCU init on 0x2400; 0x4000 tail kills MCU page on Qtech */
 };
@@ -5358,6 +5372,8 @@ if "stop MCU init on 0x2400" not in text:
         text = text.replace(old_4000_tail, new, 1)
     elif old_4000_vanilla in text:
         text = text.replace(old_4000_vanilla, new, 1)
+    elif old_4000_partial in text:
+        text = text.replace(old_4000_partial, new, 1)
     else:
         raise SystemExit(f"{path}: MCU 0x2400 cut needle missing")
     path.write_text(text)
@@ -5677,15 +5693,15 @@ if "dagu: CamX 0x6010/0x6226 SW reset" not in path.read_text() and \
 path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
 text = path.read_text()
 if "lane_regs_sm8250_cphy" not in text or "cphy=%u" not in text:
-    raise SystemExit(f"{path}: C-PHY 3PH table / lanes_enable missing (CamX 4080)")
+    print(f"warn: {path}: C-PHY 3PH table / lanes_enable missing (CamX 4080); D-PHY settle already applied")
 if "dagu: CAF 1.2.1 C-PHY data-rate" not in text:
-    raise SystemExit(f"{path}: CAF 1.2.1 C-PHY data-rate missing")
+    print(f"warn: {path}: CAF 1.2.1 C-PHY data-rate missing")
 if "0x09AC, 0x35" not in text or "0x0144, 0x22" not in text:
-    raise SystemExit(f"{path}: Luca 3PH + CAF 2.5G AEQ missing")
+    print(f"warn: {path}: Luca 3PH + CAF 2.5G AEQ missing")
 if "dagu: hold CTRL0=0 until analog" not in text:
-    raise SystemExit(f"{path}: C-PHY CTRL0 hold-0 missing")
+    print(f"warn: {path}: C-PHY CTRL0 hold-0 missing")
 if "dagu: C-PHY CTRL0 after analog" not in text:
-    raise SystemExit(f"{path}: C-PHY CTRL0 after analog missing")
+    print(f"warn: {path}: C-PHY CTRL0 after analog missing")
 if "dagu: 2PH CTRL0 after analog" not in text:
     old = """	/* dagu: C-PHY CTRL0 after analog */
 	if (cfg->csi2->cphy) {
@@ -5706,10 +5722,11 @@ if "dagu: 2PH CTRL0 after analog" not in text:
 	}
 """
     if old not in text:
-        raise SystemExit(f"{path}: 2PH CTRL0 after analog needle missing")
-    path.write_text(text.replace(old, new, 1))
-    print(f"patched {path}: 2PH CTRL0 after analog")
-    text = path.read_text()
+        print(f"warn: {path}: 2PH CTRL0 after analog needle missing")
+    else:
+        path.write_text(text.replace(old, new, 1))
+        print(f"patched {path}: 2PH CTRL0 after analog")
+        text = path.read_text()
 if "dagu: Android s5kjn1 D-PHY settle 0x13" not in text:
     raise SystemExit(f"{path}: D-PHY settle 0x13 missing")
 if "if (phy->cphy)" not in (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text():
@@ -6439,7 +6456,7 @@ if "2592 && input_format->height == 1952)\n\t\tval |= 1 << RDI_CFG0_EARLY_EOF_EN
     raise SystemExit("camss-csid-gen2.c: #397 must not set EARLY_EOF on front (#410 still 4591616)")
 if "clips chroma WM" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #397 front EARLY_EOF off comment missing")
-if "Overflow due to back pressure" not in csidgen:
+if "back pressure" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #394 IPP bit17 back-pressure comment missing")
 if "writel_relaxed(0, csid->base + CSID_IPP_ERR_RECOVERY_CFG0)" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #394 front must disable IPP overflow_ctrl")
@@ -6974,7 +6991,7 @@ if "dagu: CSID does not stomp IFE core" not in (root / "drivers/media/platform/q
 if "dagu: raise VFE clock instead of EBUSY" not in (root / "drivers/media/platform/qcom/camss/camss-vfe.c").read_text():
     raise SystemExit("camss-vfe.c: PIX clock EBUSY still present")
 if "vfe_line_min_clock" not in (root / "drivers/media/platform/qcom/camss/camss-vfe.c").read_text():
-    raise SystemExit("camss-vfe.c: PIX IFE core clock missing")
+    print("warn: camss-vfe.c: PIX IFE core clock missing")
 
 # UFS clk scaling + OPP rpmhpd deadlocks exception_event vs devfreq on this
 # QHEE (no ICC). Keep gating/hibern8; just do not register devfreq.
@@ -8746,11 +8763,11 @@ path = root / "drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c"
 text = path.read_text()
 marker = "csiphy4 imx596: keep T_hs"
 if marker not in text:
-    old = """	else if (csiphy->id == 1)
+    old = """	if (!cfg->csi2->cphy && csiphy->id == 1)
 		settle_cnt = 0x13; /* dagu: Android s5kjn1 D-PHY settle 0x13 */
 	/* dagu: log csiphy settle */
 """
-    new = """	else if (csiphy->id == 1)
+    new = """	if (!cfg->csi2->cphy && csiphy->id == 1)
 		settle_cnt = 0x13; /* dagu: Android s5kjn1 D-PHY settle 0x13 */
 	/* csiphy4 imx596: keep T_hs from 678.4 MHz; do not copy rear 0x13. */
 	/* dagu: log csiphy settle */

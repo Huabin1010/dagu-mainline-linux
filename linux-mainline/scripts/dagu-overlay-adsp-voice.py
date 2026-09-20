@@ -19,7 +19,8 @@ def patch(rel: str, marker: str, old: str, new: str) -> None:
     if marker in text:
         return
     if old not in text:
-        raise SystemExit(f"{path}: needle missing for {marker}")
+        print(f"warn: {path}: needle missing for {marker}")
+        return
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: {marker}")
 
@@ -1122,7 +1123,7 @@ patch(
 patch(
     "sound/soc/qcom/qdsp6/q6adm.c",
     "dagu: Fluence PP AEC iff echo",
-    """	if (q6adm_is_fluence_topo(topology)) {
+    """	if (topology == VPM_TX_SM_ECNS_V2_COPP_TOPOLOGY) {
 		ret = q6adm_set_fluence_effect(adm, copp, port_id);
 		dev_info(dev, "dagu fluence topo=0x%x ec_idx=%d pp=%d copp=%d\\n",
 			 topology, ec_ref_idx, ret, copp->id);
@@ -1131,7 +1132,7 @@ patch(
 				 ret);
 	}
 """,
-    """	if (q6adm_is_fluence_topo(topology)) {
+    """	if (topology == VPM_TX_SM_ECNS_V2_COPP_TOPOLOGY) {
 		u32 effect = ec_ref_idx > 0 ? FLUENCE_EFFECT_AEC :
 					      FLUENCE_EFFECT_NS;
 

@@ -58,6 +58,10 @@ echo "==> merge dagu-geni-i2c-experiment.fragment (CS35L41 per-SE IRAM)"
 echo "==> merge dagu-geni-spi-experiment.fragment (Himax spi4 FIFO, no GPI DMA)"
 "$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m -O "$KBUILD_OUTPUT" \
 	"$KBUILD_OUTPUT/.config" "$ROOT/config/dagu-geni-spi-experiment.fragment"
+# IPv6 + Docker nft/overlay built-in. Modules are not on userdata.
+echo "==> merge dagu-net.fragment (IPv6 built-in + Docker nft/overlay)"
+"$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m -O "$KBUILD_OUTPUT" \
+	"$KBUILD_OUTPUT/.config" "$ROOT/config/dagu-net.fragment"
 # After display: Kprobes + BTF for BCC/bpftrace. Needs pahole >= 1.22.
 # Keep FUNCTION_TRACER off — a nop at every function perturbs 120 Hz DSC.
 command -v pahole >/dev/null || die "pahole missing — apt install pahole (v1.22+ for CONFIG_DEBUG_INFO_BTF)"
@@ -78,6 +82,13 @@ need_m() {
 }
 need_y CONFIG_SM_GCC_8250
 need_y CONFIG_ARM64_VA_BITS_39
+need_y CONFIG_IPV6
+need_y CONFIG_NF_NAT
+need_y CONFIG_NF_TABLES
+need_y CONFIG_NFT_MASQ
+need_y CONFIG_OVERLAY_FS
+need_y CONFIG_VETH
+need_y CONFIG_BRIDGE
 need_y CONFIG_QCOM_WDT
 need_y CONFIG_PSTORE_CONSOLE
 need_y CONFIG_DETECT_HUNG_TASK

@@ -144,6 +144,12 @@ bt_main_set PairableTimeout 0
 bt_main_set AlwaysPairable true
 bt_main_set MinConnectionInterval 24
 bt_main_set MaxConnectionInterval 40
+# 3 s. The kernel default 420 ms drops a mouse that applies slave
+# latency before the central accepts the request. Per-device PPCP
+# still overrides this on the live link. The kernel keeps 24–40 only
+# for LE Create Connection. The mouse's update (often 7.5–11.25 ms)
+# is applied with a connection-event length.
+bt_main_set ConnectionSupervisionTimeout 300
 # Device-initiated classic HID (K380 ReconnectMode=device): GNOME
 # Device1.Connect must wait for the keypress page. Outgoing page drops
 # PSCAN on QCA6390. Rebuild bluetoothd with dagu-build-bluez-hid.sh
@@ -1190,6 +1196,364 @@ EOF
 }
 install_dagu_present_pump /usr/share/gnome-shell/extensions/dagu-present-pump@local
 install_dagu_present_pump /home/dagu/.local/share/gnome-shell/extensions/dagu-present-pump@local
+# Finger drags on a private titlebar never become a compositor move.
+# Cursor is X11 with motif decorations cleared, so there is no frame to grab.
+# Chromium-style clients ask to move only for a mouse button. GTK already
+# asks for a finger, so those windows are left alone.
+install_dagu_touch_window() {
+	local d="$1"
+	mkdir -p "$d"
+	cat >"$d/metadata.json" <<'EOF'
+{
+  "uuid": "dagu-touch-window@dagu",
+  "name": "dagu touch window move",
+  "description": "Move and resize undecorated non-GTK windows from a finger.",
+  "shell-version": ["50"],
+  "session-modes": ["user"]
+}
+EOF
+	cat >"$d/extension.js" <<'EOF'
+import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import Graphene from 'gi://Graphene';
+import Meta from 'gi://Meta';
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+
+const VERSION = 'touch-frame-1';
+const EDGE = 28;
+const TITLE = 44;
+const SLOP = 16;
+const BOTTOM_GESTURE = 18;
+
+export default class DaguTouchWindow extends Extension {
+    enable() {
+        this._pending = null;
+        this._handler = global.stage.connect_after('captured-event', (_a, event) => {
+            try {
+                return this._onEvent(event);
+            } catch (e) {
+                this._log(`event ${e}`);
+                return Clutter.EVENT_PROPAGATE;
+            }
+        });
+        this._log(`${VERSION} enable`);
+        this._logWindows();
+    }
+
+    disable() {
+        if (this._handler) {
+            global.stage.disconnect(this._handler);
+            this._handler = 0;
+        }
+        this._pending = null;
+        this._log(`${VERSION} disable`);
+    }
+
+    _log(msg) {
+        try {
+            const line = `${Math.round(GLib.get_monotonic_time() / 1000)} ${msg}\n`;
+            const f = Gio.File.new_for_path('/tmp/dagu-touch-window.log');
+            const out = f.append_to(Gio.FileCreateFlags.NONE, null);
+            out.write(line, null);
+            out.close(null);
+        } catch (e) {
+        }
+    }
+
+    _logWindows() {
+        const lines = [];
+        for (const actor of global.get_window_actors()) {
+            const win = actor.meta_window;
+            if (!win)
+                continue;
+            lines.push(this._describe(win));
+        }
+        this._log(lines.join(' | ') || 'no-windows');
+    }
+
+    _describe(win) {
+        let gtk = '';
+        try {
+            gtk = win.get_gtk_application_id?.() || '';
+        } catch (e) {
+            gtk = '';
+        }
+        const r = win.get_frame_rect();
+        return [
+            win.get_wm_class?.() || '',
+            `client=${win.get_client_type?.()}`,
+            `deco=${win.decorated}`,
+            `gtk=${gtk}`,
+            `move=${win.allows_move?.()}`,
+            `resize=${win.allows_resize?.()}`,
+            `type=${win.get_window_type?.()}`,
+            `${r.width}x${r.height}`,
+            `eligible=${this._eligible(win)}`,
+        ].join(',');
+    }
+
+    _eligible(win) {
+        if (!win || win.minimized)
+            return false;
+        try {
+            if (win.is_skip_taskbar?.())
+                return false;
+        } catch (e) {
+        }
+        const type = win.get_window_type();
+        if (type !== Meta.WindowType.NORMAL && type !== Meta.WindowType.DIALOG)
+            return false;
+        if (win.is_fullscreen?.())
+            return false;
+        if (win.decorated)
+            return false;
+        const r = win.get_frame_rect();
+        if (r.width < 80 || r.height < 80)
+            return false;
+        try {
+            if (win.get_gtk_application_id?.())
+                return false;
+            if (win.get_gtk_unique_bus_name?.())
+                return false;
+        } catch (e) {
+        }
+        const client = win.get_client_type();
+        if (client === Meta.WindowClientType.X11)
+            return true;
+        const id = [
+            win.get_wm_class?.(),
+            win.get_wm_class_instance?.(),
+            win.get_sandboxed_app_id?.(),
+        ].filter(Boolean).join(' ').toLowerCase();
+        return /cursor|code|electron|chromium|chrome|wechat|weixin|clash|localsend|discord|slack|spotify|obsidian/.test(id);
+    }
+
+    _onEvent(event) {
+        const type = event.type();
+        if (type !== Clutter.EventType.TOUCH_BEGIN &&
+            type !== Clutter.EventType.TOUCH_UPDATE &&
+            type !== Clutter.EventType.TOUCH_END &&
+            type !== Clutter.EventType.TOUCH_CANCEL)
+            return Clutter.EVENT_PROPAGATE;
+        if (Main.overview.visible || Main.modalCount > 0)
+            return Clutter.EVENT_PROPAGATE;
+        if (this._grabbed()) {
+            this._pending = null;
+            return Clutter.EVENT_PROPAGATE;
+        }
+        if (type === Clutter.EventType.TOUCH_END ||
+            type === Clutter.EventType.TOUCH_CANCEL) {
+            this._pending = null;
+            return Clutter.EVENT_PROPAGATE;
+        }
+        const [x, y] = this._xy(event);
+        if (type === Clutter.EventType.TOUCH_BEGIN) {
+            this._pending = null;
+            if (this._bottomGesture(x, y))
+                return Clutter.EVENT_PROPAGATE;
+            const win = this._windowAt(x, y);
+            if (!win || !this._eligible(win))
+                return Clutter.EVENT_PROPAGATE;
+            if (this._shellOwns(x, y)) {
+                this._log(`shell-owns ${Math.round(x)},${Math.round(y)} ${win.get_wm_class?.() || ''}`);
+                return Clutter.EVENT_PROPAGATE;
+            }
+            const op = this._zone(win, x, y);
+            if (op === null)
+                return Clutter.EVENT_PROPAGATE;
+            this._pending = {
+                seq: event.get_event_sequence(),
+                win,
+                op,
+                x,
+                y,
+            };
+            return Clutter.EVENT_PROPAGATE;
+        }
+        if (!this._pending)
+            return Clutter.EVENT_PROPAGATE;
+        const dx = x - this._pending.x;
+        const dy = y - this._pending.y;
+        if (dx * dx + dy * dy < SLOP * SLOP)
+            return Clutter.EVENT_PROPAGATE;
+        const pending = this._pending;
+        this._pending = null;
+        const ok = this._begin(pending.win, pending.op, event, x, y);
+        this._log(`drag ${this._describe(pending.win)} op=${pending.op} ok=${ok} at=${Math.round(x)},${Math.round(y)}`);
+        return ok ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE;
+    }
+
+    _grabbed() {
+        try {
+            if (typeof global.display.get_grab_op === 'function' &&
+                global.display.get_grab_op() !== Meta.GrabOp.NONE)
+                return true;
+        } catch (e) {
+        }
+        return false;
+    }
+
+    _bottomGesture(x, y) {
+        const n = global.display.get_n_monitors();
+        for (let i = 0; i < n; i++) {
+            const m = global.display.get_monitor_geometry(i);
+            if (x >= m.x && x < m.x + m.width &&
+                y >= m.y + m.height - BOTTOM_GESTURE)
+                return true;
+        }
+        return false;
+    }
+
+    _shellOwns(x, y) {
+        try {
+            let actor = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y);
+            if (!actor)
+                return false;
+            while (actor) {
+                if (actor.meta_window)
+                    return false;
+                actor = actor.get_parent?.();
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _windowAt(x, y) {
+        const actors = global.get_window_actors();
+        for (let i = actors.length - 1; i >= 0; i--) {
+            const actor = actors[i];
+            if (!actor.visible)
+                continue;
+            const win = actor.meta_window;
+            if (!win || win.minimized)
+                continue;
+            try {
+                if (win.showing_on_its_workspace && !win.showing_on_its_workspace())
+                    continue;
+            } catch (e) {
+            }
+            const r = win.get_frame_rect();
+            if (x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height)
+                return win;
+        }
+        return null;
+    }
+
+    _zone(win, x, y) {
+        const r = win.get_frame_rect();
+        const lx = x - r.x;
+        const ly = y - r.y;
+        const buttons = Math.min(150, Math.round(r.width * 0.22));
+        const resize = win.allows_resize?.() !== false;
+        const move = win.allows_move?.() !== false;
+        if (ly < TITLE && lx > r.width - buttons)
+            return null;
+        if (resize && lx < EDGE && ly < EDGE)
+            return Meta.GrabOp.RESIZING_NW;
+        if (resize && lx > r.width - EDGE && ly < EDGE)
+            return Meta.GrabOp.RESIZING_NE;
+        if (resize && lx < EDGE && ly > r.height - EDGE)
+            return Meta.GrabOp.RESIZING_SW;
+        if (resize && lx > r.width - EDGE && ly > r.height - EDGE)
+            return Meta.GrabOp.RESIZING_SE;
+        if (resize && lx < EDGE)
+            return Meta.GrabOp.RESIZING_W;
+        if (resize && lx > r.width - EDGE)
+            return Meta.GrabOp.RESIZING_E;
+        if (resize && ly > r.height - EDGE)
+            return Meta.GrabOp.RESIZING_S;
+        if (move && ly < TITLE)
+            return Meta.GrabOp.MOVING;
+        return null;
+    }
+
+    _begin(win, op, event, x, y) {
+        let sprite = null;
+        try {
+            sprite = global.stage.get_context().get_backend().get_sprite(global.stage, event);
+        } catch (e) {
+            this._log(`sprite ${e}`);
+        }
+        const point = new Graphene.Point();
+        try {
+            point.init(x, y);
+        } catch (e) {
+            point.x = x;
+            point.y = y;
+        }
+        const time = event.get_time();
+        const calls = [
+            () => win.begin_grab_op(op, sprite, time, point),
+            () => win.begin_grab_op(op, sprite, time, null),
+        ];
+        let last = 'none';
+        for (const call of calls) {
+            try {
+                const ok = call();
+                if (ok)
+                    return true;
+                last = `false`;
+            } catch (e) {
+                last = `${e}`;
+            }
+        }
+        if ((win.maximized_horizontally || win.maximized_vertically) &&
+            op === Meta.GrabOp.MOVING) {
+            try {
+                win.unmaximize(Meta.MaximizeFlags.BOTH);
+            } catch (e) {
+                this._log(`unmaximize ${e}`);
+            }
+            try {
+                if (win.begin_grab_op(op, sprite, time, point))
+                    return true;
+            } catch (e) {
+                last = `${e}`;
+            }
+        }
+        this._log(`begin failed ${last}`);
+        return false;
+    }
+
+    _xy(event) {
+        try {
+            const c = event.get_coords();
+            if (Array.isArray(c))
+                return [c[0], c[1]];
+            if (c && 'x' in c)
+                return [c.x, c.y];
+        } catch (e) {
+        }
+        return [0, 0];
+    }
+
+}
+
+EOF
+}
+install_dagu_touch_window /usr/share/gnome-shell/extensions/dagu-touch-window@dagu
+install_dagu_touch_window /home/dagu/.local/share/gnome-shell/extensions/dagu-touch-window@dagu
+# Session-mode extensions still load when disable-user-extensions is true.
+# A newly copied extension is invisible until the next gnome-shell start.
+if [ -f /usr/share/gnome-shell/modes/ubuntu.json ]; then
+	python3 - <<'PY'
+import json
+path = "/usr/share/gnome-shell/modes/ubuntu.json"
+with open(path) as fh:
+    mode = json.load(fh)
+exts = mode.setdefault("enabledExtensions", [])
+uuid = "dagu-touch-window@dagu"
+if uuid not in exts:
+    exts.append(uuid)
+    with open(path, "w") as fh:
+        json.dump(mode, fh, indent=2)
+        fh.write("\n")
+PY
+fi
 chown -R dagu:dagu /home/dagu/.local/share/gnome-shell
 
 mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
@@ -1206,7 +1570,7 @@ always-show-universal-access-status=true
 
 [org/gnome/shell]
 disable-user-extensions=false
-enabled-extensions=['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com', 'tiling-assistant@ubuntu.com', 'dagu-osk-focus@dagu', 'dagu-present-pump@local']
+enabled-extensions=['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com', 'tiling-assistant@ubuntu.com', 'dagu-osk-focus@dagu', 'dagu-present-pump@local', 'dagu-touch-window@dagu']
 
 [org/gnome/desktop/input-sources]
 sources=[('xkb', 'us'), ('ibus', 'libpinyin')]

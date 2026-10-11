@@ -70,7 +70,7 @@ def above_hd(width: int, height: int) -> bool:
 
 
 def output_buffer_count(codec: str, width: int, height: int) -> int:
-    if codec == "h264":
+    if codec in ("h264", "hevc"):
         return 16
     if above_hd(width, height):
         return 8
@@ -79,6 +79,8 @@ def output_buffer_count(codec: str, width: int, height: int) -> int:
 
 def max_decode_requests(codec: str, width: int, height: int) -> int:
     count = output_buffer_count(codec, width, height)
+    if codec == "hevc":
+        return count
     cap = 8 if above_hd(width, height) else 4
     return min(cap, count)
 
@@ -267,13 +269,21 @@ _COUNT_OLD = """\
 _COUNT_NEW = """\
   const bool is_h264 =
       VideoCodecProfileToVideoCodec(config.profile()) == VideoCodec::kH264;
+  const bool is_hevc =
+      VideoCodecProfileToVideoCodec(config.profile()) == VideoCodec::kHEVC;
   const bool above_hd = output_coded_size.GetArea() > (1920 * 1080);
+  // Display order holds reference pictures until the reorder window
+  // overflows. Bilibili HEVC fills four OUTPUT buffers and returns
+  // none, so the queue never moves. Sixteen is past that window.
   constexpr size_t kNumInputBuffersH264 = 16;
+  constexpr size_t kNumInputBuffersHEVC = 16;
   constexpr size_t kNumInputBuffersAboveHd = 8;
   constexpr size_t kNumInputBuffersVPx = 2;
   const auto num_input_buffers =
       is_h264 ? kNumInputBuffersH264
-              : (above_hd ? kNumInputBuffersAboveHd : kNumInputBuffersVPx);
+              : (is_hevc ? kNumInputBuffersHEVC
+                         : (above_hd ? kNumInputBuffersAboveHd
+                                     : kNumInputBuffersVPx));
 """
 
 _NOTIFY_OLD = """\
@@ -282,7 +292,8 @@ _NOTIFY_OLD = """\
 """
 
 _NOTIFY_NEW = """\
-  const size_t request_cap = above_hd ? 8 : 4;
+  const size_t request_cap =
+      is_hevc ? kNumInputBuffersHEVC : (above_hd ? 8 : 4);
   client_->NotifyEstimatedMaxDecodeRequests(base::checked_cast<int>(
       std::min(request_cap, num_input_buffers)));
 """
@@ -422,6 +433,52 @@ def annexb_has_hevc_irap(data: bytes) -> bool:
     return False
 
 
+def strip_decode_order(text: str) -> str:
+    """Decode order emits the reference picture before its B frames.
+
+    The renderer then drops those B frames because their timestamps are
+    already past. Display order is the firmware default; do not set
+    V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY.
+    """
+    if "Failed to set Venus decode order" not in text:
+        return text
+    start = text.find("  // Venus defaults to display order.")
+    streamon = "  if (!OUTPUT_queue_->Streamon()) {\n"
+    end = text.find(streamon, start if start >= 0 else 0)
+    if start < 0 or end < 0:
+        raise SystemExit("decode-order block is not anchored on Streamon")
+    return text[:start] + text[end:]
+
+
+_COUNT_SHALLOW = """\
+  const bool is_h264 =
+      VideoCodecProfileToVideoCodec(config.profile()) == VideoCodec::kH264;
+  const bool above_hd = output_coded_size.GetArea() > (1920 * 1080);
+  constexpr size_t kNumInputBuffersH264 = 16;
+  constexpr size_t kNumInputBuffersAboveHd = 8;
+  constexpr size_t kNumInputBuffersVPx = 2;
+  const auto num_input_buffers =
+      is_h264 ? kNumInputBuffersH264
+              : (above_hd ? kNumInputBuffersAboveHd : kNumInputBuffersVPx);
+"""
+
+_NOTIFY_SHALLOW = "  const size_t request_cap = above_hd ? 8 : 4;\n"
+
+
+def deepen_hevc_input_queue(text: str) -> str:
+    """HEVC display order needs more OUTPUT buffers than the reorder window."""
+    if "kNumInputBuffersHEVC" not in text and _COUNT_SHALLOW in text:
+        text = text.replace(_COUNT_SHALLOW, _COUNT_NEW, 1)
+    if "is_hevc ? kNumInputBuffersHEVC" not in text and _NOTIFY_SHALLOW in text:
+        text = text.replace(
+            _NOTIFY_SHALLOW,
+            "  const size_t request_cap =\n"
+            "      is_hevc ? kNumInputBuffersHEVC : (above_hd ? 8 : 4);\n",
+            1,
+        )
+    return text
+
+
 def apply_hevc_irap(text: str) -> str:
     """Drop HEVC access units that arrive before the first IRAP."""
     if "AnnexBHasHevcIrap" not in text:
@@ -448,29 +505,8 @@ def apply_hevc_irap(text: str) -> str:
         )
         if old_bytes in text:
             text = text.replace(old_bytes, new_bytes, 1)
-    if "Failed to set Venus decode order" not in text:
-        streamon = "  if (!OUTPUT_queue_->Streamon()) {\n"
-        display_order = (
-            "  // Venus defaults to display order. Bilibili HEVC reference B frames are\n"
-            "  // then held until EOS, and every OUTPUT buffer stays queued, so no further\n"
-            "  // access unit can be submitted and no picture is ever returned. Decode\n"
-            "  // order releases each picture as it is decoded; presentation order is the\n"
-            "  // renderer's timestamp.\n"
-            "  struct v4l2_control display_delay = {\n"
-            "      .id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY, .value = 0};\n"
-            "  struct v4l2_control display_delay_enable = {\n"
-            "      .id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE, .value = 1};\n"
-            "  if (HandledIoctl(device_fd_.get(), VIDIOC_S_CTRL, &display_delay) !=\n"
-            "          kIoctlOk ||\n"
-            "      HandledIoctl(device_fd_.get(), VIDIOC_S_CTRL, &display_delay_enable) !=\n"
-            "          kIoctlOk) {\n"
-            "    PLOG(ERROR) << \"Failed to set Venus decode order\";\n"
-            "    std::move(init_cb).Run(DecoderStatus::Codes::kFailedToCreateDecoder);\n"
-            "    return;\n"
-            "  }\n"
-        )
-        if streamon in text:
-            text = text.replace(streamon, display_order + streamon, 1)
+    text = strip_decode_order(text)
+    text = deepen_hevc_input_queue(text)
     if "hevc_seen_irap_ = false" not in text:
         text = text.replace(
             "  config_ = config;\n",

@@ -94,11 +94,13 @@ class VenusContractTests(unittest.TestCase):
         self.assertEqual(chrome_output_buffer_bytes(0, 0), 8 * MIB)
 
     def test_4k_hevc_queue_is_deeper_than_two(self) -> None:
-        self.assertEqual(output_buffer_count("hevc", 3840, 2160), 8)
+        self.assertEqual(output_buffer_count("hevc", 3840, 2160), 16)
+        self.assertEqual(output_buffer_count("hevc", 1920, 1080), 16)
         self.assertEqual(output_buffer_count("vp9", 3840, 2160), 8)
         self.assertEqual(output_buffer_count("h264", 3840, 2160), 16)
         self.assertEqual(output_buffer_count("vp9", 1920, 1080), 2)
-        self.assertEqual(max_decode_requests("hevc", 3840, 2160), 8)
+        self.assertEqual(max_decode_requests("hevc", 3840, 2160), 16)
+        self.assertEqual(max_decode_requests("hevc", 1920, 1080), 16)
         self.assertEqual(max_decode_requests("h264", 1920, 1080), 4)
 
     def test_c_formula_matches_python(self) -> None:
@@ -210,6 +212,9 @@ class ChromiumPatchTests(unittest.TestCase):
         self.assertIn("gfx::Size(3840, 2160)", decoder)
         self.assertNotIn("gfx::Size()", decoder)
         self.assertIn("kNumInputBuffersAboveHd = 8", decoder)
+        self.assertIn("kNumInputBuffersHEVC = 16", decoder)
+        self.assertNotIn("Failed to set Venus decode order", decoder)
+        self.assertNotIn("V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY", decoder)
         self.assertIn("exceeds OUTPUT plane", decoder)
         self.assertNotIn("CHECK_GE(v4l2_buffer->GetPlaneSize", decoder)
         self.assertIn("AnnexBHasHevcIrap", decoder)
@@ -229,6 +234,29 @@ class ChromiumPatchTests(unittest.TestCase):
         self.assertIn("Dropping HEVC access unit before the first IRAP", patched)
         self.assertEqual(apply_decoder(patched), patched)
 
+    def test_decode_order_control_is_removed(self) -> None:
+        from dagu_playback_gate import _COUNT_SHALLOW, _NOTIFY_SHALLOW
+
+        shallow = (
+            "VenusCompressedBitstreamBytes\nexceeds OUTPUT plane\n"
+            + _COUNT_SHALLOW
+            + _NOTIFY_SHALLOW
+            + "  // Venus defaults to display order.\n"
+            + "  struct v4l2_control display_delay = {\n"
+            + "      .id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY, .value = 0};\n"
+            + '    PLOG(ERROR) << "Failed to set Venus decode order";\n'
+            + "    return;\n"
+            + "  }\n"
+            + "  if (!OUTPUT_queue_->Streamon()) {\n"
+        )
+        patched = apply_decoder(shallow)
+        self.assertNotIn("Failed to set Venus decode order", patched)
+        self.assertNotIn("V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY", patched)
+        self.assertIn("kNumInputBuffersHEVC = 16", patched)
+        self.assertIn("is_hevc ? kNumInputBuffersHEVC", patched)
+        self.assertIn("if (!OUTPUT_queue_->Streamon())", patched)
+        self.assertEqual(apply_decoder(patched), patched)
+
     def test_live_tree_matches_the_contract(self) -> None:
         if not DECODER_CC.is_file() or not SUPPORTED_CC.is_file():
             self.skipTest("official-152 checkout is not on this machine")
@@ -242,8 +270,10 @@ class ChromiumPatchTests(unittest.TestCase):
         self.assertIn("exceeds OUTPUT plane", decoder)
         self.assertIn("Dropping HEVC access unit before the first IRAP", decoder)
         self.assertIn("hevc_seen_irap_", decoder)
-        self.assertIn("Failed to set Venus decode order", decoder)
-        self.assertIn("V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE", decoder)
+        self.assertIn("kNumInputBuffersHEVC = 16", decoder)
+        self.assertIn("is_hevc ? kNumInputBuffersHEVC", decoder)
+        self.assertNotIn("Failed to set Venus decode order", decoder)
+        self.assertNotIn("V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY", decoder)
 
 
 if __name__ == "__main__":

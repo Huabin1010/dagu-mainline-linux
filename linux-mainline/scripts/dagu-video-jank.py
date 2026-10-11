@@ -63,6 +63,18 @@ CODECS = {
                    "-profile:v", "2", "-deadline", "realtime", "-cpu-used", "8"],
         "name": "vp9p2",
     },
+    # 4K HEVC is the path Bilibili must take once AV1 is not advertised.
+    # 12s * 30 fps = 360 frames, above the Netflix gate's 240-frame floor.
+    "hevc4k": {
+        "path": Path("/tmp/dagu-video-jank-2160p-hevc.mp4"),
+        "lavfi": "testsrc=duration=12:size=3840x2160:rate=30",
+        "extra_lavfi": ["sine=frequency=1000:sample_rate=48000:duration=12"],
+        "ffmpeg": ["-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                   "-tag:v", "hvc1", "-x265-params", "log-level=error",
+                   "-c:a", "aac", "-b:a", "128k", "-shortest"],
+        "name": "hevc4k",
+        "sound": True,
+    },
 }
 
 
@@ -98,12 +110,11 @@ def ensure_clip(codec: str = "h264") -> Path:
     dest = spec["path"]
     if dest.exists() and dest.stat().st_size > 20000:
         return dest
-    cmd = [
-        "ffmpeg", "-y", "-f", "lavfi",
-        "-i", "testsrc=duration=12:size=1920x1080:rate=30",
-        *spec["ffmpeg"],
-        str(dest),
-    ]
+    lavfi = spec.get("lavfi", "testsrc=duration=12:size=1920x1080:rate=30")
+    cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", lavfi]
+    for extra in spec.get("extra_lavfi", []):
+        cmd += ["-f", "lavfi", "-i", extra]
+    cmd += [*spec["ffmpeg"], str(dest)]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return dest
 
@@ -293,7 +304,11 @@ def device_main(args) -> int:
     except OSError:
         pass
     httpd = start_http(docroot)
-    url = f"http://127.0.0.1:{PORT}/dagu-video-jank.html?src={href}&quiet=1"
+    sound = "&sound=1" if CODECS[args.codec].get("sound") else ""
+    # A 12s clip held for 14s loops, seeks, and the decoder tears down.
+    # That seek is not steady playback. The 4K gate plays once.
+    once = "&loop=0" if args.codec == "hevc4k" else ""
+    url = f"http://127.0.0.1:{PORT}/dagu-video-jank.html?src={href}&quiet=1{sound}{once}"
     if args.fresh or not port_up("127.0.0.1", CDP):
         start_chrome(url, overlay=args.overlay)
     else:
@@ -384,11 +399,37 @@ def device_main(args) -> int:
                     or "V4L2StatefulVideoDecoder" in line \
                     or "v4l2_stateful_video_decoder.cc" in line \
                     or "Chosen |CAPTURE_queue_| format" in line \
-                    or "Using a stateful API" in line:
+                    or "Using a stateful API" in line \
+                    or "dav1d" in line:
                 decoder_log.append(line[-180:])
     except OSError:
         pass
+    can_play = None
+    try:
+        can_play = asyncio.run(cdp_call(ws, expr="""
+          (function(){
+            const v = document.createElement('video');
+            const mse = (s) => { try { return MediaSource.isTypeSupported(s); } catch (e) { return false; } };
+            return {
+              av1: v.canPlayType('video/mp4; codecs="av01.0.08M.08"'),
+              hevc: v.canPlayType('video/mp4; codecs="hev1.1.6.L153.B0"'),
+              h264: v.canPlayType('video/mp4; codecs="avc1.640028"'),
+              mse_av1: mse('video/mp4; codecs="av01.0.08M.08"'),
+              mse_hevc: mse('video/mp4; codecs="hev1.1.6.L153.B0"')
+            };
+          })()
+        """))
+    except Exception as exc:
+        can_play = {"error": str(exc)}
     fds = list(dict.fromkeys(seen_fds + venus_fds()))
+    page = dump if isinstance(dump, dict) else {}
+    decoder_name = ""
+    for line in decoder_log:
+        if "V4L2StatefulVideoDecoder" in line:
+            decoder_name = "V4L2StatefulVideoDecoder"
+            break
+        if "FFmpegVideoDecoder" in line:
+            decoder_name = "FFmpegVideoDecoder"
     report = {
         "codec": args.codec,
         "clip": str(clip),
@@ -408,10 +449,34 @@ def device_main(args) -> int:
         "chrome_features": [f for f in flags if "feature" in f or "angle" in f or "gpu" in f],
         "decoder_hint": decoder,
         "decoder_log": decoder_log[-8:],
+        "can_play": can_play,
     }
+    if args.gate:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        sys.path.insert(0, "/tmp")
+        from dagu_playback_gate import netflix_gate
+        sample = {
+            "profile": "4k" if args.codec == "hevc4k" else "hd",
+            "codec": "hevc" if args.codec.startswith("hevc") else args.codec,
+            "w": page.get("w"),
+            "h": page.get("h"),
+            "dropped": page.get("dropped") or 0,
+            "total": page.get("total") or 0,
+            "max_av_skew_ms": page.get("max_av_skew_ms") or 0,
+            "max_frame_gap_ms": page.get("max_frame_gap_ms") or 0,
+            "decoder": decoder_name,
+            "decoder_log": "\n".join(decoder_log[-8:]),
+            "video14": report["video14"],
+            "venus_irq_delta": report["venus_irq_delta"],
+            "can_play": can_play if isinstance(can_play, dict) else {},
+        }
+        ok, reasons = netflix_gate(sample)
+        report["netflix_gate"] = {"ok": ok, "reasons": reasons}
     Path("/tmp/dagu-video-jank.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
     httpd.shutdown()
+    if args.gate and not report.get("netflix_gate", {}).get("ok"):
+        return 1
     return 0
 
 
@@ -428,16 +493,20 @@ def host_main(args) -> int:
         str(ROOT / "scripts/dagu-video-jank.py"),
         str(ROOT / "scripts/dagu-video-jank.html"),
         str(ROOT / "scripts/dagu-venus-load.sh"),
+        str(ROOT / "scripts/dagu_playback_gate.py"),
         f"root@{HOST}:/tmp/",
     ], check=True)
     remote = (
         "install -m755 /tmp/dagu-video-jank.py /usr/local/sbin/dagu-video-jank.py; "
         "install -m755 /tmp/dagu-venus-load.sh /usr/local/sbin/dagu-venus-load.sh; "
+        "install -m644 /tmp/dagu_playback_gate.py /usr/local/sbin/dagu_playback_gate.py; "
         "mkdir -p /usr/local/share/dagu-video-jank; "
         "install -m644 /tmp/dagu-video-jank.html /usr/local/share/dagu-video-jank/; "
         f"python3 /usr/local/sbin/dagu-video-jank.py --hold {args.hold} --codec {args.codec}"
         + (" --fresh" if args.fresh else "")
         + (" --overlay" if args.overlay else "")
+        + (" --gate" if args.gate else "")
+        + (" --no-gate" if args.no_gate else "")
     )
     dest = OUT_HOST / f"video-jank-{args.codec}.json"
     dest.unlink(missing_ok=True)
@@ -463,7 +532,13 @@ def main() -> int:
     ap.add_argument("--overlay", action="store_true",
                     help="DAGU_CHROME_VIDEO_OVERLAY=1 (WaylandOverlayDelegation)")
     ap.add_argument("--codec", choices=sorted(CODECS), default="h264")
+    ap.add_argument("--gate", action="store_true",
+                    help="fail unless the Netflix-bar gate passes")
+    ap.add_argument("--no-gate", action="store_true",
+                    help="do not apply the gate, even for hevc4k")
     args = ap.parse_args()
+    if args.codec == "hevc4k" and not args.no_gate:
+        args.gate = True
     if args.host or not is_tablet():
         return host_main(args)
     return device_main(args)

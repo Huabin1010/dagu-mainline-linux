@@ -347,6 +347,10 @@ if [ -d "$OFFICIAL/third_party/node" ]; then
 	fi
 fi
 
+# 4K Bilibili: do not advertise AV1; size the Venus OUTPUT plane for
+# the coded picture (3840x2160 is 6266880 bytes, not a 4 MiB guess).
+python3 "$ROOT/scripts/dagu_playback_gate.py" --patch-chromium "$OUT/official-152"
+
 echo "==> Debian tree ready at $OUT/src (unbundle; needs clang-22 + arm64 -dev)."
 echo "    Preferred path already started: official lite tree"
 echo "      $ROOT/out/chromium-v4l2-src/official-152/out/dagu"

@@ -74,3 +74,12 @@
 #     Upstream hard-requires HEVCPROFILE_MAIN so chrome://gpu lists
 #     Encode hevc main 10 but MediaRecorder.isTypeSupported is false.
 #     video_track_recorder.cc preferred VEA range MAIN..MAIN10.
+# 15) media/base/supported_types.cc IsDecoderAV1Supported(): return
+#     false. SM8250 Venus has no AV1. Advertising dav1d makes Bilibili
+#     select av01 for 4K; the audio clock then runs ahead of the picture.
+# 16) v4l2_stateful_video_decoder.cc OUTPUT S_FMT uses the coded size
+#     and VenusCompressedBitstreamBytes (3840x2160 is 6266880 bytes;
+#     the request is 8 MiB). Above 1080p, HEVC/VP9 get 8 input buffers
+#     and 8 decode requests. An access unit larger than the plane
+#     returns kPlatformDecodeFailure instead of CHECK-killing the GPU
+#     process. Applied by linux-mainline/scripts/dagu_playback_gate.py.

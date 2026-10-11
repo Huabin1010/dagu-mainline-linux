@@ -12,16 +12,38 @@
 </head>
 <body>
 <div id="hud">dagu video jank</div>
-<video id="v" playsinline muted autoplay loop controls></video>
+<video id="v" playsinline autoplay controls></video>
 <script>
 (function () {
   let v = document.getElementById("v");
   const hud = document.getElementById("hud");
   const q = new URLSearchParams(location.search);
   const src = q.get("src") || "/clip.mp4";
+  const wantSound = q.get("sound") === "1";
+  const wantLoop = q.get("loop") !== "0";
+  v.muted = !wantSound;
+  v.loop = wantLoop;
   v.src = src;
   const rows = [];
   let t0 = 0;
+  let lastMedia = null;
+  let maxSkew = 0;
+  let maxGap = 0;
+  let presented = 0;
+
+  function onFrame(_now, meta) {
+    if (meta && typeof meta.mediaTime === "number") {
+      if (lastMedia !== null) {
+        const gap = (meta.mediaTime - lastMedia) * 1000;
+        if (gap > maxGap) maxGap = gap;
+      }
+      lastMedia = meta.mediaTime;
+      const skew = Math.abs(v.currentTime - meta.mediaTime) * 1000;
+      if (skew > maxSkew) maxSkew = skew;
+      presented += 1;
+    }
+    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(onFrame);
+  }
 
   function quality() {
     if (v.getVideoPlaybackQuality) return v.getVideoPlaybackQuality();
@@ -33,14 +55,19 @@
     t0 = performance.now();
     const neu = v.cloneNode(false);
     neu.id = "v";
-    neu.muted = true;
+    neu.muted = !wantSound;
     neu.autoplay = true;
-    neu.loop = true;
+    neu.loop = wantLoop;
     neu.playsInline = true;
     neu.controls = true;
     neu.src = src;
     v.replaceWith(neu);
     v = neu;
+    lastMedia = null;
+    maxSkew = 0;
+    maxGap = 0;
+    presented = 0;
+    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(onFrame);
     return v.play().then(() => true).catch((e) => String(e));
   };
 
@@ -59,9 +86,14 @@
       drop_pct: total ? +(100 * dropped / total).toFixed(2) : null,
       webkitDecoded: v.webkitDecodedFrameCount || null,
       webkitDropped: v.webkitDroppedFrameCount || null,
+      max_av_skew_ms: +maxSkew.toFixed(2),
+      max_frame_gap_ms: +maxGap.toFixed(2),
+      presented: presented,
       samples: rows.slice(-20),
     };
   };
+
+  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(onFrame);
 
   if (q.get("quiet") === "1") {
     return;

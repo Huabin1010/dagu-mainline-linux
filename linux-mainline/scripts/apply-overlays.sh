@@ -33,6 +33,11 @@ grep -q 'nanosic_ghost_empty_ctx' \
 	echo "nanosic: driver must call nanosic_ghost_empty_ctx" >&2
 	exit 1
 }
+grep -q 'nanosic_consumer_inject' \
+	"$KERNEL_SRC/drivers/input/keyboard/nanosic-dagu.c" || {
+	echo "nanosic: FN volume release must call nanosic_consumer_inject" >&2
+	exit 1
+}
 install_src drivers/power/supply/bq2597x-dagu.c
 install_src drivers/power/supply/pm8150b-charger-dagu.c
 install_src drivers/power/supply/p9418-dagu.c

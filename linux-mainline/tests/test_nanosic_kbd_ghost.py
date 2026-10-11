@@ -11,6 +11,12 @@ Locks KEY_UP reports that shipped as leftover:
   so the last letter (i / u) stayed down and compositor-repeat fired.
 - GENI leftover empty 0x05 after 0x22 / GPIO-low / bounce / stale
   seq is still leftover and must drop.
+- FN+= / FN+- is consumer report 0x06. Usage 0xE9/0xEA is the press.
+  Usage 0 is the release, and it is all zeros. The old padding filter
+  and the 400ms keepalive window both dropped that release, so
+  KEY_VOLUMEUP stayed down and mutter ran the slider to the rail.
+  A fresh seq with GPIO83 high must inject it. A zero report with
+  nothing latched is still padding and must drop.
 """
 from __future__ import annotations
 
@@ -35,6 +41,8 @@ HID_I = 0x0c
 HID_J = 0x0d
 HID_T = 0x17
 HID_U = 0x18
+CONSUMER_VOL_UP = 0x00E9
+CONSUMER_VOL_DOWN = 0x00EA
 
 
 def _old_always_drop_mod_only(report: bytes) -> bool:
@@ -46,6 +54,18 @@ def _old_always_drop_mod_only(report: bytes) -> bool:
 def _old_80ms_debounce_drops_fast_empty(*, have_kbd_down: bool) -> bool:
     """The shipped 80ms empty debounce that left i/u down after a fast tap."""
     return have_kbd_down
+
+
+def _old_drop_zero_consumer(report: bytes) -> bool:
+    """The shipped rule: any all-zero consumer report is padding.
+
+    A real FN+volume release is usage 0, so this dropped the KEY_UP.
+    """
+    return all(b == 0 for b in report[1:])
+
+
+def _cons(usage: int = 0) -> bytes:
+    return bytes([0x06, usage & 0xFF, (usage >> 8) & 0xFF, 0x00, 0x00])
 
 
 def _rpt(mod: int = 0, *keys: int) -> bytes:
@@ -73,6 +93,22 @@ class GhostLib:
         empty.argtypes = [ctypes.c_char_p]
         empty.restype = ctypes.c_int
         self._empty = empty
+        usage = self._so.nanosic_consumer_usage_host
+        usage.argtypes = [ctypes.c_char_p]
+        usage.restype = ctypes.c_int
+        self._usage = usage
+        cons = self._so.nanosic_consumer_inject_host
+        cons.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        cons.restype = ctypes.c_int
+        self._cons = cons
 
     def ghost(
         self,
@@ -103,6 +139,55 @@ class GhostLib:
 
     def kbd_empty(self, report: bytes) -> bool:
         return bool(self._empty(report))
+
+    def consumer_usage(self, report: bytes) -> int:
+        if len(report) != 5:
+            raise ValueError(f"consumer report is 5 bytes, got {len(report)}")
+        return int(self._usage(report))
+
+    def consumer_inject(
+        self,
+        report: bytes,
+        *,
+        leftover_window: bool = False,
+        have_consumer_down: bool = False,
+        seen_vendor: bool = False,
+        rx_have_prev_seq: bool = True,
+        rx_seq_delta: int = 1,
+        gpio_pending: bool = False,
+    ) -> bool:
+        if len(report) != 5:
+            raise ValueError(f"consumer report is 5 bytes, got {len(report)}")
+        return bool(
+            self._cons(
+                report,
+                int(leftover_window),
+                int(have_consumer_down),
+                int(seen_vendor),
+                int(rx_have_prev_seq),
+                int(rx_seq_delta),
+                int(gpio_pending),
+            )
+        )
+
+    def consumer_stream(
+        self, steps: tuple[tuple[bytes, bool], ...]
+    ) -> list[bytes]:
+        """steps: (report, leftover_window). Tracks the latched usage."""
+        injected: list[bytes] = []
+        last: bytes | None = None
+        down = False
+        for report, leftover in steps:
+            if not self.consumer_inject(
+                report, leftover_window=leftover, have_consumer_down=down
+            ):
+                continue
+            if last == report:
+                continue
+            last = report
+            injected.append(report)
+            down = self.consumer_usage(report) != 0
+        return injected
 
     def inject_stream(self, stream: tuple[bytes, ...]) -> list[bytes]:
         injected: list[bytes] = []
@@ -330,6 +415,89 @@ class TestNanosicKbdGhost(unittest.TestCase):
         self.assertTrue(
             self.lib.ghost(_rpt(), seen_vendor=True, have_kbd_down=True)
         )
+
+    def test_consumer_usage_is_little_endian(self) -> None:
+        self.assertEqual(self.lib.consumer_usage(_cons(CONSUMER_VOL_UP)), CONSUMER_VOL_UP)
+        self.assertEqual(
+            self.lib.consumer_usage(_cons(CONSUMER_VOL_DOWN)), CONSUMER_VOL_DOWN
+        )
+        self.assertEqual(self.lib.consumer_usage(_cons(0)), 0)
+
+    def test_old_drop_zero_consumer_is_the_volume_bug(self) -> None:
+        release = _cons(0)
+        self.assertTrue(
+            _old_drop_zero_consumer(release),
+            "document the padding rule that dropped the volume KEY_UP",
+        )
+        self.assertTrue(
+            self.lib.consumer_inject(
+                release,
+                leftover_window=True,
+                have_consumer_down=True,
+            ),
+            "FN+= release inside the keepalive window must reach HID",
+        )
+
+    def test_volume_release_after_keepalive_is_injected(self) -> None:
+        """Press, 0x22 keepalive, usage 0. Window is open; release still lands."""
+        press = _cons(CONSUMER_VOL_UP)
+        release = _cons(0)
+        injected = self.lib.consumer_stream(
+            (
+                (press, False),
+                (release, True),
+            )
+        )
+        self.assertEqual(injected, [press, release])
+
+    def test_volume_down_release_is_injected(self) -> None:
+        press = _cons(CONSUMER_VOL_DOWN)
+        release = _cons(0)
+        injected = self.lib.consumer_stream(((press, False), (release, True)))
+        self.assertEqual(injected, [press, release])
+
+    def test_padding_zero_consumer_with_nothing_latched_is_dropped(self) -> None:
+        self.assertFalse(
+            self.lib.consumer_inject(_cons(0), leftover_window=True),
+            "GENI zero 0x06 with no volume key down must not reach the seat",
+        )
+
+    def test_volume_press_inside_leftover_window_is_dropped(self) -> None:
+        self.assertFalse(
+            self.lib.consumer_inject(
+                _cons(CONSUMER_VOL_UP), leftover_window=True
+            )
+        )
+
+    def test_volume_release_while_gpio_pending_is_dropped(self) -> None:
+        self.assertFalse(
+            self.lib.consumer_inject(
+                _cons(0),
+                have_consumer_down=True,
+                gpio_pending=True,
+            )
+        )
+
+    def test_volume_release_same_envelope_as_vendor_is_dropped(self) -> None:
+        self.assertFalse(
+            self.lib.consumer_inject(
+                _cons(0),
+                have_consumer_down=True,
+                seen_vendor=True,
+            )
+        )
+
+    def test_volume_release_stale_seq_is_dropped(self) -> None:
+        self.assertFalse(
+            self.lib.consumer_inject(
+                _cons(0),
+                have_consumer_down=True,
+                rx_seq_delta=0,
+            )
+        )
+
+    def test_volume_press_outside_window_is_injected(self) -> None:
+        self.assertTrue(self.lib.consumer_inject(_cons(CONSUMER_VOL_UP)))
 
 
 if __name__ == "__main__":

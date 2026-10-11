@@ -17,6 +17,7 @@
 #include <stdint.h>
 typedef uint8_t u8;
 typedef int8_t s8;
+typedef uint16_t u16;
 #else
 #include <linux/types.h>
 #endif
@@ -101,6 +102,59 @@ static inline bool nanosic_ghost_empty_ctx(const u8 *p, bool seen_vendor,
 	    (ctx->rx_seq_delta == 1 || ctx->rx_seq_delta == 2))
 		return false;
 	return nanosic_ghost_leftover(seen_vendor, ctx);
+}
+
+/* Consumer control report ID 0x06: one 16-bit array usage, little endian.
+ * 0x00E9 is volume up, 0x00EA is volume down. Usage 0 is the HID array
+ * release. GENI padding is also usage 0. Inject that release only when a
+ * usage is still latched and this packet is a fresh MCU sequence with
+ * GPIO83 already high — the same rule as an empty 0x05 KEY_UP. The 400ms
+ * keepalive window must not apply: the MCU sends 0x22 between press and
+ * release. Dropping usage 0 leaves KEY_VOLUMEUP down, and mutter
+ * compositor-repeat runs the slider to the rail.
+ */
+struct nanosic_consumer_ctx {
+	bool have_consumer_down;
+	bool seen_vendor;
+	bool rx_have_prev_seq;
+	s8 rx_seq_delta;
+	bool gpio_pending;
+};
+
+static inline u16 nanosic_consumer_usage(const u8 *p)
+{
+	return (u16)p[1] | ((u16)p[2] << 8);
+}
+
+/* True: this usage-0 report is the MCU release, not GENI padding. */
+static inline bool nanosic_consumer_release_inject(const u8 *p,
+					const struct nanosic_consumer_ctx *ctx)
+{
+	if (nanosic_consumer_usage(p) != 0)
+		return false;
+	if (!ctx->have_consumer_down)
+		return false;
+	if (ctx->seen_vendor)
+		return false;
+	if (ctx->gpio_pending)
+		return false;
+	if (!ctx->rx_have_prev_seq)
+		return false;
+	if (ctx->rx_seq_delta != 1 && ctx->rx_seq_delta != 2)
+		return false;
+	return true;
+}
+
+/* Presses still honor the leftover window (a ghost 0x06 cancels mutter
+ * hold-repeat). A latched usage-0 release does not: that window ate the
+ * FN+volume KEY_UP, so compositor-repeat held the slider on the rail.
+ */
+static inline bool nanosic_consumer_inject(const u8 *p, bool leftover_window,
+					const struct nanosic_consumer_ctx *ctx)
+{
+	if (nanosic_consumer_usage(p) == 0)
+		return nanosic_consumer_release_inject(p, ctx);
+	return !leftover_window;
 }
 
 #endif /* _NANOSIC_KBD_GHOST_H */

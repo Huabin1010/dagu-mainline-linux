@@ -25,6 +25,11 @@
  * compositor hold-repeat on a seat pointer event. Modifier-only
  * (keys=00, p[1] set) is the real C KEY_UP while Ctrl stays held;
  * dropping it leaves C down and compositor-repeat fires Ctrl+C.
+ * Consumer report 0x06 usage 0 is the volume/brightness release.
+ * It is all zeros, so the old padding filter and the 400ms keepalive
+ * window both dropped it. KEY_VOLUMEUP stayed down and mutter
+ * compositor-repeat ran the slider to the rail. A fresh seq with
+ * GPIO83 high is that release; padding with nothing latched still drops.
  */
 
 #include <linux/bits.h>
@@ -116,6 +121,10 @@ struct nanosic_kb {
 	unsigned long last_vendor_jiffies;
 	bool have_vendor;
 	bool have_kbd_down;
+	/* Last consumer report. Usage 0 is the array release. */
+	u8 last_consumer[5];
+	bool have_consumer;
+	bool have_consumer_down;
 	bool rx_is_drain;
 	s8 rx_seq_delta;
 	bool rx_have_prev_seq;
@@ -322,8 +331,10 @@ static int nanosic_hid_register(struct nanosic_kb *kb, unsigned int idx)
 	}
 	/* Wayland clients ignore EV_REP. Kernel autorepeat on this I2C
 	 * HID is leftover noise; mutter compositor owns hold-repeat.
+	 * Consumer too: kernel 33ms repeat on a stuck KEY_VOLUMEUP
+	 * runs the slider to the rail on top of mutter's timer.
 	 */
-	if (idx == NANOSIC_HID_KEYBOARD) {
+	if (idx == NANOSIC_HID_KEYBOARD || idx == NANOSIC_HID_CONSUMER) {
 		struct hid_input *hidinput;
 
 		list_for_each_entry(hidinput, &hdev->inputs, list) {
@@ -406,10 +417,13 @@ static void nanosic_inject(struct nanosic_kb *kb, unsigned int idx, u8 *data, si
 		return;
 	/*
 	 * GENI clocks 68 bytes. Padding after a real 0x05 is often a zero
-	 * 0x02/0x19/0x06. Mutter 50 cancels compositor key-repeat if a
-	 * pointer/consumer event arrives on the same seat.
+	 * 0x02/0x19. Mutter 50 cancels compositor key-repeat if a
+	 * pointer event arrives on the same seat.
+	 * Consumer usage 0 is also all zeros, and that one is the
+	 * volume/brightness KEY_UP. The caller only injects it when a
+	 * usage is latched, so do not drop it here.
 	 */
-	if (idx != NANOSIC_HID_KEYBOARD) {
+	if (idx != NANOSIC_HID_KEYBOARD && idx != NANOSIC_HID_CONSUMER) {
 		for (i = 1; i < len; i++) {
 			if (data[i])
 				break;
@@ -445,6 +459,8 @@ static bool nanosic_leftover_window(struct nanosic_kb *kb, bool seen_vendor)
 	/* Injected hold on event3 repeats in mutter. Physical hold dies
 	 * when leftover 0x02/0x19/0x06 still reaches the seat. Drop them
 	 * for the whole KEY_DOWN, not just 400ms (mutter delay is 500ms).
+	 * Consumer usage 0 does not use this: that release has to land
+	 * or KEY_VOLUMEUP stays down.
 	 */
 	if (kb->have_kbd_down)
 		return true;
@@ -467,6 +483,26 @@ static void nanosic_inject_keyboard(struct nanosic_kb *kb, u8 *p)
 	kb->have_kbd = true;
 	kb->have_kbd_down = !nanosic_kbd_empty(report);
 	nanosic_inject(kb, NANOSIC_HID_KEYBOARD, report, 9);
+}
+
+static void nanosic_inject_consumer(struct nanosic_kb *kb, u8 *p)
+{
+	u8 report[5];
+	u16 usage;
+
+	memcpy(report, p, 5);
+	usage = nanosic_consumer_usage(report);
+	/* Pad is outside the 16-bit array. A release must be usage 0
+	 * so hid-input drops KEY_VOLUMEUP / KEY_VOLUMEDOWN.
+	 */
+	if (!usage)
+		memset(report + 1, 0, 4);
+	if (kb->have_consumer && !memcmp(kb->last_consumer, report, 5))
+		return;
+	memcpy(kb->last_consumer, report, 5);
+	kb->have_consumer = true;
+	kb->have_consumer_down = usage != 0;
+	nanosic_inject(kb, NANOSIC_HID_CONSUMER, report, 5);
 }
 
 /* CAF QUP zeros unused bytes of the 68-byte FIFO. GENI leaves the previous
@@ -528,6 +564,21 @@ static bool nanosic_data_pending(struct nanosic_kb *kb)
 		return false;
 	/* Falling IRQ: physical low means the MCU still has a packet. */
 	return gpiod_get_raw_value_cansleep(kb->irq_gpio) == 0;
+}
+
+static bool nanosic_consumer_want(struct nanosic_kb *kb, const u8 *p,
+				  bool seen_vendor)
+{
+	struct nanosic_consumer_ctx ctx = {
+		.have_consumer_down = kb->have_consumer_down,
+		.seen_vendor = seen_vendor,
+		.rx_have_prev_seq = kb->rx_have_prev_seq,
+		.rx_seq_delta = kb->rx_seq_delta,
+		.gpio_pending = nanosic_data_pending(kb),
+	};
+
+	return nanosic_consumer_inject(p, nanosic_leftover_window(kb, seen_vendor),
+				       &ctx);
 }
 
 /* True: GENI leftover empty 0x05, not the MCU KEY_UP. */
@@ -651,9 +702,23 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 				return 0;
 			if (kb->rx_host_cmd)
 				return 0;
-			if (nanosic_leftover_window(kb, seen_vendor))
-				return 0;
-			nanosic_inject(kb, NANOSIC_HID_CONSUMER, p, 5);
+			/* Usage 0 is the array KEY_UP (FN+= / FN+-).
+			 * The 400ms keepalive window and the all-zero
+			 * padding filter both used to drop it, so mutter
+			 * repeated volume to the rail. Padding with
+			 * nothing latched still drops.
+			 */
+			if (!nanosic_consumer_want(kb, p, seen_vendor)) {
+				p += 5;
+				left -= 5;
+				break;
+			}
+			dev_info(&kb->client->dev,
+				 "consumer seq=%02x usage=%04x down=%d gpio=%d\n",
+				 data[1], nanosic_consumer_usage(p),
+				 nanosic_consumer_usage(p) != 0,
+				 nanosic_data_pending(kb));
+			nanosic_inject_consumer(kb, p);
 			p += 5;
 			left -= 5;
 			break;

@@ -23,3 +23,24 @@ int nanosic_kbd_empty_host(const unsigned char *p)
 {
 	return nanosic_kbd_empty(p) ? 1 : 0;
 }
+
+int nanosic_consumer_usage_host(const unsigned char *p)
+{
+	return nanosic_consumer_usage(p);
+}
+
+int nanosic_consumer_inject_host(const unsigned char *p, int leftover_window,
+				 int have_consumer_down, int seen_vendor,
+				 int rx_have_prev_seq, int rx_seq_delta,
+				 int gpio_pending)
+{
+	struct nanosic_consumer_ctx ctx = {
+		.have_consumer_down = have_consumer_down,
+		.seen_vendor = seen_vendor,
+		.rx_have_prev_seq = rx_have_prev_seq,
+		.rx_seq_delta = (s8)rx_seq_delta,
+		.gpio_pending = gpio_pending,
+	};
+
+	return nanosic_consumer_inject(p, leftover_window, &ctx) ? 1 : 0;
+}

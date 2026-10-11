@@ -267,8 +267,11 @@ make O="$KBUILD_OUTPUT" -j"$JOBS" Image.gz dtbs
 
 test -f "$KBUILD_OUTPUT/arch/arm64/boot/dts/qcom/$DTB_NAME" \
 	|| die "dtb not built — apply-dts.sh / Makefile?"
-"${CROSS_COMPILE}readelf" -S "$KBUILD_OUTPUT/vmlinux" | grep -q ' \.BTF' \
-	|| die "vmlinux has no .BTF — pahole failed; /sys/kernel/btf/vmlinux would be missing"
+# grep -q exits early and SIGPIPE makes this pipeline fail under pipefail
+# even when .BTF is present.
+if ! "${CROSS_COMPILE}readelf" -S "$KBUILD_OUTPUT/vmlinux" | grep ' \.BTF' >/dev/null; then
+	die "vmlinux has no .BTF — pahole failed; /sys/kernel/btf/vmlinux would be missing"
+fi
 
 if [[ "${DAGU_DISPLAY:-0}" == 1 ]] && grep -q '^CONFIG_VIDEO_QCOM_VENUS=m' "$cfg"; then
 	echo "==> venus modules (not autoloaded)"

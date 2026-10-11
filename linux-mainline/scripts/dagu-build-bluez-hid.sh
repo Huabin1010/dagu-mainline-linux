@@ -46,6 +46,12 @@ cd "$WORKDIR"/bluez-*
 
 python3 "$SRC_HELPER" profiles/input/device.c
 grep -q input_device_wait_incoming_timeout profiles/input/device.c
+python3 "$(dirname "$SRC_HELPER")/dagu-bluez-le-reconnect.py" src/device.c
+grep -q "dagu: a drop during GATT browse must still answer Pair" src/device.c
+python3 "$(dirname "$SRC_HELPER")/dagu-bluez-hold-discovery.py" .
+grep -q "dagu: do not resume discovery while LE GATT" src/adapter.c
+python3 "$(dirname "$SRC_HELPER")/dagu-bluez-att-retry.py" src/shared/att.c
+grep -q "dagu: resend a missed ATT PDU" src/shared/att.c
 
 DEB_BUILD_OPTIONS="nocheck parallel=$(nproc)" dpkg-buildpackage -b -uc -us -j"$(nproc)"
 

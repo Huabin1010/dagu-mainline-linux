@@ -1333,7 +1333,7 @@ text = path.read_text()
 changed = False
 
 marker = "dagu: accept-list / unset-handle LE cancel"
-if marker not in text:
+if marker not in text and "dagu: an in-flight LE Create must be cancelled" not in text:
     old = """static int hci_le_connect_cancel_sync(struct hci_dev *hdev,
 				      struct hci_conn *conn, u8 reason)
 {
@@ -1381,6 +1381,34 @@ if marker not in text:
 """
     if old not in text:
         raise SystemExit(f"{path}: hci_le_connect_cancel_sync not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {path}: {marker}")
+
+marker = "dagu: an in-flight LE Create must be cancelled"
+if marker not in text:
+    old = """	/* dagu: accept-list / unset-handle LE cancel. GNOME Device.Connect
+	 * parks HOG in HCI_CONN_SCANNING (no LE Create Connection). Sending
+	 * LE_CREATE_CONN_CANCEL then gets 0x02/0x0C and leaves handle 3840
+	 * in BT_CONNECT, so the next Settings click times out. Skip the
+	 * command; abort_conn_sync still runs hci_conn_failed.
+	 */
+	if (test_bit(HCI_CONN_SCANNING, &conn->flags) ||
+	    HCI_CONN_HANDLE_UNSET(conn->handle))
+		return 0;
+"""
+    new = """	/* dagu: an in-flight LE Create must be cancelled. Accept-list
+	 * connect sets HCI_CONN_SCANNING and never sends LE Create
+	 * Connection, so cancel returns 0x0c. A direct create leaves
+	 * the handle unset until complete; QCA6390 keeps initiating
+	 * until LE Create Connection Cancel, and the next Pair is
+	 * Command Disallowed.
+	 */
+	if (test_bit(HCI_CONN_SCANNING, &conn->flags))
+		return 0;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: LE create cancel skip not found")
     text = text.replace(old, new, 1)
     changed = True
     print(f"patched {path}: {marker}")
@@ -1501,6 +1529,208 @@ if marker not in text:
         raise SystemExit(f"{path}: L2CAP LE connect-scan branch not found")
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/mgmt.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: explicit Pair sends LE Create Connection now"
+if marker not in text:
+    old = """		conn = hci_connect_le_scan(hdev, &cp->addr.bdaddr, addr_type,
+					   sec_level, HCI_LE_CONN_TIMEOUT,
+					   CONN_REASON_PAIR_DEVICE);
+"""
+    new = """		/* dagu: explicit Pair sends LE Create Connection now.
+		 * hci_connect_le_scan only arms the accept list. While
+		 * Settings is still discovering, hci_update_passive_scan_sync
+		 * returns without scanning, so the click sits in
+		 * HCI_CONN_SCANNING until HCI_LE_CONN_TIMEOUT (20 s).
+		 * PHY 1M matches a directed create; QCA6390 rejects
+		 * Initiating PHYs=0 with status 0x11.
+		 * hci_connect_le holds only a newly created conn. A second
+		 * Pair reuses it with connect_cfm_cb already set and the
+		 * busy path below drops one ref, so hold that reuse.
+		 */
+		conn = hci_connect_le(hdev, &cp->addr.bdaddr, addr_type,
+				      false, sec_level, HCI_LE_CONN_TIMEOUT,
+				      HCI_ROLE_MASTER, HCI_ADV_PHY_1M, 0);
+		if (!IS_ERR(conn)) {
+			conn->conn_reason = CONN_REASON_PAIR_DEVICE;
+			if (conn->connect_cfm_cb)
+				hci_conn_hold(conn);
+		}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: pair_device LE scan connect not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" "$KERNEL_SRC/net/bluetooth/mgmt.c" <<'PY'
+from pathlib import Path
+import sys
+
+sync = Path(sys.argv[1])
+mgmt = Path(sys.argv[2])
+text = sync.read_text()
+changed = False
+
+marker = "dagu: a click already has an LE initiator"
+if marker not in text:
+    old = """	bt_dev_dbg(hdev, "");
+	hci_dev_lock(hdev);
+
+	if (!hci_dev_test_flag(hdev, HCI_LE_SCAN))
+		goto _return;
+"""
+    new = """	bt_dev_dbg(hdev, "");
+	hci_dev_lock(hdev);
+
+	/* dagu: a click already has an LE initiator. Do not start the
+	 * Inquiry half of interleaved discovery on top of it. QCA6390
+	 * is TDD; Inquiry aborts LE Create Connection and the Settings
+	 * row spins until the D-Bus timeout.
+	 */
+	if (hci_lookup_le_connect(hdev))
+		goto _return;
+
+	if (!hci_dev_test_flag(hdev, HCI_LE_SCAN))
+		goto _return;
+"""
+    if old not in text:
+        raise SystemExit(f"{sync}: le_scan_disable early return not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {sync}: {marker}")
+
+marker = "dagu: 2M is not a primary scanning PHY"
+if marker not in text:
+    old = """	if (scan_2m(hdev) && (conn->le_adv_phy == HCI_ADV_PHY_2M ||
+			      conn->le_adv_sec_phy == HCI_ADV_PHY_2M)) {
+"""
+    new = """	/* dagu: 2M is not a primary scanning PHY. L2CAP passes it as
+	 * sec_phy; QCA6390 then splits the initiator off 1M and misses
+	 * the mouse until HCI_LE_CONN_TIMEOUT.
+	 */
+	if (scan_2m(hdev) && conn->le_adv_phy == HCI_ADV_PHY_2M) {
+"""
+    if old not in text:
+        raise SystemExit(f"{sync}: 2M initiating PHY condition not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {sync}: {marker}")
+
+marker = "dagu: explicit connect owns the radio"
+if marker not in text:
+    old = """	clear_bit(HCI_CONN_SCANNING, &conn->flags);
+	conn->state = BT_CONNECT;
+
+	/* If requested to connect as peripheral use directed advertising */
+"""
+    new = """	clear_bit(HCI_CONN_SCANNING, &conn->flags);
+	conn->state = BT_CONNECT;
+
+	/* dagu: explicit connect owns the radio. Cancel the interleaved
+	 * discovery timer so it cannot queue Inquiry under this initiator.
+	 */
+	cancel_delayed_work(&hdev->le_scan_disable);
+
+	/* If requested to connect as peripheral use directed advertising */
+"""
+    if old not in text:
+        raise SystemExit(f"{sync}: create-conn state assign not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {sync}: {marker}")
+
+marker = "dagu: QCA6390 keeps the previous LE Set Extended Scan"
+if marker not in text:
+    old = """	if (err)
+		goto done;
+	/* Send command LE Extended Create Connection if supported */
+	if (use_ext_conn(hdev)) {
+"""
+    new = """	if (err)
+		goto done;
+
+	/* dagu: QCA6390 keeps the previous LE Set Extended Scan
+	 * Parameters for the initiator. Discovery programmed 1M at
+	 * 11.25 ms plus Coded at 33.75 ms, so Create Connection
+	 * listens on Coded and misses a 1M mouse for the 20 s timeout.
+	 * Latch 1M only, window == interval, and do not enable scan.
+	 */
+	if (use_ext_scan(hdev)) {
+		struct hci_cp_le_set_ext_scan_params *sp;
+		struct hci_cp_le_scan_phy_params *phy;
+		u8 sdata[sizeof(*sp) + sizeof(*phy)];
+		u16 win = hdev->le_scan_window_connect;
+
+		sp = (void *)sdata;
+		phy = (void *)sp->data;
+		memset(sdata, 0, sizeof(sdata));
+		sp->own_addr_type = own_addr_type;
+		sp->filter_policy = 0x00;
+		sp->scanning_phys = LE_SCAN_PHY_1M;
+		phy->type = LE_SCAN_PASSIVE;
+		phy->interval = cpu_to_le16(win);
+		phy->window = cpu_to_le16(win);
+		__hci_cmd_sync_status(hdev, HCI_OP_LE_SET_EXT_SCAN_PARAMS,
+				      sizeof(sdata), sdata, HCI_CMD_TIMEOUT);
+	}
+
+	/* Send command LE Extended Create Connection if supported */
+	if (use_ext_conn(hdev)) {
+"""
+    if old not in text:
+        raise SystemExit(f"{sync}: ext create call site not found")
+    text = text.replace(old, new, 1)
+    changed = True
+    print(f"patched {sync}: {marker}")
+
+if changed:
+    sync.write_text(text)
+
+mtext = mgmt.read_text()
+marker = "dagu: pair on an existing LE link"
+if marker not in mtext:
+    old = """		conn = hci_connect_le(hdev, &cp->addr.bdaddr, addr_type,
+				      false, sec_level, HCI_LE_CONN_TIMEOUT,
+				      HCI_ROLE_MASTER, HCI_ADV_PHY_1M, 0);
+		if (!IS_ERR(conn)) {
+			conn->conn_reason = CONN_REASON_PAIR_DEVICE;
+			if (conn->connect_cfm_cb)
+				hci_conn_hold(conn);
+		}
+"""
+    new = """		conn = hci_connect_le(hdev, &cp->addr.bdaddr, addr_type,
+				      false, sec_level, HCI_LE_CONN_TIMEOUT,
+				      HCI_ROLE_MASTER, HCI_ADV_PHY_1M, 0);
+		/* dagu: pair on an existing LE link. BlueZ opens ATT
+		 * before SMP on some builds; hci_connect_le returns
+		 * EBUSY and Pair retries until the 25 s D-Bus timeout.
+		 * Raise security on the link we already have.
+		 */
+		if (IS_ERR(conn) && PTR_ERR(conn) == -EBUSY) {
+			conn = hci_conn_hash_lookup_le(hdev, &cp->addr.bdaddr,
+						       addr_type);
+			if (!conn)
+				conn = ERR_PTR(-EBUSY);
+		}
+		if (!IS_ERR(conn)) {
+			if (conn->pending_sec_level < sec_level)
+				conn->pending_sec_level = sec_level;
+			conn->conn_reason = CONN_REASON_PAIR_DEVICE;
+			if (conn->connect_cfm_cb)
+				hci_conn_hold(conn);
+		}
+"""
+    if old not in mtext:
+        raise SystemExit(f"{mgmt}: explicit pair connect block not found")
+    mgmt.write_text(mtext.replace(old, new, 1))
+    print(f"patched {mgmt}: {marker}")
 PY
 
 python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
@@ -1649,6 +1879,547 @@ if marker not in text:
         raise SystemExit(f"{path}: SIMULTANEOUS_DISCOVERY block not found")
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/drivers/bluetooth/hci_qca.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: QCA6390 advertises LE Coded"
+if marker not in text:
+    old = """	if (soc_type != QCA_ROME && soc_type != QCA_QCA6390)
+		hci_set_quirk(hdev, HCI_QUIRK_SIMULTANEOUS_DISCOVERY);
+"""
+    new = """	if (soc_type != QCA_ROME && soc_type != QCA_QCA6390)
+		hci_set_quirk(hdev, HCI_QUIRK_SIMULTANEOUS_DISCOVERY);
+
+	/* dagu: QCA6390 advertises LE Coded. Extended scan then uses
+	 * 1M at 11.25 ms plus Coded at 33.75 ms, so the initiator
+	 * spends most of the radio off a 1M mouse and Settings hits
+	 * the D-Bus timeout. Same quirk Intel uses when that feature
+	 * bit breaks extended scanning.
+	 */
+	if (soc_type == QCA_ROME || soc_type == QCA_QCA6390)
+		hci_set_quirk(hdev, HCI_QUIRK_BROKEN_LE_CODED);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: QCA discovery quirk site not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/include/net/bluetooth/hci_core.h" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: do not scan LE Coded when the controller quirk says it breaks 1M"
+if marker not in text:
+    old = """#define scan_coded(dev) (((dev)->le_tx_def_phys & HCI_LE_SET_PHY_CODED) || \\
+			 ((dev)->le_rx_def_phys & HCI_LE_SET_PHY_CODED))
+"""
+    new = """/* dagu: do not scan LE Coded when the controller quirk says it breaks 1M */
+#define scan_coded(dev) (!hci_test_quirk((dev), HCI_QUIRK_BROKEN_LE_CODED) && \\
+			 (((dev)->le_tx_def_phys & HCI_LE_SET_PHY_CODED) || \\
+			  ((dev)->le_rx_def_phys & HCI_LE_SET_PHY_CODED)))
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: scan_coded macro not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/include/net/bluetooth/hci_core.h" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "hci_le_clamp_conn_params"
+if marker not in text:
+    old = """int hci_abort_conn(struct hci_conn *conn, u8 reason);
+u8 hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,
+		      u16 to_multiplier);
+"""
+    new = """int hci_abort_conn(struct hci_conn *conn, u8 reason);
+void hci_le_clamp_conn_params(struct hci_dev *hdev, u16 *min, u16 *max,
+			      u16 *latency, u16 *timeout);
+u8 hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,
+		      u16 to_multiplier);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hci_le_conn_update declaration not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_core.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: 420 ms (0x002a) dies"
+if marker not in text:
+    old = """	hdev->le_conn_latency = 0x0000;
+	hdev->le_supv_timeout = 0x002a;
+"""
+    new = """	hdev->le_conn_latency = 0x0000;
+	/* dagu: 420 ms (0x002a) dies when a mouse applies slave latency
+	 * before the central has accepted it. 3 s matches HID PPCP.
+	 */
+	hdev->le_supv_timeout = 0x012c;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: le_supv_timeout default not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_conn.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: QCA6390 returns HCI 0x3b"
+if marker not in text and "dagu: CE length is the interval" not in text:
+    old = """u8 hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,
+		      u16 to_multiplier)
+{
+	struct hci_dev *hdev = conn->hdev;
+	struct hci_conn_params *params;
+	struct hci_cp_le_conn_update cp;
+
+	hci_dev_lock(hdev);
+"""
+    new = """/* dagu: QCA6390 returns HCI 0x3b (Unacceptable Connection Parameters)
+ * for interval 6/7. Latency 100 then stretches ATT past the 25 s
+ * Settings Pair call, so the row shows disconnected while the mouse
+ * has already left pairing. Keep 30–50 ms and an effective interval
+ * of at most 60 ms, with supervision of at least 3 s.
+ */
+void hci_le_clamp_conn_params(struct hci_dev *hdev, u16 *min, u16 *max,
+			      u16 *latency, u16 *timeout)
+{
+	u16 floor = hdev->le_conn_min_interval;
+	u16 ceil = hdev->le_conn_max_interval;
+	u16 omin = *min, omax = *max, olat = *latency, otimeout = *timeout;
+	u32 span;
+
+	if (floor < 0x0006)
+		floor = 0x0018;
+	if (!ceil || ceil < floor)
+		ceil = 0x0028;
+
+	if (*min < floor)
+		*min = floor;
+	if (*max < *min)
+		*max = *min;
+	if (*max > ceil)
+		*max = ceil;
+	if (*min > *max)
+		*min = *max;
+
+	if (*timeout < 0x012c)
+		*timeout = 0x012c;
+	if (*timeout > 0x0c80)
+		*timeout = 0x0c80;
+
+	/* (1 + latency) * interval_units * 1.25 ms <= 60 ms. */
+	span = *max ? 48 / *max : 1;
+	if (!span)
+		span = 1;
+	if (*latency > span - 1)
+		*latency = span - 1;
+
+	while (*latency && (u32)*timeout * 4 <= (u32)(1 + *latency) * *max)
+		(*latency)--;
+
+	if (omin != *min || omax != *max || olat != *latency ||
+	    otimeout != *timeout)
+		bt_dev_info(hdev,
+			    "dagu: LE params %u-%u lat %u timeout %u -> %u-%u lat %u timeout %u",
+			    omin, omax, olat, otimeout,
+			    *min, *max, *latency, *timeout);
+}
+
+u8 hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,
+		      u16 to_multiplier)
+{
+	struct hci_dev *hdev = conn->hdev;
+	struct hci_conn_params *params;
+	struct hci_cp_le_conn_update cp;
+
+	hci_le_clamp_conn_params(hdev, &min, &max, &latency, &to_multiplier);
+
+	hci_dev_lock(hdev);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hci_le_conn_update not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+orig = text
+marker = "dagu: stored PPCP of interval 7"
+if marker not in text:
+    old = """		conn->le_supv_timeout = hdev->le_supv_timeout;
+	}
+
+	/* dagu: GNOME Settings Pair/Connect while the bluetooth page is
+"""
+    new = """		conn->le_supv_timeout = hdev->le_supv_timeout;
+	}
+
+	/* dagu: stored PPCP of interval 7 / latency 32 must not be
+	 * offered to QCA6390. Clamp before both create opcodes.
+	 */
+	hci_le_clamp_conn_params(hdev, &conn->le_conn_min_interval,
+				 &conn->le_conn_max_interval,
+				 &conn->le_conn_latency,
+				 &conn->le_supv_timeout);
+
+	/* dagu: GNOME Settings Pair/Connect while the bluetooth page is
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: LE create param copy not found")
+    text = text.replace(old, new, 1)
+    print(f"patched {path}: {marker}")
+
+marker2 = "dagu: same clamp as the LL parameter reply"
+if (marker2 not in text and "dagu: do not push a substituted update onto a live link" not in text
+        and "dagu: stored PPCP is the mouse's request" not in text):
+    old = """	struct hci_cp_le_conn_update cp;
+
+	memset(&cp, 0, sizeof(cp));
+	cp.handle		= cpu_to_le16(conn->handle);
+	cp.conn_interval_min	= cpu_to_le16(params->conn_min_interval);
+	cp.conn_interval_max	= cpu_to_le16(params->conn_max_interval);
+	cp.conn_latency		= cpu_to_le16(params->conn_latency);
+	cp.supervision_timeout	= cpu_to_le16(params->supervision_timeout);
+"""
+    new = """	struct hci_cp_le_conn_update cp;
+	/* dagu: same clamp as the LL parameter reply */
+	u16 min = params->conn_min_interval;
+	u16 max = params->conn_max_interval;
+	u16 latency = params->conn_latency;
+	u16 timeout = params->supervision_timeout;
+
+	hci_le_clamp_conn_params(hdev, &min, &max, &latency, &timeout);
+	params->conn_min_interval = min;
+	params->conn_max_interval = max;
+	params->conn_latency = latency;
+	params->supervision_timeout = timeout;
+
+	memset(&cp, 0, sizeof(cp));
+	cp.handle		= cpu_to_le16(conn->handle);
+	cp.conn_interval_min	= cpu_to_le16(min);
+	cp.conn_interval_max	= cpu_to_le16(max);
+	cp.conn_latency		= cpu_to_le16(latency);
+	cp.supervision_timeout	= cpu_to_le16(timeout);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hci_le_conn_update_sync not found")
+    text = text.replace(old, new, 1)
+    print(f"patched {path}: {marker2}")
+
+if text != orig:
+    path.write_text(text)
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_event.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: reply with the clamped window"
+if marker not in text and "dagu: reply with the peripheral's values" not in text:
+    old = """	if (max > hcon->le_conn_max_interval) {
+		send_conn_param_neg_reply(hdev, handle,
+					  HCI_ERROR_INVALID_LL_PARAMS);
+		goto unlock;
+	}
+
+	if (hci_check_conn_params(min, max, latency, timeout)) {
+		send_conn_param_neg_reply(hdev, handle,
+					  HCI_ERROR_INVALID_LL_PARAMS);
+		goto unlock;
+	}
+"""
+    new = """	/* dagu: reply with the clamped window. A negative reply, or a
+	 * reply of interval 6/7, makes this controller drop the mouse
+	 * after the LED has already stopped.
+	 */
+	hci_le_clamp_conn_params(hdev, &min, &max, &latency, &timeout);
+
+	if (hci_check_conn_params(min, max, latency, timeout)) {
+		send_conn_param_neg_reply(hdev, handle,
+					  HCI_ERROR_INVALID_LL_PARAMS);
+		goto unlock;
+	}
+
+	hcon->le_conn_min_interval = min;
+	hcon->le_conn_max_interval = max;
+	hcon->le_conn_latency = latency;
+	hcon->le_supv_timeout = timeout;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: remote conn param reject not found")
+    text = text.replace(old, new, 1)
+
+    old = """	cp.handle = ev->handle;
+	cp.interval_min = ev->interval_min;
+	cp.interval_max = ev->interval_max;
+	cp.latency = ev->latency;
+	cp.timeout = ev->timeout;
+"""
+    new = """	cp.handle = ev->handle;
+	cp.interval_min = cpu_to_le16(min);
+	cp.interval_max = cpu_to_le16(max);
+	cp.latency = cpu_to_le16(latency);
+	cp.timeout = cpu_to_le16(timeout);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: conn param reply fields not found")
+    text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_conn.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: substituting a different interval makes this mouse"
+if (marker not in text and "dagu: QCA6390 rejects 7.5 ms" not in text
+        and "dagu: applying 7.5 ms makes this controller report success"
+        not in text and "dagu: CE length is the interval" not in text):
+    old = """	hci_le_clamp_conn_params(hdev, &min, &max, &latency, &to_multiplier);
+
+	hci_dev_lock(hdev);
+"""
+    new = """	{
+		u16 omin = min, omax = max, olat = latency, oto = to_multiplier;
+
+		hci_le_clamp_conn_params(hdev, &min, &max, &latency,
+					 &to_multiplier);
+		/* dagu: applying 7.5 ms makes this controller report success
+		 * and then ATT never answers, so Pair spins until timeout.
+		 * The L2CAP request is rejected. Do not send it from here.
+		 */
+		if (omin != min || omax != max || olat != latency ||
+		    oto != to_multiplier)
+			return 0x00;
+	}
+
+	hci_dev_lock(hdev);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: hci_le_conn_update clamp call not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/l2cap_core.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: rejecting 7.5 ms keeps the create interval"
+if marker not in text and "dagu: this request is already spec-legal" not in text:
+    old = """	err = hci_check_conn_params(min, max, latency, to_multiplier);
+	if (err)
+		rsp.result = cpu_to_le16(L2CAP_CONN_PARAM_REJECTED);
+	else
+		rsp.result = cpu_to_le16(L2CAP_CONN_PARAM_ACCEPTED);
+"""
+    new = """	err = hci_check_conn_params(min, max, latency, to_multiplier);
+	if (!err) {
+		u16 cmin = min, cmax = max, clat = latency, cto = to_multiplier;
+
+		/* dagu: rejecting 7.5 ms keeps the create interval.
+		 * Accepting it makes QCA6390 switch to 8.75 ms and the
+		 * mouse stops answering ATT, so the pair request spins.
+		 */
+		hci_le_clamp_conn_params(hcon->hdev, &cmin, &cmax, &clat, &cto);
+		if (cmin != min || cmax != max || clat != latency ||
+		    cto != to_multiplier)
+			err = -EINVAL;
+	}
+	if (err)
+		rsp.result = cpu_to_le16(L2CAP_CONN_PARAM_REJECTED);
+	else
+		rsp.result = cpu_to_le16(L2CAP_CONN_PARAM_ACCEPTED);
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: l2cap conn param check not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: do not push a substituted update onto a live link"
+if marker not in text and "dagu: stored PPCP is the mouse's request" not in text:
+    old = """	/* dagu: same clamp as the LL parameter reply */
+	u16 min = params->conn_min_interval;
+	u16 max = params->conn_max_interval;
+	u16 latency = params->conn_latency;
+	u16 timeout = params->supervision_timeout;
+
+	hci_le_clamp_conn_params(hdev, &min, &max, &latency, &timeout);
+	params->conn_min_interval = min;
+"""
+    new = """	/* dagu: do not push a substituted update onto a live link */
+	u16 min = params->conn_min_interval;
+	u16 max = params->conn_max_interval;
+	u16 latency = params->conn_latency;
+	u16 timeout = params->supervision_timeout;
+	u16 omin = min, omax = max, olat = latency, oto = timeout;
+
+	hci_le_clamp_conn_params(hdev, &min, &max, &latency, &timeout);
+	if (omin != min || omax != max || olat != latency || oto != timeout)
+		return 0;
+	params->conn_min_interval = min;
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: substituted update site not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+marker = "dagu: defer LE update"
+conn = root / "net/bluetooth/hci_conn.c"
+if marker in conn.read_text():
+    raise SystemExit(0)
+
+policy = root / "net/bluetooth/dagu_le_conn_policy.h"
+policy.write_text('/* SPDX-License-Identifier: GPL-2.0 */\n/*\n * Pure decisions for the QCA6390 mouse link. No kernel headers, so the\n * host unit test compiles this file on its own.\n *\n * Interval unit is 1.25 ms. The create command stays at 24..40\n * (30..50 ms). The mouse later asks for 6..9 (7.5..11.25 ms).\n */\n#ifndef DAGU_LE_CONN_POLICY_H\n#define DAGU_LE_CONN_POLICY_H\n\n/* 30 ms. A request shorter than this is the mouse\'s update, not create. */\n#define DAGU_LE_CREATE_FLOOR 0x0018u\n\n/*\n * How long to keep the create interval after the mouse asks for a\n * shorter one, if no ATT PDU has arrived yet.\n *\n * The captured click sent LE Connection Update while Exchange MTU was\n * still unanswered. The controller then reported 8.75 ms and neither\n * direction carried ACL until the 30 s ATT timeout. Settings gives up\n * at 25 s. One create event is 45 ms; 500 ms is several of those and\n * still far inside that call.\n */\n#define DAGU_LE_UPDATE_WAIT_MS 500u\n\n/*\n * BlueZ closes the ATT socket on the first unanswered PDU, after 30 s.\n * The kernel then waits HCI_DISCONN_TIMEOUT (2 s) and sends HCI\n * Disconnect, which is the "disconnected" row. Three tries at 2 s\n * finish before the 25 s Settings call, so one dropped PDU is resent\n * on the link that already changed interval.\n */\n#define DAGU_ATT_TIMEOUT_MS 2000u\n#define DAGU_ATT_TIMEOUT_TRIES 3u\n\n/* Settings Pair/Connect. The waits above must finish before this. */\n#define DAGU_SETTINGS_CALL_MS 25000u\n\nstatic inline int dagu_le_should_defer(int att_from_peripheral,\n\t\t\t\t       unsigned int interval_min)\n{\n\tif (interval_min >= DAGU_LE_CREATE_FLOOR)\n\t\treturn 0;\n\tif (att_from_peripheral)\n\t\treturn 0;\n\treturn 1;\n}\n\n/* timed_out_tries is how many times this PDU has already timed out. */\nstatic inline int dagu_att_give_up(unsigned int timed_out_tries)\n{\n\treturn timed_out_tries >= DAGU_ATT_TIMEOUT_TRIES;\n}\n\n#endif\n')
+print(f"patched {policy}: dagu: defer LE update")
+
+path = root / 'include/net/bluetooth/hci_core.h'
+text = path.read_text()
+old = '\tstruct delayed_work disc_work;\n\tstruct delayed_work auto_accept_work;\n\tstruct delayed_work idle_work;\n\tstruct delayed_work le_conn_timeout;\n\n\tstruct device\tdev;\n\tstruct dentry\t*debugfs;\n\n'
+new = '\tstruct delayed_work disc_work;\n\tstruct delayed_work auto_accept_work;\n\tstruct delayed_work idle_work;\n\tstruct delayed_work le_conn_timeout;\n\tstruct delayed_work le_param_work;\n\n\tstruct device\tdev;\n\tstruct dentry\t*debugfs;\n\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 0 not found")
+text = text.replace(old, new, 1)
+old = '\tHCI_CONN_BIG_SYNC_FAILED,\n\tHCI_CONN_CREATE_PA_SYNC,\n\tHCI_CONN_PA_SYNC,\n\tHCI_CONN_PA_SYNC_FAILED,\n};\n\nstatic inline bool hci_conn_ssp_enabled(struct hci_conn *conn)\n{\n'
+new = '\tHCI_CONN_BIG_SYNC_FAILED,\n\tHCI_CONN_CREATE_PA_SYNC,\n\tHCI_CONN_PA_SYNC,\n\tHCI_CONN_PA_SYNC_FAILED,\n\tHCI_CONN_LE_ATT_RX,\n\tHCI_CONN_LE_UPDATE_DEFER,\n\tHCI_CONN_LE_PARAM_REPLY,\n};\n\nstatic inline bool hci_conn_ssp_enabled(struct hci_conn *conn)\n{\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 1 not found")
+text = text.replace(old, new, 1)
+old = '\nint hci_abort_conn(struct hci_conn *conn, u8 reason);\nvoid hci_le_clamp_conn_params(struct hci_dev *hdev, u16 *min, u16 *max,\n\t\t\t      u16 *latency, u16 *timeout);\nu8 hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,\n\t\t      u16 to_multiplier);\nvoid hci_le_start_enc(struct hci_conn *conn, __le16 ediv, __le64 rand,\n\t\t      __u8 ltk[16], __u8 key_size);\n'
+new = '\nint hci_abort_conn(struct hci_conn *conn, u8 reason);\nvoid hci_le_clamp_conn_params(struct hci_dev *hdev, u16 *min, u16 *max,\n\t\t\t      u16 *latency, u16 *timeout);\nvoid hci_le_fill_ce_len(u16 interval, __le16 *min_ce, __le16 *max_ce);\nvoid hci_le_pause_scan_for_short_interval(struct hci_dev *hdev, u16 interval);\nbool hci_le_arm_deferred_update(struct hci_conn *conn, bool ll_reply);\nvoid hci_le_note_att_rx(struct hci_conn *conn);\nu8 hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,\n\t\t      u16 to_multiplier);\nvoid hci_le_start_enc(struct hci_conn *conn, __le16 ediv, __le64 rand,\n\t\t      __u8 ltk[16], __u8 key_size);\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 2 not found")
+text = text.replace(old, new, 1)
+path.write_text(text)
+print(f"patched {path}: dagu: defer LE update")
+
+path = root / 'net/bluetooth/hci_conn.c'
+text = path.read_text()
+old = '#include <net/bluetooth/mgmt.h>\n\n#include "smp.h"\n#include "eir.h"\n\nstruct sco_param {\n\tu16 pkt_type;\n\tu16 max_latency;\n'
+new = '#include <net/bluetooth/mgmt.h>\n\n#include "smp.h"\n#include "eir.h"\n#include "dagu_le_conn_policy.h"\n\nstruct sco_param {\n\tu16 pkt_type;\n\tu16 max_latency;\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 0 not found")
+text = text.replace(old, new, 1)
+old = '\n\treturn hci_setup_sync_conn(conn, handle);\n}\n\n/* dagu: QCA6390 returns HCI 0x3b (Unacceptable Connection Parameters)\n * for interval 6/7. Latency 100 then stretches ATT past the 25 s\n * Settings Pair call, so the row shows disconnected while the mouse\n * has already left pairing. Keep 30–50 ms and an effective interval\n * of at most 60 ms, with supervision of at least 3 s.\n */\nvoid hci_le_clamp_conn_params(struct hci_dev *hdev, u16 *min, u16 *max,\n\t\t\t      u16 *latency, u16 *timeout)\n{\n'
+new = "\n\treturn hci_setup_sync_conn(conn, handle);\n}\n\n/* dagu: create-time window only. QCA6390 returns HCI 0x3b for an\n * LE Create Connection that already asks for interval 6/7. The link\n * comes up at 30–50 ms. The mouse's later update is a different\n * command and must be sent unchanged; see hci_le_conn_update.\n */\nvoid hci_le_clamp_conn_params(struct hci_dev *hdev, u16 *min, u16 *max,\n\t\t\t      u16 *latency, u16 *timeout)\n{\n"
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 1 not found")
+text = text.replace(old, new, 1)
+old = '\n\tif (omin != *min || omax != *max || olat != *latency ||\n\t    otimeout != *timeout)\n\t\tbt_dev_info(hdev,\n\t\t\t    "dagu: LE params %u-%u lat %u timeout %u -> %u-%u lat %u timeout %u",\n\t\t\t    omin, omax, olat, otimeout,\n\t\t\t    *min, *max, *latency, *timeout);\n}\n\nu8 hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,\n\t\t      u16 to_multiplier)\n{\n\tstruct hci_dev *hdev = conn->hdev;\n\tstruct hci_conn_params *params;\n\tstruct hci_cp_le_conn_update cp;\n\n\t{\n\t\tu16 omin = min, omax = max, olat = latency, oto = to_multiplier;\n\n\t\thci_le_clamp_conn_params(hdev, &min, &max, &latency,\n\t\t\t\t\t &to_multiplier);\n\t\t/* dagu: applying 7.5 ms makes this controller report success\n\t\t * and then ATT never answers, so Pair spins until timeout.\n\t\t * The L2CAP request is rejected. Do not send it from here.\n\t\t */\n\t\tif (omin != min || omax != max || olat != latency ||\n\t\t    oto != to_multiplier)\n\t\t\treturn 0x00;\n\t}\n\n\thci_dev_lock(hdev);\n\n\tparams = hci_conn_params_lookup(hdev, &conn->dst, conn->dst_type);\n'
+new = '\n\tif (omin != *min || omax != *max || olat != *latency ||\n\t    otimeout != *timeout)\n\t\tbt_dev_info(hdev,\n\t\t\t    "dagu: LE create %u-%u lat %u timeout %u -> %u-%u lat %u timeout %u",\n\t\t\t    omin, omax, olat, otimeout,\n\t\t\t    *min, *max, *latency, *timeout);\n}\n\n/* dagu: CE length is the interval.\n * Units: interval is 1.25 ms, CE length is 0.625 ms, so the whole\n * interval is interval * 2. A zero CE length is what this controller\n * programs on a short update. The command then returns success, empty\n * PDUs keep the link up, and ATT never gets a slot. One default LE\n * data PDU is about 0.3 ms, so 1.25 ms (2 units) is enough for the\n * minimum and the full interval is the maximum.\n */\nvoid hci_le_fill_ce_len(u16 interval, __le16 *min_ce, __le16 *max_ce)\n{\n\tif (interval < 0x0006)\n\t\tinterval = 0x0006;\n\t*min_ce = cpu_to_le16(0x0002);\n\t*max_ce = cpu_to_le16(interval * 2);\n}\n\n/* Discovery scans at window == interval (11.25 ms, 100%). That window\n * is longer than a 7.5 ms connection event, so once the interval\n * actually changes the controller has nowhere to put ACL. Drop scan\n * before the update command; a later start is capped in\n * hci_start_scan_sync.\n */\nvoid hci_le_pause_scan_for_short_interval(struct hci_dev *hdev, u16 interval)\n{\n\tif (interval >= 0x0018)\n\t\treturn;\n\tif (!hci_dev_test_flag(hdev, HCI_LE_SCAN))\n\t\treturn;\n\n\tif (use_ext_scan(hdev)) {\n\t\tstruct hci_cp_le_set_ext_scan_enable cp = { };\n\n\t\thci_send_cmd(hdev, HCI_OP_LE_SET_EXT_SCAN_ENABLE,\n\t\t\t     sizeof(cp), &cp);\n\t} else {\n\t\tstruct hci_cp_le_set_scan_enable cp = { };\n\n\t\thci_send_cmd(hdev, HCI_OP_LE_SET_SCAN_ENABLE, sizeof(cp), &cp);\n\t}\n\thci_dev_clear_flag(hdev, HCI_LE_SCAN);\n\tbt_dev_info(hdev, "dagu: paused LE scan for interval %u", interval);\n}\n\nstatic void hci_le_program_stored(struct hci_conn *conn, bool ll_reply)\n{\n\tstruct hci_dev *hdev = conn->hdev;\n\tu16 min = conn->le_conn_min_interval;\n\tu16 max = conn->le_conn_max_interval;\n\tu16 latency = conn->le_conn_latency;\n\tu16 timeout = conn->le_supv_timeout;\n\n\thci_le_pause_scan_for_short_interval(hdev, min);\n\tbt_dev_info(hdev, "dagu: LE update %u-%u lat %u timeout %u",\n\t\t    min, max, latency, timeout);\n\n\tif (ll_reply) {\n\t\tstruct hci_cp_le_conn_param_req_reply cp;\n\n\t\tmemset(&cp, 0, sizeof(cp));\n\t\tcp.handle = cpu_to_le16(conn->handle);\n\t\tcp.interval_min = cpu_to_le16(min);\n\t\tcp.interval_max = cpu_to_le16(max);\n\t\tcp.latency = cpu_to_le16(latency);\n\t\tcp.timeout = cpu_to_le16(timeout);\n\t\thci_le_fill_ce_len(min, &cp.min_ce_len, &cp.max_ce_len);\n\t\thci_send_cmd(hdev, HCI_OP_LE_CONN_PARAM_REQ_REPLY,\n\t\t\t     sizeof(cp), &cp);\n\t\treturn;\n\t}\n\n\t{\n\t\tstruct hci_cp_le_conn_update cp;\n\n\t\tmemset(&cp, 0, sizeof(cp));\n\t\tcp.handle = cpu_to_le16(conn->handle);\n\t\tcp.conn_interval_min = cpu_to_le16(min);\n\t\tcp.conn_interval_max = cpu_to_le16(max);\n\t\tcp.conn_latency = cpu_to_le16(latency);\n\t\tcp.supervision_timeout = cpu_to_le16(timeout);\n\t\thci_le_fill_ce_len(min, &cp.min_ce_len, &cp.max_ce_len);\n\t\thci_send_cmd(hdev, HCI_OP_LE_CONN_UPDATE, sizeof(cp), &cp);\n\t}\n}\n\nstatic void le_param_work(struct work_struct *work)\n{\n\tstruct hci_conn *conn = container_of(work, struct hci_conn,\n\t\t\t\t\t     le_param_work.work);\n\tbool ll_reply;\n\n\tif (!test_and_clear_bit(HCI_CONN_LE_UPDATE_DEFER, &conn->flags))\n\t\treturn;\n\n\tll_reply = test_bit(HCI_CONN_LE_PARAM_REPLY, &conn->flags);\n\tbt_dev_info(conn->hdev,\n\t\t    "dagu: ATT wait elapsed, apply deferred LE update");\n\thci_le_program_stored(conn, ll_reply);\n}\n\n/* Returns true when the HCI command is held. The caller must not send\n * it as well. conn->le_conn_* already holds the peripheral\'s request.\n */\nbool hci_le_arm_deferred_update(struct hci_conn *conn, bool ll_reply)\n{\n\tif (ll_reply)\n\t\tset_bit(HCI_CONN_LE_PARAM_REPLY, &conn->flags);\n\telse\n\t\tclear_bit(HCI_CONN_LE_PARAM_REPLY, &conn->flags);\n\n\tif (!dagu_le_should_defer(!test_bit(HCI_CONN_LE_ATT_RX, &conn->flags),\n\t\t\t\t  conn->le_conn_min_interval)) {\n\t\tclear_bit(HCI_CONN_LE_UPDATE_DEFER, &conn->flags);\n\t\treturn false;\n\t}\n\n\tset_bit(HCI_CONN_LE_UPDATE_DEFER, &conn->flags);\n\tmod_delayed_work(conn->hdev->workqueue, &conn->le_param_work,\n\t\t\t msecs_to_jiffies(DAGU_LE_UPDATE_WAIT_MS));\n\tbt_dev_info(conn->hdev,\n\t\t    "dagu: defer LE update %u until ATT or %u ms",\n\t\t    conn->le_conn_min_interval, DAGU_LE_UPDATE_WAIT_MS);\n\treturn true;\n}\n\nvoid hci_le_note_att_rx(struct hci_conn *conn)\n{\n\tbool ll_reply;\n\n\tif (!conn)\n\t\treturn;\n\n\tset_bit(HCI_CONN_LE_ATT_RX, &conn->flags);\n\tif (!test_and_clear_bit(HCI_CONN_LE_UPDATE_DEFER, &conn->flags))\n\t\treturn;\n\n\tcancel_delayed_work(&conn->le_param_work);\n\tll_reply = test_bit(HCI_CONN_LE_PARAM_REPLY, &conn->flags);\n\tbt_dev_info(conn->hdev, "dagu: ATT arrived, apply deferred LE update");\n\thci_le_program_stored(conn, ll_reply);\n}\n\nu8 hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,\n\t\t      u16 to_multiplier)\n{\n\tstruct hci_dev *hdev = conn->hdev;\n\tstruct hci_conn_params *params;\n\n\tif (hci_check_conn_params(min, max, latency, to_multiplier))\n\t\treturn 0x00;\n\n\t/* Remember the request before any scan restart, so the scan cap\n\t * sees it even if the update-complete event has not arrived.\n\t */\n\tconn->le_conn_min_interval = min;\n\tconn->le_conn_max_interval = max;\n\tconn->le_conn_latency = latency;\n\tconn->le_supv_timeout = to_multiplier;\n\n\thci_dev_lock(hdev);\n\n\tparams = hci_conn_params_lookup(hdev, &conn->dst, conn->dst_type);\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 2 not found")
+text = text.replace(old, new, 1)
+old = '\t}\n\n\thci_dev_unlock(hdev);\n\n\tmemset(&cp, 0, sizeof(cp));\n\tcp.handle\t\t= cpu_to_le16(conn->handle);\n\tcp.conn_interval_min\t= cpu_to_le16(min);\n\tcp.conn_interval_max\t= cpu_to_le16(max);\n\tcp.conn_latency\t\t= cpu_to_le16(latency);\n\tcp.supervision_timeout\t= cpu_to_le16(to_multiplier);\n\tcp.min_ce_len\t\t= cpu_to_le16(0x0000);\n\tcp.max_ce_len\t\t= cpu_to_le16(0x0000);\n\n\thci_send_cmd(hdev, HCI_OP_LE_CONN_UPDATE, sizeof(cp), &cp);\n\n\tif (params)\n\t\treturn 0x01;\n\n'
+new = '\t}\n\n\thci_dev_unlock(hdev);\n\n\tif (!hci_le_arm_deferred_update(conn, false))\n\t\thci_le_program_stored(conn, false);\n\n\tif (params)\n\t\treturn 0x01;\n\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 3 not found")
+text = text.replace(old, new, 1)
+old = '\tINIT_DELAYED_WORK(&conn->disc_work, hci_conn_timeout);\n\tINIT_DELAYED_WORK(&conn->auto_accept_work, hci_conn_auto_accept);\n\tINIT_DELAYED_WORK(&conn->idle_work, hci_conn_idle);\n\tINIT_DELAYED_WORK(&conn->le_conn_timeout, le_conn_timeout);\n\n\tatomic_set(&conn->refcnt, 0);\n\n\thci_dev_hold(hdev);\n'
+new = '\tINIT_DELAYED_WORK(&conn->disc_work, hci_conn_timeout);\n\tINIT_DELAYED_WORK(&conn->auto_accept_work, hci_conn_auto_accept);\n\tINIT_DELAYED_WORK(&conn->idle_work, hci_conn_idle);\n\tINIT_DELAYED_WORK(&conn->le_conn_timeout, le_conn_timeout);\n\tINIT_DELAYED_WORK(&conn->le_param_work, le_param_work);\n\n\tatomic_set(&conn->refcnt, 0);\n\n\thci_dev_hold(hdev);\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 4 not found")
+text = text.replace(old, new, 1)
+old = '\n\tdisable_delayed_work_sync(&conn->disc_work);\n\tdisable_delayed_work_sync(&conn->auto_accept_work);\n\tdisable_delayed_work_sync(&conn->idle_work);\n\n\t/* Remove the connection from the list so unacked logic can detect when\n\t * a certain pool is not being utilized.\n\t */\n'
+new = '\n\tdisable_delayed_work_sync(&conn->disc_work);\n\tdisable_delayed_work_sync(&conn->auto_accept_work);\n\tdisable_delayed_work_sync(&conn->idle_work);\n\tdisable_delayed_work_sync(&conn->le_param_work);\n\n\t/* Remove the connection from the list so unacked logic can detect when\n\t * a certain pool is not being utilized.\n\t */\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 5 not found")
+text = text.replace(old, new, 1)
+path.write_text(text)
+print(f"patched {path}: dagu: defer LE update")
+
+path = root / 'net/bluetooth/hci_event.c'
+text = path.read_text()
+old = '\t\t\t\t\t  HCI_ERROR_UNKNOWN_CONN_ID);\n\t\tgoto unlock;\n\t}\n\n\t/* dagu: reply with the clamped window. A negative reply, or a\n\t * reply of interval 6/7, makes this controller drop the mouse\n\t * after the LED has already stopped.\n\t */\n\thci_le_clamp_conn_params(hdev, &min, &max, &latency, &timeout);\n\n\tif (hci_check_conn_params(min, max, latency, timeout)) {\n\t\tsend_conn_param_neg_reply(hdev, handle,\n\t\t\t\t\t  HCI_ERROR_INVALID_LL_PARAMS);\n\t\tgoto unlock;\n'
+new = "\t\t\t\t\t  HCI_ERROR_UNKNOWN_CONN_ID);\n\t\tgoto unlock;\n\t}\n\n\t/* dagu: reply with the peripheral's values. A substituted\n\t * window is what the mouse refuses, and a zero CE length is\n\t * what makes a short interval carry no ATT.\n\t */\n\tif (hci_check_conn_params(min, max, latency, timeout)) {\n\t\tsend_conn_param_neg_reply(hdev, handle,\n\t\t\t\t\t  HCI_ERROR_INVALID_LL_PARAMS);\n\t\tgoto unlock;\n"
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 0 not found")
+text = text.replace(old, new, 1)
+old = '\t\tmgmt_new_conn_param(hdev, &hcon->dst, hcon->dst_type,\n\t\t\t\t    store_hint, min, max, latency, timeout);\n\t}\n\n\tcp.handle = ev->handle;\n\tcp.interval_min = cpu_to_le16(min);\n\tcp.interval_max = cpu_to_le16(max);\n\tcp.latency = cpu_to_le16(latency);\n\tcp.timeout = cpu_to_le16(timeout);\n\tcp.min_ce_len = 0;\n\tcp.max_ce_len = 0;\n\n\thci_send_cmd(hdev, HCI_OP_LE_CONN_PARAM_REQ_REPLY, sizeof(cp), &cp);\n\nunlock:\n\thci_dev_unlock(hdev);\n}\n'
+new = '\t\tmgmt_new_conn_param(hdev, &hcon->dst, hcon->dst_type,\n\t\t\t\t    store_hint, min, max, latency, timeout);\n\t}\n\n\t/* dagu: defer LE update until one ATT PDU, same as the L2CAP path.\n\t * Replying here applies the short interval while Exchange MTU is\n\t * still unanswered.\n\t */\n\tif (!hci_le_arm_deferred_update(hcon, true)) {\n\t\tcp.handle = ev->handle;\n\t\tcp.interval_min = cpu_to_le16(min);\n\t\tcp.interval_max = cpu_to_le16(max);\n\t\tcp.latency = cpu_to_le16(latency);\n\t\tcp.timeout = cpu_to_le16(timeout);\n\t\thci_le_fill_ce_len(min, &cp.min_ce_len, &cp.max_ce_len);\n\t\thci_le_pause_scan_for_short_interval(hdev, min);\n\t\thci_send_cmd(hdev, HCI_OP_LE_CONN_PARAM_REQ_REPLY,\n\t\t\t     sizeof(cp), &cp);\n\t}\n\nunlock:\n\thci_dev_unlock(hdev);\n}\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 1 not found")
+text = text.replace(old, new, 1)
+path.write_text(text)
+print(f"patched {path}: dagu: defer LE update")
+
+path = root / 'net/bluetooth/hci_sync.c'
+text = path.read_text()
+old = 'static int hci_start_scan_sync(struct hci_dev *hdev, u8 type, u16 interval,\n\t\t\t       u16 window, u8 own_addr_type, u8 filter_policy,\n\t\t\t       u8 filter_dup)\n{\n\tint err;\n\n\tif (hdev->scanning_paused) {\n\t\tbt_dev_dbg(hdev, "Scanning is paused for suspend");\n\t\treturn 0;\n\t}\n\n\terr = hci_le_set_scan_param_sync(hdev, type, interval, window,\n\t\t\t\t\t own_addr_type, filter_policy);\n'
+new = 'static int hci_start_scan_sync(struct hci_dev *hdev, u8 type, u16 interval,\n\t\t\t       u16 window, u8 own_addr_type, u8 filter_policy,\n\t\t\t       u8 filter_dup)\n{\n\tstruct hci_conn *conn;\n\tint err;\n\tbool short_link = false;\n\n\tif (hdev->scanning_paused) {\n\t\tbt_dev_dbg(hdev, "Scanning is paused for suspend");\n\t\treturn 0;\n\t}\n\n\t/* dagu: discovery is 11.25 ms window and 11.25 ms interval.\n\t * That is the whole radio. A 7.5 ms connection event does not\n\t * fit in a gap that does not exist, so ATT stops. Keep a 60 ms\n\t * period and an 11.25 ms window while such a link is up.\n\t */\n\trcu_read_lock();\n\tlist_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {\n\t\tif (conn->type != LE_LINK || conn->state != BT_CONNECTED)\n\t\t\tcontinue;\n\t\tif (conn->le_conn_min_interval >= 6 &&\n\t\t    conn->le_conn_min_interval < 0x0018) {\n\t\t\tshort_link = true;\n\t\t\tbreak;\n\t\t}\n\t}\n\trcu_read_unlock();\n\tif (short_link) {\n\t\tif (interval < 0x0060)\n\t\t\tinterval = 0x0060;\n\t\tif (window > 0x0012)\n\t\t\twindow = 0x0012;\n\t\tif (window >= interval)\n\t\t\twindow = interval / 2;\n\t\tbt_dev_info(hdev, "dagu: LE scan window %u interval %u",\n\t\t\t    window, interval);\n\t}\n\n\terr = hci_le_set_scan_param_sync(hdev, type, interval, window,\n\t\t\t\t\t own_addr_type, filter_policy);\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 0 not found")
+text = text.replace(old, new, 1)
+old = 'int hci_le_conn_update_sync(struct hci_dev *hdev, struct hci_conn *conn,\n\t\t\t    struct hci_conn_params *params)\n{\n\tstruct hci_cp_le_conn_update cp;\n\t/* dagu: do not push a substituted update onto a live link */\n\tu16 min = params->conn_min_interval;\n\tu16 max = params->conn_max_interval;\n\tu16 latency = params->conn_latency;\n\tu16 timeout = params->supervision_timeout;\n\tu16 omin = min, omax = max, olat = latency, oto = timeout;\n\n\thci_le_clamp_conn_params(hdev, &min, &max, &latency, &timeout);\n\tif (omin != min || omax != max || olat != latency || oto != timeout)\n\t\treturn 0;\n\tparams->conn_min_interval = min;\n\tparams->conn_max_interval = max;\n\tparams->conn_latency = latency;\n\tparams->supervision_timeout = timeout;\n\n\tmemset(&cp, 0, sizeof(cp));\n\tcp.handle\t\t= cpu_to_le16(conn->handle);\n\tcp.conn_interval_min\t= cpu_to_le16(min);\n\tcp.conn_interval_max\t= cpu_to_le16(max);\n\tcp.conn_latency\t\t= cpu_to_le16(latency);\n\tcp.supervision_timeout\t= cpu_to_le16(timeout);\n\tcp.min_ce_len\t\t= cpu_to_le16(0x0000);\n\tcp.max_ce_len\t\t= cpu_to_le16(0x0000);\n\n\treturn __hci_cmd_sync_status(hdev, HCI_OP_LE_CONN_UPDATE,\n\t\t\t\t     sizeof(cp), &cp, HCI_CMD_TIMEOUT);\n}\n\n'
+new = 'int hci_le_conn_update_sync(struct hci_dev *hdev, struct hci_conn *conn,\n\t\t\t    struct hci_conn_params *params)\n{\n\tstruct hci_cp_le_conn_update cp;\n\t/* dagu: stored PPCP is the mouse\'s request. Send it. The create\n\t * path already clamped the initial link; this update is allowed\n\t * to be 7.5 ms once CE length is the interval.\n\t */\n\tu16 min = params->conn_min_interval;\n\tu16 max = params->conn_max_interval;\n\tu16 latency = params->conn_latency;\n\tu16 timeout = params->supervision_timeout;\n\n\tif (hci_check_conn_params(min, max, latency, timeout))\n\t\treturn 0;\n\tconn->le_conn_min_interval = min;\n\tconn->le_conn_max_interval = max;\n\tconn->le_conn_latency = latency;\n\tconn->le_supv_timeout = timeout;\n\tif (hci_le_arm_deferred_update(conn, false))\n\t\treturn 0;\n\tif (min < 0x0018 && hci_dev_test_flag(hdev, HCI_LE_SCAN)) {\n\t\tif (use_ext_scan(hdev)) {\n\t\t\tstruct hci_cp_le_set_ext_scan_enable dis = { };\n\n\t\t\t__hci_cmd_sync_status(hdev, HCI_OP_LE_SET_EXT_SCAN_ENABLE,\n\t\t\t\t\t      sizeof(dis), &dis, HCI_CMD_TIMEOUT);\n\t\t} else {\n\t\t\tstruct hci_cp_le_set_scan_enable dis = { };\n\n\t\t\t__hci_cmd_sync_status(hdev, HCI_OP_LE_SET_SCAN_ENABLE,\n\t\t\t\t\t      sizeof(dis), &dis, HCI_CMD_TIMEOUT);\n\t\t}\n\t\thci_dev_clear_flag(hdev, HCI_LE_SCAN);\n\t\tbt_dev_info(hdev, "dagu: paused LE scan for interval %u", min);\n\t}\n\tparams->conn_min_interval = min;\n\tparams->conn_max_interval = max;\n\tparams->conn_latency = latency;\n\tparams->supervision_timeout = timeout;\n\n\tmemset(&cp, 0, sizeof(cp));\n\tcp.handle\t\t= cpu_to_le16(conn->handle);\n\tcp.conn_interval_min\t= cpu_to_le16(min);\n\tcp.conn_interval_max\t= cpu_to_le16(max);\n\tcp.conn_latency\t\t= cpu_to_le16(latency);\n\tcp.supervision_timeout\t= cpu_to_le16(timeout);\n\thci_le_fill_ce_len(min, &cp.min_ce_len, &cp.max_ce_len);\n\n\tbt_dev_info(hdev, "dagu: LE update %u-%u lat %u timeout %u",\n\t\t    min, max, latency, timeout);\n\treturn __hci_cmd_sync_status(hdev, HCI_OP_LE_CONN_UPDATE,\n\t\t\t\t     sizeof(cp), &cp, HCI_CMD_TIMEOUT);\n}\n\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 1 not found")
+text = text.replace(old, new, 1)
+path.write_text(text)
+print(f"patched {path}: dagu: defer LE update")
+
+path = root / 'net/bluetooth/l2cap_core.c'
+text = path.read_text()
+old = '\t       min, max, latency, to_multiplier);\n\n\tmemset(&rsp, 0, sizeof(rsp));\n\n\terr = hci_check_conn_params(min, max, latency, to_multiplier);\n\tif (!err) {\n\t\tu16 cmin = min, cmax = max, clat = latency, cto = to_multiplier;\n\n\t\t/* dagu: rejecting 7.5 ms keeps the create interval.\n\t\t * Accepting it makes QCA6390 switch to 8.75 ms and the\n\t\t * mouse stops answering ATT, so the pair request spins.\n\t\t */\n\t\thci_le_clamp_conn_params(hcon->hdev, &cmin, &cmax, &clat, &cto);\n\t\tif (cmin != min || cmax != max || clat != latency ||\n\t\t    cto != to_multiplier)\n\t\t\terr = -EINVAL;\n\t}\n\tif (err)\n\t\trsp.result = cpu_to_le16(L2CAP_CONN_PARAM_REJECTED);\n\telse\n\t\trsp.result = cpu_to_le16(L2CAP_CONN_PARAM_ACCEPTED);\n'
+new = '\t       min, max, latency, to_multiplier);\n\n\tmemset(&rsp, 0, sizeof(rsp));\n\n\t/* dagu: this request is already spec-legal (interval >= 6).\n\t * Rejecting it makes the mouse resend until Settings times out\n\t * and leaves the pointer on the 45 ms create interval.\n\t * hci_le_conn_update sends these values with a CE length.\n\t */\n\terr = hci_check_conn_params(min, max, latency, to_multiplier);\n\tif (err)\n\t\trsp.result = cpu_to_le16(L2CAP_CONN_PARAM_REJECTED);\n\telse\n\t\trsp.result = cpu_to_le16(L2CAP_CONN_PARAM_ACCEPTED);\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 0 not found")
+text = text.replace(old, new, 1)
+old = '\t\tl2cap_le_sig_channel(conn, skb);\n\t\tbreak;\n\n\tdefault:\n\t\tl2cap_data_channel(conn, cid, skb);\n\t\tbreak;\n\t}\n}\n'
+new = '\t\tl2cap_le_sig_channel(conn, skb);\n\t\tbreak;\n\n\tdefault:\n\t\tif (cid == L2CAP_CID_ATT)\n\t\t\thci_le_note_att_rx(hcon);\n\t\tl2cap_data_channel(conn, cid, skb);\n\t\tbreak;\n\t}\n}\n'
+if old not in text:
+    raise SystemExit(f"{path}: defer hunk 1 not found")
+text = text.replace(old, new, 1)
+path.write_text(text)
+print(f"patched {path}: dagu: defer LE update")
+
 PY
 
 python3 - "$KERNEL_SRC/drivers/soc/qcom/qcom-geni-se.c" <<'PY'

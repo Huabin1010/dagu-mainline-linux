@@ -18,8 +18,11 @@
  * envelope is one record (Android _rawdata_: 0x3905 key, then 0x3922
  * keepalive, empty 0x05 only on release). Trim after the first record,
  * do not parse a replayed sequence, and do not inject leftover empty
- * 0x05 / pointer after a 0x22 keepalive — mutter 50 cancels compositor
- * hold-repeat on KEY_UP or a seat pointer event. Modifier-only
+ * 0x05 that shares the 0x22 envelope. The next packet with seq +1 and
+ * GPIO83 high is the release even if a keepalive was the previous
+ * packet — dropping it leaves the key down and mutter repeats it.
+ * Pointer events after a keepalive still drop: mutter 50 cancels
+ * compositor hold-repeat on a seat pointer event. Modifier-only
  * (keys=00, p[1] set) is the real C KEY_UP while Ctrl stays held;
  * dropping it leaves C down and compositor-repeat fires Ctrl+C.
  */
@@ -70,12 +73,11 @@
 
 /* CAF nano_workqueue: extra read 22ms later if work was already pending. */
 #define NANOSIC_RX_RETRY_MS	22
-/* GENI leftover empty 0x05 after a 0x22 keepalive is not a real KEY_UP.
+/* GENI leftover empty 0x05 in the same envelope as 0x22 is not a KEY_UP.
  * Pointer leftover is dropped for the whole KEY_DOWN (mutter 50 delay
- * is 500ms). Empty KEY_UP is only a new MCU sequence: delta 1 or 2,
- * GPIO83 already high, not the same envelope as 0x22, and not the
- * bounce IRQ that follows a keepalive within 16ms (pulse already
- * consumed; CAF's 22ms extra read is what created leftover).
+ * is 500ms). A later empty 0x05 with seq delta 1 or 2 and GPIO83
+ * already high is the release, even when the previous packet was a
+ * keepalive inside 16ms. Dropping that release leaves the key down.
  * Do not time-debounce empty KEY_UP: a fast tap (ji / baidu)
  * releases in 30–60ms with seq +1 and GPIO83 high.
  */
@@ -622,8 +624,10 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 			 * fast tap KEY_UP is empty with seq +1/+2 and
 			 * GPIO83 already high (board #524: ji I-up at
 			 * +33ms was dropped by the old 80ms debounce).
-			 * Drop only with leftover evidence (vendor / GPIO /
-			 * bounce / stale seq).
+			 * A keepalive in the previous 16ms does not make
+			 * that release leftover (Enter seq 74 after 0x22).
+			 * Drop same-envelope vendor, GPIO still low, and
+			 * a stale sequence.
 			 */
 			if (nanosic_ghost_empty(kb, p, seen_vendor)) {
 				dev_info(&kb->client->dev,

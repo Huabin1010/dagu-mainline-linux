@@ -216,8 +216,37 @@ class TestNanosicKbdGhost(unittest.TestCase):
     def test_true_empty_gpio_pending_is_ghost(self) -> None:
         self.assertTrue(self.lib.ghost(_rpt(), gpio_pending=True))
 
-    def test_true_empty_vendor_bounce_is_ghost(self) -> None:
-        self.assertTrue(self.lib.ghost(_rpt(), in_vendor_bounce=True))
+    def test_enter_up_after_keepalive_is_real_key_up(self) -> None:
+        """Board: seq 72 Enter down, seq 73 0x22, seq 74 empty d=1 gpio=0.
+
+        The empty report is inside the 16ms keepalive bounce and was
+        dropped. Mutter then repeated KEY_ENTER into the focused
+        connection control.
+        """
+        self.assertFalse(
+            self.lib.ghost(
+                _rpt(),
+                have_kbd_down=True,
+                have_vendor=True,
+                in_vendor_bounce=True,
+                rx_seq_delta=1,
+                gpio_pending=False,
+            )
+        )
+
+    def test_true_empty_vendor_bounce_with_gpio_pending_is_ghost(self) -> None:
+        self.assertTrue(
+            self.lib.ghost(
+                _rpt(),
+                in_vendor_bounce=True,
+                gpio_pending=True,
+            )
+        )
+
+    def test_true_empty_vendor_bounce_stale_seq_is_ghost(self) -> None:
+        self.assertTrue(
+            self.lib.ghost(_rpt(), in_vendor_bounce=True, rx_seq_delta=0)
+        )
 
     def test_true_empty_stale_seq_is_ghost(self) -> None:
         self.assertTrue(self.lib.ghost(_rpt(), rx_seq_delta=0))

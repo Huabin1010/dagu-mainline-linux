@@ -3,9 +3,11 @@
  * Leftover empty 0x05 vs real KEY_UP for the Nanosic 803 boot keyboard.
  *
  * Host unit tests compile this with NANOSIC_GHOST_HOST. The driver includes
- * it as-is. Leftover evidence is vendor / GPIO / bounce / stale seq.
- * Do not time-debounce empty KEY_UP: a fast tap (ji / baidu) releases
- * inside 80ms, and dropping it leaves the last letter down.
+ * it as-is. Same-envelope vendor, GPIO still low, and a stale sequence
+ * are leftover. A fresh seq (+1 or +2) with GPIO83 already high is the
+ * release even inside the 16ms keepalive bounce. Do not time-debounce
+ * empty KEY_UP: a fast tap (ji / baidu) releases inside 80ms, and
+ * dropping it leaves the last letter down.
  */
 #ifndef _NANOSIC_KBD_GHOST_H
 #define _NANOSIC_KBD_GHOST_H
@@ -87,6 +89,16 @@ static inline bool nanosic_ghost_empty_ctx(const u8 *p, bool seen_vendor,
 	if (seen_vendor)
 		return true;
 	if (!ctx->have_kbd_down)
+		return false;
+	/*
+	 * Fresh MCU sequence, GPIO83 already high: this packet is the
+	 * release. A 0x22 keepalive in the previous 16ms is a different
+	 * sequence. Board trace: Enter down seq 72, keepalive seq 73,
+	 * empty seq 74 d=1 gpio=0. Dropping that empty left KEY_ENTER
+	 * down, and mutter repeated it into the focused control.
+	 */
+	if (!ctx->gpio_pending && ctx->rx_have_prev_seq &&
+	    (ctx->rx_seq_delta == 1 || ctx->rx_seq_delta == 2))
 		return false;
 	return nanosic_ghost_leftover(seen_vendor, ctx);
 }

@@ -1,8 +1,8 @@
 #!/bin/sh
-# Rebuild Ubuntu gnome-bluetooth so GNOME Settings 未设置 pairs unnamed
-# LE rows, treats AlreadyExists as Pair success, drains Discovering, and
-# retries Connect for 25s after Pair. Installs libgnome-bluetooth-ui
-# (settings widget) and libgnome-bluetooth (client Pair).
+# Rebuild Ubuntu gnome-bluetooth so GNOME Settings pairs unnamed LE rows,
+# treats AlreadyExists as Pair success, asks the adapter to stop discovery
+# without nesting the GTK main loop, reconciles the connecting spinner,
+# and retries Connect for 25s after Pair.
 # Run on the tablet or in the arm64 rootfs chroot as root.
 set -eu
 
@@ -71,4 +71,4 @@ apt-mark hold libgnome-bluetooth-3.0-13 2>/dev/null || true
 apt-mark hold libgnome-bluetooth-ui-3.0-13 2>/dev/null || true
 apt-mark hold libgnome-bluetooth-3.0-dev 2>/dev/null || true
 
-echo "==> gnome-bluetooth patched (unnamed Pair + AlreadyExists + drain Discovering + CONNECT_TIMEOUT 25s)"
+echo "==> gnome-bluetooth patched (unnamed Pair + AlreadyExists + StopDiscovery + spinner reconcile + CONNECT_TIMEOUT 25s)"

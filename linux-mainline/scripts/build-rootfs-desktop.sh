@@ -86,13 +86,22 @@ install -m 755 "$ROOT/scripts/dagu-gnome-bt-setup-unnamed.py" \
 		"$ROOTFS/tmp/dagu-gnome-bt/dagu-gnome-bt-setup-unnamed.py"
 install -m 755 "$ROOT/scripts/dagu-build-gnome-bt.sh" \
 		"$ROOTFS/tmp/dagu-gnome-bt/dagu-build-gnome-bt.sh"
+mkdir -p "$ROOTFS/tmp/dagu-gnome-status" "$ROOTFS/tmp/dagu-gnome-cc"
+install -m 755 "$ROOT/scripts/dagu-gnome-status-spinner.py" \
+		"$ROOTFS/tmp/dagu-gnome-status/dagu-gnome-status-spinner.py"
+install -m 755 "$ROOT/scripts/dagu-gnome-cc-wifi-spinner.py" \
+		"$ROOTFS/tmp/dagu-gnome-cc/dagu-gnome-cc-wifi-spinner.py"
+install -m 755 "$ROOT/scripts/dagu-build-gnome-cc-wifi.sh" \
+		"$ROOTFS/tmp/dagu-gnome-cc/dagu-build-gnome-cc-wifi.sh"
 chroot "$ROOTFS" env ROOT_PASSWORD="$PASS" SUITE="$SUITE" MIRROR="$MIRROR" \
 	DAGU_PATCH_BLUEZ="${DAGU_PATCH_BLUEZ:-0}" \
 	DAGU_PATCH_GNOMEBT="${DAGU_PATCH_GNOMEBT:-0}" \
+	DAGU_PATCH_GCC="${DAGU_PATCH_GCC:-0}" \
 	/bin/bash /tmp/rootfs-desktop-setup.sh
 rm -rf "$ROOTFS/tmp/rootfs-desktop-setup.sh" \
 	"$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback" \
-	"$ROOTFS/tmp/dagu-bluez-hid"
+	"$ROOTFS/tmp/dagu-bluez-hid" "$ROOTFS/tmp/dagu-gnome-status" \
+	"$ROOTFS/tmp/dagu-gnome-cc"
 
 # Public image: no builder SSH keys, new machine-id on first boot.
 rm -rf "$ROOTFS/root/.ssh"

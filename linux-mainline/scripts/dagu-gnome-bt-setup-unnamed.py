@@ -38,29 +38,64 @@ PAIR_ADDR = """	/* dagu: GNOME 未设置. Waiting for Name leaves the row spinni
 		name = g_strdup (bdaddr);
 """
 
-DRAIN = """	/* dagu: StopDiscovery is async. Pairing/Connect immediately races
-	 * the still-running Inquiry on QCA6390 (TDD) and aborts LE Create
-	 * Connection (le-connection-abort-by-local). Drain Discovering
-	 * before Device1.Pair / Device1.Connect.
+# Do not pump the GTK main loop here. A nested iteration re-enters the
+# switch handler, and set_connecting_state(LOADING) then runs after Connect
+# has already finished, so the row spinner never clears. QCA6390 Inquiry
+# is cancelled in the kernel before LE Create Connection.
+DRAIN = """	/* dagu: ask the adapter to stop discovery, but do not nest the main
+	 * loop. The kernel cancels Inquiry before LE Create Connection.
 	 */
 	{
 		g_autoptr(GDBusProxy) adapter = NULL;
-		gint64 deadline;
 
 		adapter = _bluetooth_client_get_default_adapter (self->client);
-		deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
-		while (adapter && g_get_monotonic_time () < deadline) {
-			g_autoptr(GVariant) v = NULL;
-			gboolean discovering = FALSE;
-
-			v = g_dbus_proxy_get_cached_property (adapter, "Discovering");
-			if (v)
-				discovering = g_variant_get_boolean (v);
-			if (!discovering)
-				break;
-			g_main_context_iteration (NULL, TRUE);
-		}
+		if (adapter)
+			g_dbus_proxy_call (adapter, "StopDiscovery", NULL,
+					   G_DBUS_CALL_FLAGS_NONE, -1,
+					   NULL, NULL, NULL);
 	}
+"""
+
+ABORT = """typedef struct {
+	BluetoothSettingsWidget *self;
+	char *path;
+	char *bdaddr;
+} DaguAbort;
+
+static void
+dagu_abort_widget_gone (gpointer data, GObject *where_the_object_was)
+{
+	DaguAbort *abort = data;
+
+	(void) where_the_object_was;
+	abort->self = NULL;
+}
+
+static gboolean
+dagu_connect_abort_cb (gpointer user_data)
+{
+	DaguAbort *abort = user_data;
+
+	/* Device1.Connect that never returns leaves the controller
+	 * initiating. The next click is then InProgress. Disconnect
+	 * aborts that procedure once the peer has had time to answer.
+	 */
+	if (abort->self != NULL) {
+		BluetoothSettingsWidget *self = abort->self;
+
+		g_object_weak_unref (G_OBJECT (self), dagu_abort_widget_gone, abort);
+		abort->self = NULL;
+		if (is_connecting (self, abort->bdaddr))
+			bluetooth_client_connect_service (self->client, abort->path,
+							   FALSE, NULL, NULL, NULL);
+	}
+
+	g_free (abort->path);
+	g_free (abort->bdaddr);
+	g_free (abort);
+	return G_SOURCE_REMOVE;
+}
+
 """
 
 SETUP_RACE_RE = re.compile(
@@ -113,6 +148,33 @@ ALREADY_OK = """if (device1_call_pair_finish (DEVICE1(proxy), res, &error) == FA
 """
 
 
+OLD_DRAIN_RE = re.compile(
+    r"[ \t]*/\* dagu: StopDiscovery is async\. Pairing(?:/Connect)? immediately races[^\n]*\n"
+    r"(?:.*\n)*?"
+    r"[ \t]*g_main_context_iteration \(NULL, TRUE\);\n"
+    r"[ \t]*\}\n"
+    r"[ \t]*\}\n",
+)
+
+SPINNER_RE = re.compile(
+    r"(\t\tset_connecting_state \(self, CONNECTING_STATE_IDLE\);\n"
+    r"\t\}\n\n"
+    r"\tremove_connecting \(self, data->bdaddr\);)"
+)
+
+SPINNER_OK = """	}
+
+	remove_connecting (self, data->bdaddr);
+	/* dagu: reconcile the connecting spinner with whoever is still in
+	 * flight. Clearing only when the selected address matched left
+	 * CONNECTING_STATE_LOADING set after the user moved to another row.
+	 */
+	if (self->selected_bdaddr && is_connecting (self, self->selected_bdaddr))
+		set_connecting_state (self, CONNECTING_STATE_LOADING);
+	else
+		set_connecting_state (self, CONNECTING_STATE_IDLE);"""
+
+
 def patch_widget(text: str) -> str:
     if "dagu: GNOME 未设置" not in text:
         new, n = WAIT_NAME_RE.subn(PAIR_ADDR, text, count=1)
@@ -127,12 +189,61 @@ def patch_widget(text: str) -> str:
         )
     elif "#define CONNECT_TIMEOUT 25.0" not in text:
         raise SystemExit("CONNECT_TIMEOUT 3.0/25.0 not found")
-    if "dagu: StopDiscovery is async" not in text:
+    if (
+        "ask the adapter to stop discovery" not in text
+        and "dagu: StopDiscovery is async" not in text
+    ):
         new, n = SETUP_RACE_RE.subn(SETUP_WAIT, text, count=1)
         if n != 1:
             raise SystemExit("setup-mode FALSE + setup_device block not found")
         text = new
-    if text.count("dagu: StopDiscovery is async") < 2:
+    text, _n = OLD_DRAIN_RE.subn(DRAIN, text)
+    if "reconcile the connecting spinner" not in text:
+        new, n = SPINNER_RE.subn(SPINNER_OK, text, count=1)
+        if n != 1:
+            raise SystemExit("connecting spinner clear site not found")
+        text = new
+    if "dagu_connect_abort_cb" not in text:
+        anchor = "static gboolean\nswitch_connected_state_set ("
+        if anchor not in text:
+            raise SystemExit("switch_connected_state_set not found")
+        text = text.replace(anchor, ABORT + anchor, 1)
+        old_arm = (
+            "\tadd_connecting (self, data->bdaddr);\n"
+            "\tset_connecting_state (self, CONNECTING_STATE_LOADING);\n"
+        )
+        new_arm = old_arm + (
+            "\tif (gtk_switch_get_active (button)) {\n"
+            "\t\tDaguAbort *abort = g_new0 (DaguAbort, 1);\n"
+            "\t\tabort->self = self;\n"
+            "\t\tabort->path = g_strdup (self->selected_object_path);\n"
+            "\t\tabort->bdaddr = g_strdup (data->bdaddr);\n"
+            "\t\tg_object_weak_ref (G_OBJECT (self), dagu_abort_widget_gone, abort);\n"
+            "\t\tg_timeout_add_seconds (20, dagu_connect_abort_cb, abort);\n"
+            "\t}\n"
+        )
+        if old_arm not in text:
+            raise SystemExit("switch connecting arm not found")
+        text = text.replace(old_arm, new_arm, 1)
+    cancelled = (
+        "\tif (!success && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))\n"
+        "\t\tgoto out;\n"
+    )
+    if cancelled in text:
+        text = text.replace(
+            cancelled,
+            "\tif (!success && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {\n"
+            "\t\tself = data->self;\n"
+            "\t\tremove_connecting (self, data->bdaddr);\n"
+            "\t\tif (self->selected_bdaddr && is_connecting (self, self->selected_bdaddr))\n"
+            "\t\t\tset_connecting_state (self, CONNECTING_STATE_LOADING);\n"
+            "\t\telse\n"
+            "\t\t\tset_connecting_state (self, CONNECTING_STATE_IDLE);\n"
+            "\t\tgoto out;\n"
+            "\t}\n",
+            1,
+        )
+    if text.count("ask the adapter to stop discovery") < 2:
         new, n = CONNECT_RACE_RE.subn(CONNECT_WAIT, text, count=1)
         if n != 1:
             raise SystemExit("switch_connected setup-mode FALSE block not found")

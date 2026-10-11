@@ -281,8 +281,43 @@ Environment=MUTTER_DEBUG_SEND_KMS_MODIFIERS=1
 Environment=MUTTER_DEBUG_USE_KMS_MODIFIERS=1
 Environment=GSK_RENDERER=ngl
 Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_swap_buffers_with_damage;-EGL_KHR_partial_update
+Environment=G_RESOURCE_OVERLAYS=/org/gnome/shell=/usr/local/share/dagu/gnome-shell-overlay
 UnsetEnvironment=FD_MESA_DEBUG TU_DEBUG LD_PRELOAD MESA_VK_WSI_DEBUG DAGU_LINEAR_DESTILE MUTTER_DEBUG_PAINT
 EOF
+# Quick-settings Wi-Fi/Bluetooth spinners wait forever when RequestScan or
+# Device1.Connect does not move the property they poll. Overlay the shell
+# JS so a failed or queued call still stops the spinner after reboot.
+if [ -f /tmp/dagu-gnome-status/dagu-gnome-status-spinner.py ]; then
+	install -m 755 /tmp/dagu-gnome-status/dagu-gnome-status-spinner.py \
+		/usr/local/sbin/dagu-gnome-status-spinner.py
+	/usr/local/sbin/dagu-gnome-status-spinner.py
+fi
+cat >/etc/systemd/system/dagu-gnome-status-spinner.service <<'EOF'
+[Unit]
+Description=Refresh GNOME Shell Wi-Fi and Bluetooth status overlay
+Before=display-manager.service
+ConditionPathExists=/usr/local/sbin/dagu-gnome-status-spinner.py
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-gnome-status-spinner.py
+
+[Install]
+WantedBy=multi-user.target
+EOF
+mkdir -p /etc/systemd/system/multi-user.target.wants
+ln -sfn ../dagu-gnome-status-spinner.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-gnome-status-spinner.service
+if [ -f /tmp/dagu-gnome-cc/dagu-gnome-cc-wifi-spinner.py ]; then
+	install -m 755 /tmp/dagu-gnome-cc/dagu-gnome-cc-wifi-spinner.py \
+		/usr/local/sbin/dagu-gnome-cc-wifi-spinner.py
+	install -m 755 /tmp/dagu-gnome-cc/dagu-build-gnome-cc-wifi.sh \
+		/usr/local/sbin/dagu-build-gnome-cc-wifi.sh
+	if [ "${DAGU_PATCH_GCC:-0}" = 1 ]; then
+		DAGU_GCC_BUILD=/usr/local/src/dagu-gnome-cc \
+			/usr/local/sbin/dagu-build-gnome-cc-wifi.sh
+	fi
+fi
 mkdir -p /usr/share/drirc.d
 cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
 <driconf>
@@ -294,84 +329,15 @@ cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
 </driconf>
 EOF
 
-# Chrome: native Wayland + GLES. Ozone tags linux-dmabuf LINEAR; force GBM
-# pixels LINEAR and load dagu-mesa (LINEAR GMEM store/fetch). Destile stays
-# off. linear-mod is Chrome/Mineradio only — not gnome-shell.
-CHROME_DISABLE_FEATURES='Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation'
-if [ -x /opt/google/chrome/chrome ]; then
-	cat >/usr/local/bin/dagu-chrome <<'EOF'
+# One browser: V4L2 Chromium. Official google-chrome is USE_V4L2=0 and
+# is not installed. dagu-chrome remains as a name that launches it, so
+# older scripts do not exec a missing binary.
+cat >/usr/local/bin/dagu-chrome <<'EOF'
 #!/bin/sh
-# Fonts at any Mutter scale: fractional DPR + no LCD (270° panel).
-profile="${HOME}/.config/google-chrome"
-lock="$profile/SingletonLock"
-if [ -L "$lock" ]; then
-	hostpid=$(readlink "$lock")
-	pid=${hostpid##*-}
-	if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-		rm -f "$profile/SingletonLock" "$profile/SingletonSocket" "$profile/SingletonCookie"
-		rm -rf /tmp/com.google.Chrome.* /tmp/.com.google.Chrome.*
-	fi
-fi
-export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"
-export FREETYPE_PROPERTIES="${FREETYPE_PROPERTIES:-truetype:interpreter-version=40}"
-if [ -f /usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
-	export LD_LIBRARY_PATH="/usr/local/lib/dagu-mesa${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-fi
-# Native UBWC: do not LD_PRELOAD libdagu-linear-mod.so.
-if [ ! -e "$lock" ] && [ -f "$profile/Local State" ]; then
-	python3 - "$profile/Local State" <<'PY' 2>/dev/null || true
-import json, sys
-p = sys.argv[1]
-with open(p, "r", encoding="utf-8") as f:
-    d = json.load(f)
-labs = d.setdefault("browser", {}).setdefault("enabled_labs_experiments", [])
-if not isinstance(labs, list):
-    labs = []
-    d["browser"]["enabled_labs_experiments"] = labs
-changed = False
-for drop in ("lcd-text-aa@1", "lcd-text-aa@0"):
-    if drop in labs:
-        labs.remove(drop)
-        changed = True
-if "lcd-text-aa@2" not in labs:
-    labs.append("lcd-text-aa@2")
-    changed = True
-if changed:
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(d, f, separators=(",", ":"))
-PY
-fi
-ENABLE_FEAT="WaylandTextInputV3,WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj,AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL"
-DISABLE_FEAT="Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation"
-ANGLE="gles"
-if [ "${DAGU_CHROME_VIDEO_OVERLAY:-0}" = "1" ]; then
-	ENABLE_FEAT="${ENABLE_FEAT},WaylandOverlayDelegation"
-	DISABLE_FEAT="Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
-fi
-if [ "${DAGU_CHROME_VULKAN:-0}" = "1" ]; then
-	ENABLE_FEAT="${ENABLE_FEAT},Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
-	DISABLE_FEAT="WaylandOverlayDelegation"
-	ANGLE="vulkan"
-	set -- --enable-gpu-rasterization --enable-zero-copy "$@"
-fi
-unset GTK_IM_MODULE
-exec /opt/google/chrome/chrome \
-	--ozone-platform=wayland \
-	--ozone-platform-hint=wayland \
-	--use-gl=angle \
-	--use-angle="$ANGLE" \
-	--start-maximized \
-	--enable-wayland-ime \
-	--disable-gtk-ime \
-	--wayland-text-input-version=3 \
-	--enable-features="$ENABLE_FEAT" \
-	--disable-lcd-text \
-	--font-render-hinting=none \
-	--disable-features="$DISABLE_FEAT" \
-	--ignore-gpu-blocklist \
-	"$@"
+# Official google-chrome is not installed. This name launches V4L2 Chromium.
+exec /usr/local/bin/dagu-chromium "$@"
 EOF
-	chmod 755 /usr/local/bin/dagu-chrome
+chmod 755 /usr/local/bin/dagu-chrome
 	install -m755 /dev/stdin /usr/local/bin/dagu-chromium-native <<'EOF'
 #!/bin/sh
 # Copied from linux-mainline/scripts/dagu-chromium-native.sh at image build.
@@ -447,14 +413,8 @@ exec /usr/local/bin/dagu-chromium-native "$@"
 EOF
 	chmod 755 /usr/local/bin/dagu-chromium /usr/local/bin/dagu-chromium-native
 	mkdir -p /usr/local/share/applications /home/dagu/.local/share/applications
-	if [ -f /usr/share/applications/google-chrome.desktop ]; then
-		sed 's|^Exec=/usr/bin/google-chrome-stable|Exec=/usr/local/bin/dagu-chrome|' \
-			/usr/share/applications/google-chrome.desktop \
-			>/usr/local/share/applications/google-chrome.desktop
-		cp /usr/local/share/applications/google-chrome.desktop \
-			/home/dagu/.local/share/applications/google-chrome.desktop
-		chown dagu:dagu /home/dagu/.local/share/applications/google-chrome.desktop
-	fi
+	rm -f /usr/local/share/applications/google-chrome.desktop \
+		/home/dagu/.local/share/applications/google-chrome.desktop
 	if [ -f /usr/share/applications/chromium.desktop ]; then
 		sed -e 's|^Exec=.*chromium|Exec=/usr/local/bin/dagu-chromium|' \
 			-e 's|^Name=.*|Name=Chromium (Venus)|' \
@@ -476,9 +436,7 @@ EOF
 			[ -n "$src" ] && ln -sfn "$(basename "$src")" "$dir/org.chromium.Chromium.${src##*.}"
 		done
 	fi
-	# Official google-chrome is USE_V4L2=0 (FFmpeg). HTML5 must open
-	# Chromium (Venus /dev/video14). Keep Chrome installed for GLES
-	# LINEAR tests, but do not make it the default handler.
+	# HTML5 opens V4L2 Chromium. Official google-chrome is not installed.
 	if [ -f /usr/local/share/applications/chromium.desktop ]; then
 		mkdir -p /home/dagu/.config /etc/xdg
 		python3 - <<'PY'
@@ -498,38 +456,11 @@ PY
 		sudo -u dagu env XDG_RUNTIME_DIR=/run/user/1001 HOME=/home/dagu \
 			xdg-settings set default-web-browser chromium.desktop 2>/dev/null || true
 	fi
-	if [ -f /opt/google/chrome/google-chrome ]; then
-		python3 - "$CHROME_DISABLE_FEATURES" <<'PY'
-from pathlib import Path
-import sys
-feat = sys.argv[1]
-p = Path("/opt/google/chrome/google-chrome")
-text = p.read_text()
-out = []
-for line in text.splitlines(True):
-    if line.startswith("export TU_DEBUG=") or line.startswith("export FD_MESA_DEBUG=") \
-       or line.startswith("export MESA_VK_WSI_DEBUG=") \
-       or line.startswith("export MESA_EXTENSION_OVERRIDE=") \
-       or line.startswith("export LD_PRELOAD=") \
-            or line.startswith("export FONTCONFIG_PATH=") \
-            or line.startswith("# dagu-chrome-gpu"):
-        continue
-    if 'exec -a "$0" "$HERE/chrome"' in line:
-        out.append(
-            'export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"\n'
-            '# dagu-chrome-gpu\n'
-            'exec -a "$0" "$HERE/chrome" --ozone-platform=wayland --ozone-platform-hint=wayland'
-            ' --use-gl=angle --use-angle=gles --start-maximized --enable-wayland-ime --disable-gtk-ime'
-            ' --wayland-text-input-version=3 --enable-features=WaylandTextInputV3,WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL'
-            ' --disable-lcd-text --font-render-hinting=none --ignore-gpu-blocklist'
-            f' --disable-features={feat} "$@"\n'
-        )
-        continue
-    out.append(line)
-p.write_text("".join(out))
-PY
-	fi
-fi
+cat >/etc/apt/preferences.d/dagu-no-google-chrome <<'EOF'
+Package: google-chrome-stable
+Pin: version *
+Pin-Priority: -1
+EOF
 
 # Folio letters stay on hid-generic (same path as Bluetooth). keyd EVIOCGRAB
 # on 15d9:00a3 made Wayland skip hold-repeat until a second key-down.

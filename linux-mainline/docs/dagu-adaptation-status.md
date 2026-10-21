@@ -72,7 +72,7 @@
 | 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6。`#333` `hci0` UP RUNNING PSCAN，HCI 5.2。BLE HOG + 经典 HID（`ClassicBondedOnly=false`）。`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。A2DP 走 Q6 `SLIMBUS_7_RX`（`hw:0,3`），见 `dagu-adsp-voice.md` |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
 | 双电芯电量 | **已通** | 双 BQ27Z561 走 GENI I2C SE0/SE13 + `xiaomi-dual-fg`。`#333` `bms` Battery SoC（桌面跟 bms）。gpio `fg_i2c_se0` / `fg_i2c_se13` 保持 disabled |
-| 充电（SMB5 5 V） | **已通** | `#333` `pm8150b-charger` `online=1` `status=Charging`，APSD=SDP，ICL **2 A**，`bms` 同步 Charging |
+| 充电（SMB5 5 V） | **已通** | `#565` USB PD 5 V / 2 A，`pm8150b-charger` `online=1` `status=Charging`，ICL **2 A**，`bms` Charging。不再要 9 V |
 | 充电泵 PPS | **DT 已写** | BQ25970 ×2 走 GENI I2C SE15/SE16。`#333` `online=0`（不是 5 V 主路径）。67W 未专项 |
 | 笔充 P9418 | **DT 已写** | Smart Pen 侧吸 TX，**不是平板 Qi**，仍 i2c-gpio se8。`#333` `p9418-pen` `online=0` |
 | 霍尔 | **已通** | gpio-keys `SW_LID` / `SW_TABLET_MODE`（`SW=3`）。不再注入 `dagu-tablet-mode.py` |
@@ -210,8 +210,9 @@ DTBO 必须用 stub（`linux-mainline/out/dtbo-stub.img`），空 DTBO 约 6s �
 ### 充电（SMB5 5 V）
 
 - overlay `pm8150b-charger-dagu.c`；关 charger wdog、清 USBIN suspend。GPIO74 低电平放行 VBUS
-- `#333`：`pm8150b-charger` `online=1` `status=Charging`，`usb_type=SDP`，ICL **2 A**（不要 USB51 500 mA），`constant_charge_voltage=4.45 V`。`bms` 同步 Charging
-- 67W PPS 泵是另一条路径（见 DT 已写）
+- `#565`：sink PDO 只有 5 V / 2 A。TCPM `SNK_READY`，`power_operation_mode=usb_power_delivery`，`pm8150b-charger` `online=1` `status=Charging`，ICL **2 A**，`constant_charge_voltage=4.45 V`。`bms` Charging 约 +760 mA。活机充电宝约 4.7 V / 1.8 A / 8.6 W
+- 清 ABL 潮气检测；`SNK_TRANSITION_SINK` 忽略 tPSTransition 的 VBUS-off。输入限流等 `USB_TYPE=PD`，Type-C Rp-3.0 先 500 mA
+- 9 V / 67 W PPS 泵是另一条路径（见 DT 已写）
 
 ### 霍尔
 

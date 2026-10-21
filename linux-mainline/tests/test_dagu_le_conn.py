@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "linux/net/bluetooth/dagu_le_conn_policy.h"
 KERNEL = ROOT / "linux/net/bluetooth"
 PATCHER = ROOT / "scripts/dagu-bluez-att-retry.py"
+ROW_PATCHER = ROOT / "scripts/dagu-bluez-keep-classic-row.py"
 
 C_MAIN = r"""
 #include "dagu_le_conn_policy.h"
@@ -72,6 +73,22 @@ int main(void)
 	       < DAGU_SETTINGS_CALL_MS,
 	       "tries plus idle disconnect still beat the Settings call");
 
+	/* Classic page while LE scan is up is the K380 Page Timeout. */
+	expect(dagu_discovery_must_wait(0, 0) == 0, "idle radio can discover");
+	expect(dagu_discovery_must_wait(1, 0) == 1, "LE create owns the radio");
+	expect(dagu_discovery_must_wait(0, 1) == 1, "classic page owns the radio");
+	expect(dagu_discovery_must_wait(1, 1) == 1, "both connects own the radio");
+	expect(dagu_pause_le_scan_for_page(0) == 0, "scan already off");
+	expect(dagu_pause_le_scan_for_page(1) == 1, "scan pauses for the page");
+
+	/* Inquiry restart must keep the clock offset the click will page with. */
+	expect(dagu_keep_page_params(0, 900) == 1, "fresh inquiry is kept");
+	expect(dagu_keep_page_params(900, 900) == 1, "age at the limit is kept");
+	expect(dagu_keep_page_params(901, 900) == 0, "stale inquiry is dropped");
+	expect(dagu_keep_page_params(-1, 900) == 0, "negative age is dropped");
+	expect(dagu_program_page_timeout(16384) == 1, "configured page timeout is written");
+	expect(dagu_program_page_timeout(0) == 0, "unset page timeout stays at the controller default");
+
 	if (fails) {
 		fprintf(stderr, "%d failed\n", fails);
 		return 1;
@@ -114,6 +131,33 @@ class LeConnPolicyTest(unittest.TestCase):
         self.assertIn("hci_le_arm_deferred_update(conn, false)", sync)
         self.assertIn("hci_le_note_att_rx(hcon)", l2cap)
         self.assertIn("L2CAP_CID_ATT", l2cap)
+        self.assertIn("hci_lookup_acl_connect", sync)
+        self.assertIn("dagu_discovery_must_wait", sync)
+        self.assertIn("dagu: pause LE scan for classic page", sync)
+        self.assertIn("dagu_pause_le_scan_for_page", sync)
+        self.assertIn("dagu: keep the inquiry clock offset", sync)
+        self.assertIn("hci_inquiry_cache_drop_expired", sync)
+        self.assertIn("dagu_keep_page_params", sync)
+        self.assertIn("dagu: classic page rep", sync)
+        self.assertIn("dagu_program_page_timeout", sync)
+        self.assertIn("HCI_OP_WRITE_PG_TIMEOUT", sync)
+        self.assertIn("dagu: page timeout %u", sync)
+        self.assertIn("dagu: limited inquiry before LE scan", sync)
+        self.assertIn("dagu: LE scan after inquiry", sync)
+        self.assertIn("dagu: limited inquiry before page", sync)
+        self.assertIn("dagu_fill_page_params", sync)
+        self.assertIn("dagu_queue_le_after_inquiry", event)
+        self.assertNotIn("dagu: refresh inquiry before page", sync)
+        core = (KERNEL / "hci_core.c").read_text(encoding="utf-8")
+        self.assertIn("hci_inquiry_cache_drop_expired", core)
+        self.assertIn("dagu_keep_page_params", core)
+        header = (KERNEL.parent.parent / "include/net/bluetooth/hci_core.h")
+        header_text = header.read_text(encoding="utf-8")
+        self.assertIn("hci_lookup_acl_connect", header_text)
+        self.assertIn("hci_inquiry_cache_drop_expired", header_text)
+        overlay = (ROOT / "scripts/apply-overlays.sh").read_text(encoding="utf-8")
+        self.assertIn("dagu: keep the inquiry clock offset", overlay)
+        self.assertIn("hci_inquiry_cache_drop_expired", overlay)
 
     def test_att_retry_patch_applies(self) -> None:
         patcher = load_patcher()
@@ -140,6 +184,32 @@ class LeConnPolicyTest(unittest.TestCase):
                 self.assertIn("2000   /* 2000 ms */", text)
                 self.assertIn("DAGU_ATT_TIMEOUT_TRIES\t\t3", text)
                 self.assertNotIn("30000  /* 30000 ms */", text)
+                patcher.main()
+            finally:
+                sys.argv = saved
+            again = path.read_text(encoding="utf-8")
+        self.assertEqual(text, again)
+
+    def test_failed_page_keeps_the_row(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "dagu_bluez_keep_classic_row", ROW_PATCHER)
+        patcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(patcher)
+        fixture = (
+            "static void connect_failed_callback(void)\n{\n"
+            + patcher.OLD
+            + "\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "adapter.c"
+            path.write_text(fixture, encoding="utf-8")
+            saved = sys.argv
+            try:
+                sys.argv = ["dagu-bluez-keep-classic-row.py", str(path)]
+                patcher.main()
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(patcher.MARKER, text)
+                self.assertNotIn("btd_adapter_remove_device", text)
                 patcher.main()
             finally:
                 sys.argv = saved

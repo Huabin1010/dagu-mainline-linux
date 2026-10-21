@@ -10,7 +10,7 @@
 | `drivers/usb/misc/ps5169-dagu.c` | PS5169 USB3/DP redriver，CAF 初始化序列 |
 | `drivers/input/keyboard/nanosic-dagu.c` | 磁吸键盘 MCU，QUP0 SE2 GENI I2C gpio115/116（uart2 保持关） |
 | `drivers/power/supply/bq2597x-dagu.c` | 双 BQ25970 充电泵，GENI I2C SE15/SE16（PPS 策略不抄 CAF usbpd-pm） |
-| `drivers/power/supply/pm8150b-charger-dagu.c` | PM8150B SMB5 5 V/9 V 充电；不抄 CAF qpnp-smb5，不写 Type-C |
+| `drivers/power/supply/pm8150b-charger-dagu.c` | PM8150B SMB5 5 V 充电；ICL 等 USB_TYPE=PD，不把 Type-C Rp-3.0 当 2 A 合同 |
 | `drivers/power/supply/p9418-dagu.c` | P9418 Smart Pen 侧吸 TX（不是平板 Qi） |
 | `drivers/power/supply/xiaomi-dual-fg.c` | 双 BQ27Z561 合成 `bms`（CAF 加权 SoC） |
 

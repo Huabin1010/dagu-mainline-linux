@@ -97,6 +97,14 @@ grep -qE '^CONFIG_BOOTPARAM_HUNG_TASK_PANIC=[1-9]' "$cfg" && \
 if ! grep -q 'dagu: skip UFSHCD_CAP_CLK_SCALING' "$KERNEL_SRC/drivers/ufs/host/ufs-qcom.c"; then
 	die "ufs-qcom.c still has CLK_SCALING — apply-overlays.sh missed the UFS patch"
 fi
+if ! grep -q 'dagu: ABL leaves EN_SNK/SRC_CRUDE_SENSOR' \
+	"$KERNEL_SRC/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c"; then
+	die "qcom_pmic_typec_port.c missing crude-sensor disable — PD would lock USBIN"
+fi
+if ! grep -q 'dagu: SNK_TRANSITION_SINK may see VBUS drop' \
+	"$KERNEL_SRC/drivers/usb/typec/tcpm/tcpm.c"; then
+	die "tcpm.c still unattaches on SNK_TRANSITION VBUS-off — 9 V PD would loop"
+fi
 grep -q '^CONFIG_ARM64_VA_BITS_52=y' "$cfg" && die "VA_BITS_52 still on — Kryo 585 has no FEAT_LVA"
 grep -q '^CONFIG_ARM64_VA_BITS_48=y' "$cfg" && die "VA_BITS_48 still on — dump 4.19 is VA_BITS_39 / 3-level"
 grep -q '^CONFIG_KVM=y' "$cfg" && die "KVM still on — dump 4.19 has no hypervisor stub"

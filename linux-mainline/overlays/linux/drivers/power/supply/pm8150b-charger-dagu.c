@@ -4,22 +4,27 @@
  *
  * CAF qpnp-smb5-dagu.c is thousands of lines (PD / JEITA / dual-pump policy).
  * This is the 5 V / 9 V buck path only: unsuspend USBIN, enable charge, kick
- * the charger watchdog off, set ICL from APSD. Do not touch Type-C @1500 —
- * qcom_pmic_typec owns CC / PD. Do not copy qcom_smbx (SMB2) scales: PM8150B
- * ICL/FCC is 50 mA/LSB and float is 3.6 V + 10 mV/LSB.
+ * the charger watchdog off, set ICL from TCPM's PD contract (fallback APSD
+ * for BC1.2 bricks). Do not touch Type-C @1500 — qcom_pmic_typec owns CC /
+ * PD, including crude moisture sensors. Do not copy qcom_smbx (SMB2) scales:
+ * PM8150B ICL/FCC is 50 mA/LSB and float is 3.6 V + 10 mV/LSB.
  */
 
 #include <linux/bits.h>
 #include <linux/delay.h>
 #include <linux/devm-helpers.h>
 #include <linux/interrupt.h>
+#include <linux/jiffies.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
+#include <linux/notifier.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_wakeirq.h>
 #include <linux/pm_wakeup.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/string.h>
 #include <linux/workqueue.h>
 
 #define CHGR_BASE				0x1000
@@ -109,15 +114,27 @@
 #define SDP_UA					500000
 #define CDP_UA					1500000
 #define DCP_UA					2000000
+/* USB default while PD negotiates. Type-C Rp-3.0 is not a PD contract. */
+#define ICL_USB_DEFAULT_UA			500000
+#define ICL_TYPEC_MAX_UA			1500000
 /* 5 V wall bricks often APSD as SDP; still allow 2 A (10 W). */
 #define ICL_5V_MAX_UA				2000000
+/* SMB5 buck PD contract (9 V / 3 A). 67 W PPS stays on BQ25970. */
+#define ICL_PD_MAX_UA				3000000
+#define TCPM_PSY_PREFIX				"tcpm-source-psy-"
+#define ICL_HOLD_MS				800
 
 struct pm8150b_chg {
 	struct device *dev;
 	struct regmap *regmap;
 	struct power_supply *psy;
+	struct power_supply *tcpm_psy;
+	struct notifier_block psy_nb;
 	struct delayed_work status_work;
 	int plugin_irq;
+	int last_icl;
+	int last_uv;
+	unsigned long hold_until;
 };
 
 static int chg_write_ua(struct pm8150b_chg *chg, unsigned int reg, int ua)
@@ -127,23 +144,93 @@ static int chg_write_ua(struct pm8150b_chg *chg, unsigned int reg, int ua)
 	return regmap_write(chg->regmap, reg, ua / CURRENT_STEP_UA);
 }
 
-static int chg_usb_online(struct pm8150b_chg *chg, int *online)
+static struct power_supply *chg_tcpm_psy(struct pm8150b_chg *chg)
+{
+	if (chg->tcpm_psy)
+		return chg->tcpm_psy;
+
+	chg->tcpm_psy = power_supply_get_by_name(
+		"tcpm-source-psy-c440000.spmi:pmic@2:typec@1500");
+	return chg->tcpm_psy;
+}
+
+static int chg_tcpm_contract(struct pm8150b_chg *chg, int *ua, int *uv,
+			     int *usb_type)
+{
+	union power_supply_propval online = {}, curr = {}, volt = {}, type = {};
+	struct power_supply *psy = chg_tcpm_psy(chg);
+	int ret;
+
+	if (!psy)
+		return -ENODEV;
+
+	ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_ONLINE, &online);
+	if (ret || !online.intval)
+		return -ENODATA;
+	ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_USB_TYPE, &type);
+	if (ret)
+		type.intval = POWER_SUPPLY_USB_TYPE_C;
+	ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_CURRENT_MAX, &curr);
+	if (ret)
+		return ret;
+	ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_VOLTAGE_NOW, &volt);
+	if (ret)
+		return ret;
+	if (curr.intval <= 0)
+		return -ENODATA;
+	*ua = curr.intval;
+	*uv = volt.intval;
+	*usb_type = type.intval;
+	return 0;
+}
+
+static bool chg_usb_type_pd(int usb_type)
+{
+	return usb_type == POWER_SUPPLY_USB_TYPE_PD ||
+	       usb_type == POWER_SUPPLY_USB_TYPE_PD_PPS;
+}
+
+static int chg_typec_icl(struct pm8150b_chg *chg)
+{
+	if (!chg->hold_until) {
+		chg->hold_until = jiffies + msecs_to_jiffies(ICL_HOLD_MS);
+		schedule_delayed_work(&chg->status_work,
+				      msecs_to_jiffies(ICL_HOLD_MS));
+		return ICL_USB_DEFAULT_UA;
+	}
+	if (time_before(jiffies, chg->hold_until)) {
+		schedule_delayed_work(&chg->status_work,
+				      chg->hold_until - jiffies);
+		return ICL_USB_DEFAULT_UA;
+	}
+	return ICL_TYPEC_MAX_UA;
+}
+
+static int chg_usbin_present(struct pm8150b_chg *chg)
 {
 	unsigned int stat;
 	int ret;
 
 	ret = regmap_read(chg->regmap, USBIN_INT_RT_STS, &stat);
 	if (ret)
-		return ret;
-	if (stat & USBIN_PLUGIN_RT_STS_BIT) {
-		*online = 1;
 		return 0;
-	}
+	if (stat & USBIN_PLUGIN_RT_STS_BIT)
+		return 1;
 
 	ret = regmap_read(chg->regmap, POWER_PATH_STATUS, &stat);
 	if (ret)
-		return ret;
-	*online = !!(stat & VALID_INPUT_POWER_SOURCE_STS_BIT);
+		return 0;
+	return !!(stat & VALID_INPUT_POWER_SOURCE_STS_BIT);
+}
+
+static int chg_usb_online(struct pm8150b_chg *chg, int *online)
+{
+	/*
+	 * TCPM can still advertise a 5 V / 3 A contract after USBIN has
+	 * collapsed (OV+UV). Treating that as online slams ICL and the
+	 * power bank never recovers.
+	 */
+	*online = chg_usbin_present(chg);
 	return 0;
 }
 
@@ -185,48 +272,110 @@ static void chg_status_work(struct work_struct *work)
 {
 	struct pm8150b_chg *chg = container_of(work, struct pm8150b_chg,
 					       status_work.work);
-	unsigned int apsd, result;
-	int online = 0, icl = ICL_5V_MAX_UA, ret, tries;
+	unsigned int apsd = 0, result = 0, usbin = 0, path = 0;
+	int online = 0, icl = ICL_USB_DEFAULT_UA, ua = 0, uv = 0;
+	int usb_type = POWER_SUPPLY_USB_TYPE_UNKNOWN, ret, tries;
+	const char *src = "apsd";
 
 	ret = chg_usb_online(chg, &online);
 	if (ret || !online) {
+		if (chg->last_icl || chg->last_uv) {
+			regmap_read(chg->regmap, USBIN_INT_RT_STS, &usbin);
+			regmap_read(chg->regmap, POWER_PATH_STATUS, &path);
+			dev_info(chg->dev, "input gone usbin=0x%02x path=0x%02x\n",
+				 usbin, path);
+		}
+		chg->last_icl = 0;
+		chg->last_uv = 0;
+		chg->hold_until = 0;
+		chg_set_icl(chg, ICL_USB_DEFAULT_UA);
 		power_supply_changed(chg->psy);
 		return;
 	}
 
+	/*
+	 * Limit before unsuspend. Leftover 2 A ICL plus Type-C Rp-3.0
+	 * inrush browns a PD bank before Source Caps arrive.
+	 */
+	if (!chg->last_icl)
+		chg_set_icl(chg, ICL_USB_DEFAULT_UA);
+
 	if (chg_enable_path(chg))
 		dev_warn(chg->dev, "enable path failed\n");
 
-	for (tries = 0; tries < 8; tries++) {
-		ret = regmap_read(chg->regmap, APSD_STATUS, &apsd);
-		if (ret)
-			break;
-		if (apsd & APSD_DTC_STATUS_DONE_BIT)
-			break;
-		msleep(100);
-	}
-
-	if (ret || !(apsd & APSD_DTC_STATUS_DONE_BIT)) {
-		regmap_update_bits(chg->regmap, CMD_APSD, APSD_RERUN_BIT,
-				   APSD_RERUN_BIT);
-		schedule_delayed_work(&chg->status_work, msecs_to_jiffies(1000));
-		return;
-	}
-
-	ret = regmap_read(chg->regmap, APSD_RESULT_STATUS, &result);
-	if (ret)
-		return;
-	result &= APSD_RESULT_STATUS_MASK;
-
 	/*
-	 * 5 V path: ICL 2 A. USB51 (500 mA) mode would cap even DCP bricks
-	 * that APSD as SDP. AICL can still fold if the cable collapses.
+	 * PD bricks talk on CC, not D+/D-. Waiting for APSD_DONE spins
+	 * forever (ICL stuck at ABL 1 A, USB51) and never applies the
+	 * TCPM contract.
+	 *
+	 * TCPM CURRENT_MAX is 3 A as soon as Rp-3.0 attaches (USB_TYPE
+	 * C, not PD). Treating that as a PD contract drew 2 A, then
+	 * requested 9 V; tPSTransition dropped VBUS (2.2 V / 2.8 V).
+	 * Stay at USB default until USB_TYPE is PD and the current is
+	 * above the 500 mA PS_RDY standby. Type-C without PD ramps to
+	 * 1.5 A after ICL_HOLD_MS. 5 V PD caps at 2 A; 9 V at 3 A.
 	 */
-	icl = ICL_5V_MAX_UA;
+	if (!chg_tcpm_contract(chg, &ua, &uv, &usb_type)) {
+		if (chg_usb_type_pd(usb_type) && ua > SDP_UA) {
+			src = "pd";
+			chg->hold_until = 0;
+			if (uv >= 8000000)
+				icl = min_t(int, ua, ICL_PD_MAX_UA);
+			else
+				icl = min_t(int, ua, ICL_5V_MAX_UA);
+		} else if (chg->last_uv >= 8000000 && ua <= SDP_UA) {
+			src = "pd-hold";
+			icl = chg->last_icl;
+		} else {
+			src = "typec";
+			icl = chg_typec_icl(chg);
+		}
+	} else {
+		for (tries = 0; tries < 8; tries++) {
+			ret = regmap_read(chg->regmap, APSD_STATUS, &apsd);
+			if (ret)
+				break;
+			if (apsd & APSD_DTC_STATUS_DONE_BIT)
+				break;
+			msleep(100);
+		}
 
-	chg_set_icl(chg, icl);
-	dev_info(chg->dev, "apsd=0x%02x icl=%d uA\n", result, icl);
-	power_supply_changed(chg->psy);
+		if (!ret && (apsd & APSD_DTC_STATUS_DONE_BIT)) {
+			ret = regmap_read(chg->regmap, APSD_RESULT_STATUS, &result);
+			if (!ret)
+				result &= APSD_RESULT_STATUS_MASK;
+		} else {
+			regmap_update_bits(chg->regmap, CMD_APSD, APSD_RERUN_BIT,
+					   APSD_RERUN_BIT);
+		}
+		icl = ICL_5V_MAX_UA;
+	}
+
+	if (icl != chg->last_icl || uv != chg->last_uv) {
+		chg_set_icl(chg, icl);
+		dev_info(chg->dev,
+			 "%s type=%d uv=%d ua=%d apsd=0x%02x icl=%d uA\n",
+			 src, usb_type, uv, ua, result, icl);
+		chg->last_icl = icl;
+		chg->last_uv = uv;
+		power_supply_changed(chg->psy);
+	}
+}
+
+static int chg_psy_notifier(struct notifier_block *nb, unsigned long event,
+			    void *data)
+{
+	struct pm8150b_chg *chg = container_of(nb, struct pm8150b_chg, psy_nb);
+	struct power_supply *psy = data;
+
+	if (event != PSY_EVENT_PROP_CHANGED || !psy || !psy->desc ||
+	    !psy->desc->name)
+		return NOTIFY_OK;
+	if (strncmp(psy->desc->name, TCPM_PSY_PREFIX, strlen(TCPM_PSY_PREFIX)))
+		return NOTIFY_OK;
+
+	schedule_delayed_work(&chg->status_work, msecs_to_jiffies(200));
+	return NOTIFY_OK;
 }
 
 static irqreturn_t chg_plugin_irq(int irq, void *data)
@@ -307,6 +456,15 @@ static int chg_get_property(struct power_supply *psy,
 			val->intval = POWER_SUPPLY_USB_TYPE_UNKNOWN;
 			return 0;
 		}
+		{
+			int pd_ua, pd_uv, pd_type;
+
+			if (!chg_tcpm_contract(chg, &pd_ua, &pd_uv, &pd_type)) {
+				val->intval = chg_usb_type_pd(pd_type) ?
+					pd_type : POWER_SUPPLY_USB_TYPE_C;
+				return 0;
+			}
+		}
 		ret = regmap_read(chg->regmap, APSD_RESULT_STATUS, &stat);
 		if (ret)
 			return ret;
@@ -348,6 +506,9 @@ static const struct power_supply_desc chg_desc = {
 	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_SDP) |
 		     BIT(POWER_SUPPLY_USB_TYPE_DCP) |
 		     BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_C) |
+		     BIT(POWER_SUPPLY_USB_TYPE_PD) |
+		     BIT(POWER_SUPPLY_USB_TYPE_PD_PPS) |
 		     BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN),
 	.properties = chg_props,
 	.num_properties = ARRAY_SIZE(chg_props),
@@ -452,6 +613,10 @@ static int chg_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, chg);
+	chg->psy_nb.notifier_call = chg_psy_notifier;
+	ret = power_supply_reg_notifier(&chg->psy_nb);
+	if (ret)
+		dev_warn(&pdev->dev, "tcpm notifier %d\n", ret);
 	schedule_delayed_work(&chg->status_work, msecs_to_jiffies(500));
 	dev_info(&pdev->dev, "SMB5 enabled (FV %u mV, FCC %u mA)\n",
 		 FV_TARGET_UV / 1000, FCC_UA / 1000);

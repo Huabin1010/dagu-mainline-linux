@@ -52,6 +52,8 @@ python3 "$(dirname "$SRC_HELPER")/dagu-bluez-hold-discovery.py" .
 grep -q "dagu: do not resume discovery while LE GATT" src/adapter.c
 python3 "$(dirname "$SRC_HELPER")/dagu-bluez-att-retry.py" src/shared/att.c
 grep -q "dagu: resend a missed ATT PDU" src/shared/att.c
+python3 "$(dirname "$SRC_HELPER")/dagu-bluez-keep-classic-row.py" src/adapter.c
+grep -q "dagu: keep the row after a failed page" src/adapter.c
 
 DEB_BUILD_OPTIONS="nocheck parallel=$(nproc)" dpkg-buildpackage -b -uc -us -j"$(nproc)"
 

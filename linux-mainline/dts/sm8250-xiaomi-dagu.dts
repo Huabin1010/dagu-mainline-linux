@@ -22,6 +22,7 @@
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/phy/phy.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include <dt-bindings/usb/pd.h>
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <dt-bindings/sound/qcom,q6asm.h>
 #include <dt-bindings/media/video-interfaces.h>
@@ -938,10 +939,34 @@
  * Type-C TCPM presents Rd and does PD. Do NOT reconnect the USB graph —
  * waiting on pm8150b_typec previously left DWC3 in otg with no UDC.
  * DWC3 stays peripheral via role-switch-default-mode below.
+ *
+ * Elish inherited 10 W + 5–12 V VAR. Xiaomi 67 W bricks advertise
+ * 5/9/15/20 V fixed. SMB5 5 V / 2 A is the live contract; 9 V
+ * unattaches on tPSTransition VBUS-off. 15/20 V needs BQ25970.
  */
 &pm8150b_typec {
 	vdd-pdphy-supply = <&vreg_l2a_3p1>;
 	status = "okay";
+
+	connector {
+		/*
+		 * Try.SNK: a power bank is also DRP. If we present Rp
+		 * first it sinks from us and VBUS collapses to ~2 V.
+		 *
+		 * TCPM picks the source PDO with the most watts that
+		 * matches a sink PDO. A 9 V / 3 A sink cap makes a
+		 * 100 W bank Accept 9 V; tPSTransition drops VBUS and
+		 * default TCPM unattaches (2.2 V / 2.8 V loop). 5 V /
+		 * 2 A is the SMB5 contract until SNK_TRANSITION_SINK
+		 * ignores that VBUS-off. Do not add 9 V / 15 V here.
+		 */
+		try-power-role = "sink";
+		op-sink-microwatt = <10000000>;
+		sink-pdos = <PDO_FIXED(5000, 2000,
+				       PDO_FIXED_DUAL_ROLE |
+				       PDO_FIXED_USB_COMM |
+				       PDO_FIXED_DATA_SWAP)>;
+	};
 };
 
 /*

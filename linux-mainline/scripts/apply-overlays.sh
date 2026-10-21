@@ -274,8 +274,8 @@ config CHARGER_PM8150B_DAGU
 	tristate "PM8150B SMB5 charger (Xiaomi dagu)"
 	depends on MFD_SPMI_PMIC
 	help
-	  PM8150B buck charger for 5 V / 9 V input on dagu. Does not
-	  copy CAF qpnp-smb5 or touch Type-C registers.
+	  PM8150B buck charger for 5 V / 9 V input on dagu. ICL follows
+	  TCPM PD. Does not copy CAF qpnp-smb5 or touch Type-C registers.
 
 config CHARGER_P9418_DAGU
 	tristate "IDT P9418 Smart Pen TX (Xiaomi dagu)"
@@ -301,8 +301,8 @@ insert_kconfig(
 	tristate "PM8150B SMB5 charger (Xiaomi dagu)"
 	depends on MFD_SPMI_PMIC
 	help
-	  PM8150B buck charger for 5 V / 9 V input on dagu. Does not
-	  copy CAF qpnp-smb5 or touch Type-C registers.
+	  PM8150B buck charger for 5 V / 9 V input on dagu. ICL follows
+	  TCPM PD. Does not copy CAF qpnp-smb5 or touch Type-C registers.
 
 """,
 )
@@ -336,6 +336,105 @@ insert_kconfig(
 # Do not poke KPSS WDT from primary_entry: MMU is off and that
 # physical store SErrors on this ABL map. Pet from early_initcall instead.
 PY
+
+# PM8150B Type-C: ABL leaves crude moisture sensors on. They false-trigger
+# on PD CC (WATER_DETECTION_STATUS + VBUS_ERROR) and disconnect USBIN.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+port = Path(sys.argv[1]) / "drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c"
+text = port.read_text()
+if "dagu: ABL leaves EN_SNK/SRC_CRUDE_SENSOR" in text:
+    raise SystemExit(0)
+old = """	ret = regmap_write(pmic_typec_port->regmap,
+			   pmic_typec_port->base + TYPEC_INTERRUPT_EN_CFG_2_REG,
+			   TYPEC_INTR_EN_CFG_2_MASK);
+	if (ret)
+		goto done;
+
+	/* start in TRY_SNK mode */
+	ret = regmap_write(pmic_typec_port->regmap,
+			   pmic_typec_port->base + TYPEC_MODE_CFG_REG, EN_TRY_SNK);
+"""
+new = """	ret = regmap_write(pmic_typec_port->regmap,
+			   pmic_typec_port->base + TYPEC_INTERRUPT_EN_CFG_2_REG,
+			   TYPEC_INTR_EN_CFG_2_MASK);
+	if (ret)
+		goto done;
+
+	/*
+	 * dagu: ABL leaves EN_SNK/SRC_CRUDE_SENSOR on. The crude moisture
+	 * detector false-triggers on PD CC (TYPEC_WATER_DETECTION_STATUS +
+	 * TYPEC_VBUS_ERROR) and the Type-C FSM disconnects USBIN, so SMB5
+	 * never sees PLUGIN and TCPM loops attach. CAF Xiaomi writes 0
+	 * here; this block owns 0x4e, not the charger overlay.
+	 */
+	ret = regmap_write(pmic_typec_port->regmap,
+			   pmic_typec_port->base + TYPE_C_CRUDE_SENSOR_CFG_REG,
+			   0);
+	if (ret)
+		goto done;
+
+	ret = regmap_write(pmic_typec_port->regmap,
+			   pmic_typec_port->base + TYPEC_MODE_CFG_REG,
+			   TYPEC_DISABLE_CMD);
+	if (ret)
+		goto done;
+
+	/* start in TRY_SNK mode */
+	ret = regmap_write(pmic_typec_port->regmap,
+			   pmic_typec_port->base + TYPEC_MODE_CFG_REG, EN_TRY_SNK);
+"""
+if old not in text:
+    raise SystemExit("qcom_pmic_typec_port.c TRY_SNK start block not found")
+port.write_text(text.replace(old, new, 1))
+PY
+grep -q 'dagu: ABL leaves EN_SNK/SRC_CRUDE_SENSOR' \
+	"$KERNEL_SRC/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c" || {
+	echo "typec crude-sensor disable missing" >&2
+	exit 1
+}
+
+# PD tPSTransition may drop VBUS while the source slews 5 V → 9 V.
+# Default TCPM unattaches and the bank Hard-Resets (~1.3 s 2.2 V loop).
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+tcpm = Path(sys.argv[1]) / "drivers/usb/typec/tcpm/tcpm.c"
+text = tcpm.read_text()
+if "dagu: SNK_TRANSITION_SINK may see VBUS drop" in text:
+    raise SystemExit(0)
+old = """	case SNK_NEGOTIATE_CAPABILITIES:
+		break;
+
+	case PR_SWAP_SRC_SNK_TRANSITION_OFF:
+"""
+new = """	case SNK_NEGOTIATE_CAPABILITIES:
+		break;
+
+	/*
+	 * dagu: SNK_TRANSITION_SINK may see VBUS drop while the source
+	 * slews 5 V to 9 V (tPSTransition). Unattach here Hard-Resets
+	 * the contract and the bank UI jumps 2.2 V / 2.8 V. Wait for
+	 * PS_RDY like SNK_NEGOTIATE_CAPABILITIES already does.
+	 */
+	case SNK_TRANSITION_SINK:
+	case SNK_TRANSITION_SINK_VBUS:
+		break;
+
+	case PR_SWAP_SRC_SNK_TRANSITION_OFF:
+"""
+if old not in text:
+    raise SystemExit("tcpm.c SNK_NEGOTIATE_CAPABILITIES vbus-off block not found")
+tcpm.write_text(text.replace(old, new, 1))
+PY
+grep -q 'dagu: SNK_TRANSITION_SINK may see VBUS drop' \
+	"$KERNEL_SRC/drivers/usb/typec/tcpm/tcpm.c" || {
+	echo "tcpm SNK_TRANSITION vbus-off ignore missing" >&2
+	exit 1
+}
 
 # L81A: CAF lp11-init + bllp HS. Re-applied every build (linux/ is a checkout).
 python3 - "$KERNEL_SRC" <<'PY'
@@ -1044,7 +1143,7 @@ import sys
 path = Path(sys.argv[1])
 text = path.read_text()
 marker = "dagu: pscan_rep_mode does not drift"
-if marker in text:
+if marker in text or "dagu_fill_page_params" in text:
     raise SystemExit(0)
 old = """	ie = hci_inquiry_cache_lookup(hdev, &conn->dst);
 	if (ie) {
@@ -1579,7 +1678,7 @@ text = sync.read_text()
 changed = False
 
 marker = "dagu: a click already has an LE initiator"
-if marker not in text:
+if marker not in text and "dagu: a click already owns the radio" not in text:
     old = """	bt_dev_dbg(hdev, "");
 	hci_dev_lock(hdev);
 
@@ -2420,6 +2519,106 @@ text = text.replace(old, new, 1)
 path.write_text(text)
 print(f"patched {path}: dagu: defer LE update")
 
+PY
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+sync = root / "net/bluetooth/hci_sync.c"
+if "dagu: classic page owns the radio" in sync.read_text():
+    raise SystemExit(0)
+repls = [
+    ('net/bluetooth/hci_sync.c', '#include "eir.h"\n#include "msft.h"\n', '#include "eir.h"\n#include "dagu_le_conn_policy.h"\n#include "msft.h"\n'),
+    ('net/bluetooth/hci_sync.c', '\t/* dagu: a click already has an LE initiator. Do not start the\n\t * Inquiry half of interleaved discovery on top of it. QCA6390\n\t * is TDD; Inquiry aborts LE Create Connection and the Settings\n\t * row spins until the D-Bus timeout.\n\t */\n\tif (hci_lookup_le_connect(hdev))\n\t\tgoto _return;\n', '\t/* dagu: a click already owns the radio. Do not start the\n\t * Inquiry half of interleaved discovery on top of an LE\n\t * create or a classic page. QCA6390 is TDD; the page then\n\t * returns Page Timeout and the keyboard row keeps spinning.\n\t */\n\tif (dagu_discovery_must_wait(hci_lookup_le_connect(hdev) != NULL,\n\t\t\t\t     hci_lookup_acl_connect(hdev) != NULL))\n\t\tgoto _return;\n\n'),
+    ('net/bluetooth/hci_sync.c', '\t\tif (hci_lookup_le_connect(hdev))\n\t\t\treturn 0;\n', '\t\tif (dagu_discovery_must_wait(hci_lookup_le_connect(hdev) != NULL,\n\t\t\t\t\t     hci_lookup_acl_connect(hdev) != NULL))\n\t\t\treturn 0;\n\n'),
+    ('net/bluetooth/hci_sync.c', '\t/* dagu: same rule as hci_update_passive_scan_sync. QCA6390\n\t * cannot scan or Inquiry while LE Create Connection is in\n\t * flight; GNOME Settings queues StartDiscovery behind Pair.\n\t */\n\tif (hci_lookup_le_connect(hdev))\n\t\treturn -EBUSY;\n', '\t/* dagu: same rule as hci_update_passive_scan_sync. QCA6390\n\t * cannot scan or Inquiry while LE Create Connection or a\n\t * classic page is in flight. GNOME Settings queues\n\t * StartDiscovery behind Pair, and that scan is why a K380\n\t * page returns Page Timeout.\n\t */\n\tif (dagu_discovery_must_wait(hci_lookup_le_connect(hdev) != NULL,\n\t\t\t\t     hci_lookup_acl_connect(hdev) != NULL))\n\t\treturn -EBUSY;\n\n'),
+    ('net/bluetooth/hci_sync.c', '\tconn->state = BT_CONNECT;\n\tconn->out = true;\n\tconn->role = HCI_ROLE_MASTER;\n', '\tconn->state = BT_CONNECT;\n\tconn->out = true;\n\n\t/* dagu: classic page owns the radio. LE scan left running\n\t * here is the Settings discovery that was on when the K380\n\t * row was clicked. The page then completes as Page Timeout.\n\t */\n\tif (dagu_pause_le_scan_for_page(hci_dev_test_flag(hdev, HCI_LE_SCAN))) {\n\t\thci_dev_set_flag(hdev, HCI_LE_SCAN_INTERRUPTED);\n\t\thci_scan_disable_sync(hdev);\n\t\tbt_dev_info(hdev, "dagu: pause LE scan for classic page");\n\t}\n\n\tconn->role = HCI_ROLE_MASTER;\n\n'),
+    ('include/net/bluetooth/hci_core.h', '\t\tif (c->type == LE_LINK && c->state == BT_CONNECT &&\n\t\t    !test_bit(HCI_CONN_SCANNING, &c->flags)) {\n\t\t\trcu_read_unlock();\n\t\t\treturn c;\n\t\t}\n\t}\n\n\trcu_read_unlock();\n\n\treturn NULL;\n}\n\n/* Returns true if an le connection is in the scanning state */\n', '\t\tif (c->type == LE_LINK && c->state == BT_CONNECT &&\n\t\t    !test_bit(HCI_CONN_SCANNING, &c->flags)) {\n\t\t\trcu_read_unlock();\n\t\t\treturn c;\n\t\t}\n\t}\n\n\trcu_read_unlock();\n\n\treturn NULL;\n}\n\n/* Outgoing classic page. Discovery must not take the radio. */\nstatic inline struct hci_conn *hci_lookup_acl_connect(struct hci_dev *hdev)\n{\n\tstruct hci_conn_hash *h = &hdev->conn_hash;\n\tstruct hci_conn *c;\n\n\trcu_read_lock();\n\n\tlist_for_each_entry_rcu(c, &h->list, list) {\n\t\tif (c->type == ACL_LINK && c->state == BT_CONNECT && c->out) {\n\t\t\trcu_read_unlock();\n\t\t\treturn c;\n\t\t}\n\t}\n\n\trcu_read_unlock();\n\n\treturn NULL;\n}\n\n'),
+    ('net/bluetooth/dagu_le_conn_policy.h', '/* timed_out_tries is how many times this PDU has already timed out. */\nstatic inline int dagu_att_give_up(unsigned int timed_out_tries)\n{\n\treturn timed_out_tries >= DAGU_ATT_TIMEOUT_TRIES;\n}\n\n#endif\n', '/* timed_out_tries is how many times this PDU has already timed out. */\nstatic inline int dagu_att_give_up(unsigned int timed_out_tries)\n{\n\treturn timed_out_tries >= DAGU_ATT_TIMEOUT_TRIES;\n}\n\n/*\n * QCA6390 is time-division. An LE scan or Inquiry running during\n * HCI Create Connection makes the page miss a classic keyboard and\n * the controller returns Page Timeout. Discovery has to wait out\n * both an LE create and a classic page.\n */\nstatic inline int dagu_discovery_must_wait(int le_creating, int acl_paging)\n{\n\treturn le_creating || acl_paging;\n}\n\n/* The page needs the radio the scan is using. */\nstatic inline int dagu_pause_le_scan_for_page(int le_scan_enabled)\n{\n\treturn le_scan_enabled ? 1 : 0;\n}\n\n#endif\n'),
+]
+for rel, old, new in repls:
+    path = root / rel
+    text = path.read_text()
+    if old not in text:
+        raise SystemExit(f"{path}: classic page needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: dagu: classic page owns the radio")
+PY
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+sync = root / "net/bluetooth/hci_sync.c"
+if "dagu: keep the inquiry clock offset" in sync.read_text():
+    raise SystemExit(0)
+repls = [
+    ('net/bluetooth/hci_sync.c',
+     '\tif (test_bit(HCI_INQUIRY, &hdev->flags))\n\t\treturn 0;\n\n\thci_dev_lock(hdev);\n\thci_inquiry_cache_flush(hdev);\n\thci_dev_unlock(hdev);\n',
+     '\tif (test_bit(HCI_INQUIRY, &hdev->flags))\n\t\treturn 0;\n\n\t/* dagu: keep the inquiry clock offset. Starting the next\n\t * Inquiry used to flush the cache. Settings still shows the\n\t * keyboard from the previous result, and the click then pages\n\t * with R2 and clock offset 0. That page completes as Page\n\t * Timeout in 5.12 s, which is the controller default.\n\t */\n\thci_dev_lock(hdev);\n\thci_inquiry_cache_drop_expired(hdev);\n\thci_dev_unlock(hdev);\n'),
+    ('net/bluetooth/hci_sync.c',
+     '\t\tif (inquiry_entry_age(ie) <= PAGING_CLOCK_OFFSET_AGE_MAX)\n\t\t\tcp.clock_offset   = ie->data.clock_offset |\n\t\t\t\t\t    cpu_to_le16(0x8000);\n\n\t\tmemcpy(conn->dev_class, ie->data.dev_class, 3);\n\t}\n\n\tcp.pkt_type = cpu_to_le16(conn->pkt_type);\n',
+     '\t\tif (dagu_keep_page_params(inquiry_entry_age(ie),\n\t\t\t\t\t  PAGING_CLOCK_OFFSET_AGE_MAX))\n\t\t\tcp.clock_offset   = ie->data.clock_offset |\n\t\t\t\t\t    cpu_to_le16(0x8000);\n\n\t\tmemcpy(conn->dev_class, ie->data.dev_class, 3);\n\t}\n\n\tbt_dev_info(hdev, "dagu: classic page rep %u offset 0x%04x",\n\t\t    cp.pscan_rep_mode, le16_to_cpu(cp.clock_offset));\n\n\tcp.pkt_type = cpu_to_le16(conn->pkt_type);\n'),
+    ('net/bluetooth/dagu_le_conn_policy.h',
+     '/* The page needs the radio the scan is using. */\nstatic inline int dagu_pause_le_scan_for_page(int le_scan_enabled)\n{\n\treturn le_scan_enabled ? 1 : 0;\n}\n\n#endif\n',
+     '/* The page needs the radio the scan is using. */\nstatic inline int dagu_pause_le_scan_for_page(int le_scan_enabled)\n{\n\treturn le_scan_enabled ? 1 : 0;\n}\n\n/*\n * A just-heard inquiry result still has a usable page-scan repetition\n * mode and clock offset. The next Inquiry must not throw that away:\n * Settings shows the keyboard from the previous result, and the click\n * pages before this Inquiry has a new FHS. Offset 0 with R2 is the\n * 5.12 s Page Timeout.\n */\nstatic inline int dagu_keep_page_params(long age, long max_age)\n{\n\tif (age < 0)\n\t\treturn 0;\n\treturn age <= max_age;\n}\n\n#endif\n'),
+    ('include/net/bluetooth/hci_core.h',
+     'void hci_inquiry_cache_flush(struct hci_dev *hdev);\n\n/* ----- HCI Connections ----- */\n',
+     'void hci_inquiry_cache_flush(struct hci_dev *hdev);\nvoid hci_inquiry_cache_drop_expired(struct hci_dev *hdev);\n\n/* ----- HCI Connections ----- */\n'),
+    ('net/bluetooth/hci_core.c',
+     '#include "aosp.h"\n#include "hci_codec.h"\n',
+     '#include "aosp.h"\n#include "hci_codec.h"\n#include "dagu_le_conn_policy.h"\n'),
+    ('net/bluetooth/hci_core.c',
+     '\tINIT_LIST_HEAD(&cache->unknown);\n\tINIT_LIST_HEAD(&cache->resolve);\n}\n\nstruct inquiry_entry *hci_inquiry_cache_lookup(struct hci_dev *hdev,\n',
+     '\tINIT_LIST_HEAD(&cache->unknown);\n\tINIT_LIST_HEAD(&cache->resolve);\n}\n\nvoid hci_inquiry_cache_drop_expired(struct hci_dev *hdev)\n{\n\tstruct discovery_state *cache = &hdev->discovery;\n\tstruct inquiry_entry *p, *n;\n\n\tlist_for_each_entry_safe(p, n, &cache->all, all) {\n\t\tif (dagu_keep_page_params(inquiry_entry_age(p),\n\t\t\t\t\t  PAGING_CLOCK_OFFSET_AGE_MAX))\n\t\t\tcontinue;\n\n\t\tlist_del(&p->all);\n\t\t/* NAME_KNOWN is not on unknown/resolve. list_del there\n\t\t * faults: the node was never added, or was already removed.\n\t\t */\n\t\tif (p->name_state != NAME_KNOWN)\n\t\t\tlist_del(&p->list);\n\t\tkfree(p);\n\t}\n}\n\nstruct inquiry_entry *hci_inquiry_cache_lookup(struct hci_dev *hdev,\n'),
+]
+for rel, old, new in repls:
+    path = root / rel
+    text = path.read_text()
+    if old not in text:
+        raise SystemExit(f"{path}: keep clock offset needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: dagu: keep the inquiry clock offset")
+PY
+
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+sync = root / "net/bluetooth/hci_sync.c"
+if "dagu: page timeout %u" in sync.read_text():
+    raise SystemExit(0)
+repls = [
+    ('net/bluetooth/hci_sync.c',
+     '\tbt_dev_info(hdev, "dagu: classic page rep %u offset 0x%04x",\n\t\t    cp.pscan_rep_mode, le16_to_cpu(cp.clock_offset));\n\n\tcp.pkt_type = cpu_to_le16(conn->pkt_type);\n',
+     '\tbt_dev_info(hdev, "dagu: classic page rep %u offset 0x%04x",\n\t\t    cp.pscan_rep_mode, le16_to_cpu(cp.clock_offset));\n\n\t/* dagu: BlueZ already stored PageTimeout. The controller is\n\t * still at 5.12 s until this write. That is the Connect\n\t * Complete time on a K380 page that already had R1 and a\n\t * valid clock offset.\n\t */\n\tif (dagu_program_page_timeout(hdev->def_page_timeout)) {\n\t\t__le16 page_to = cpu_to_le16(hdev->def_page_timeout);\n\n\t\terr = __hci_cmd_sync_status(hdev, HCI_OP_WRITE_PG_TIMEOUT,\n\t\t\t\t\t    sizeof(page_to), &page_to,\n\t\t\t\t\t    HCI_CMD_TIMEOUT);\n\t\tif (err)\n\t\t\tbt_dev_err(hdev, "dagu: page timeout write failed %d",\n\t\t\t\t   err);\n\t\telse\n\t\t\tbt_dev_info(hdev, "dagu: page timeout %u",\n\t\t\t\t    hdev->def_page_timeout);\n\t}\n\n\tcp.pkt_type = cpu_to_le16(conn->pkt_type);\n'),
+    ('net/bluetooth/dagu_le_conn_policy.h',
+     'static inline int dagu_keep_page_params(long age, long max_age)\n{\n\tif (age < 0)\n\t\treturn 0;\n\treturn age <= max_age;\n}\n\n#endif\n',
+     'static inline int dagu_keep_page_params(long age, long max_age)\n{\n\tif (age < 0)\n\t\treturn 0;\n\treturn age <= max_age;\n}\n\n/*\n * main.conf PageTimeout is stored on the adapter and never written.\n * The controller then keeps the 5.12 s default (0x2000 slots). A K380\n * page with the right repetition mode and clock offset still ends as\n * Page Timeout at that default.\n */\nstatic inline int dagu_program_page_timeout(unsigned int configured)\n{\n\treturn configured != 0;\n}\n\n#endif\n'),
+]
+for rel, old, new in repls:
+    path = root / rel
+    text = path.read_text()
+    if old not in text:
+        raise SystemExit(f"{path}: page timeout needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: dagu: page timeout")
+PY
+
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+needed = (
+    "dagu: limited inquiry before LE scan",
+    "dagu: LE scan after inquiry",
+    "dagu: limited inquiry before page",
+    "dagu_fill_page_params",
+)
+missing = [item for item in needed if item not in text]
+if missing:
+    raise SystemExit("hci_sync.c missing: " + ", ".join(missing))
 PY
 
 python3 - "$KERNEL_SRC/drivers/soc/qcom/qcom-geni-se.c" <<'PY'

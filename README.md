@@ -24,14 +24,14 @@ An unfinished Windows-on-ARM / edk2-msm port lives under [`port/dagu/`](port/dag
 
 **Flash tutorial:** [English](docs/flash-guide.md) · [简体中文](docs/zh-CN/flash-guide.md)
 **Rootfs / desktop image:** [English](docs/rootfs-guide.md) · [简体中文](docs/zh-CN/rootfs-guide.md)
-**Latest images:** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases) (`v0.1.3`)
+**Latest images:** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases) (`v0.1.4`)
 
-## Recent updates (`v0.1.3`)
+## Recent updates (`v0.1.4`)
 
-Since `v0.1.2` (19 Sep 2026):
+Since `v0.1.3` (22 Oct 2026):
 
-- **USB PD 5 V charging:** PM8150B SMB5 follows a 5 V / 2 A sink contract. A 100 W bank used to Accept 9 V / 3 A, drop VBUS in tPSTransition, and loop 2.2 V / 2.8 V at ~0.5 W. Kernel `#565` stays `SNK_READY` at 5 V / 2 A, charger `Charging`, ICL 2 A. Live bank display ~4.7 V / 1.8 A / 8.6 W. ABL crude moisture sensors are cleared; ICL waits for `USB_TYPE=PD` instead of Type-C Rp-3.0. 9 V / 67 W PPS is not this path.
-- **Classic Bluetooth page:** Pause LE scan while a HID page owns the radio. Keep the Keyboard K380 row after Page Timeout, and keep the inquiry clock offset the click will page with.
+- **9 V charge after Xiaomi authentication:** Unstructured vendor messages (SVID `0x2717`) run on the 5 V contract. On this bank the programmable object then advertises 6 A. The request stays at 9.000 V and does not walk upward. Kernel `#579`.
+- **Buck fallback:** If the charge pumps clear their own enable, the policy leaves the programmable contract and charges through PM8150B at fixed 9 V / 3 A. Live result about 18 W on the bank, pack current under the 3 A fast-charge cap, float voltage 4.48 V. The 67 W nameplate is not reached.
 
 Prebuilt login is unchanged: `dagu` / `dagu` (change it on first boot). Only flash **slot B**. Desktop userdata from `v0.1.2` is unchanged.
 

@@ -120,7 +120,7 @@
 #define CURRENT_STEP_UA				50000
 #define FV_MIN_UV				3600000
 #define FV_STEP_UV				10000
-#define FV_TARGET_UV				4500000
+#define FV_TARGET_UV				4480000
 #define FCC_UA					3000000
 #define THERM_LEVELS				16
 

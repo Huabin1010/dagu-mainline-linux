@@ -24,14 +24,14 @@ Windows on ARM / edk2-msm 移植在 [`port/dagu/`](port/dagu/) 和 [`docs/uefi-p
 
 **刷机指南：** [简体中文](docs/zh-CN/flash-guide.md) · [English](docs/flash-guide.md)
 **Rootfs / 桌面镜像：** [简体中文](docs/zh-CN/rootfs-guide.md) · [English](docs/rootfs-guide.md)
-**最新镜像：** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases)（`v0.1.3`）
+**最新镜像：** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases)（`v0.1.4`）
 
-## 最近更新（`v0.1.3`）
+## 最近更新（`v0.1.4`）
 
-相对 `v0.1.2`（2026-09-19）：
+相对 `v0.1.3`（2026-10-22）：
 
-- **USB PD 5 V 充电：** PM8150B SMB5 只签 5 V / 2 A。100 W 充电宝先前 Accept 9 V / 3 A，电压切换时 VBUS 掉线，界面 2.2 V / 2.8 V、约 0.5 W 死循环。内核 `#565` 停在 `SNK_READY` 5 V / 2 A，充电器 `Charging`，输入限流 2 A。活机充电宝约 4.7 V / 1.8 A / 8.6 W。ABL 残留的潮气检测已清；输入限流等 `USB_TYPE=PD`，不再把 Type-C Rp-3.0 当合同。9 V / 67 W PPS 不是这条路径。
-- **经典蓝牙寻呼：** HID 寻呼占用射频时暂停 LE 扫描。Page Timeout 后 Keyboard K380 行不消失，并保留点击时要用的 inquiry 时钟偏移。
+- **小米认证后的 9 伏充电：** 5 伏合同上发送厂商识别号 `0x2717` 的非结构化厂商报文。这台充电宝随后把可编程电源电流报成 6 安。请求电压停在 9.000 伏，不再往上加。内核 `#579`。
+- **退回降压：** 电荷泵自己关掉使能后，退出可编程电源，改由 PM8150B 走固定 9 伏 / 3 安。活机充电宝大约 18 瓦，电池电流不超过 3 安快充上限，浮充电压 4.48 伏。67 瓦铭牌还没达到。
 
 预构建账号仍是 `dagu` / `dagu`（第一次进桌面请改掉）。**只刷 B 槽。** `v0.1.2` 的桌面 userdata 不用重刷。
 

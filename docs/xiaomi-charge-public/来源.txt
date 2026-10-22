@@ -1,0 +1,21 @@
+公开资料，2026-10-22 从网上取回。小米没有单独发布一份「67W 私有报文白皮书」。能公开拿到的是下面两类，不能混用。
+
+1. T-TAF-083-2021-UFCS.pdf
+   《移动终端融合快速充电技术规范》T/TAF 083-2021，75 页。
+   小米通讯技术有限公司是起草单位。
+   这是融合快充（Universal Fast Charging Specification）公开标准，走 D+/D-，不是这次充电宝用的 USB 电力传输厂商报文。
+   来源：https://qxb-img-osscache.qixin.com/standards/60a71a4b5c72da0b32d8ed372ea68fc5.pdf
+
+2. pd_policy_manager_dagu.c 与 pd_policy_manager.h
+   小米 GPL 内核里这台平板的电荷泵策略。电压怎么跟充电器协商，以这个文件为准。
+   来源：https://github.com/K30pro123/kernel_xiaomi_sm8250_mod/blob/android14-lineage22-mod/drivers/power/supply/ti/pd_policy_manager_dagu.c
+
+3. usbpd.h
+   厂商自定义报文命令号和厂商标识 0x2717。
+   来源：https://github.com/Pzqqt/android_kernel_xiaomi_sm6150-1/commit/8f7fb43306989d89e6400c1950aa52d9437f9c52
+
+4. xmc_core.h 与 xmc_detection.c
+   较新的小米充电栈对同一套报文的接收定义：版本、温度、电压、会话种子、摘要、反向认证。
+   来源：https://github.com/Mandi-Sa/micode-xaga-s-oss/blob/xaga-s-oss/drivers/power/xm_charge/
+
+本机 vendor 树里已有同一份 dagu 策略和 policy_engine，不另存一份。

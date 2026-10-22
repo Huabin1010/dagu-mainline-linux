@@ -602,6 +602,14 @@ grep -q 'dagu_fixed_mv_cap' \
 	exit 1
 }
 
+# Xiaomi unstructured VDM plus the 11 V PPS object pick.
+python3 "$ROOT/scripts/dagu-tcpm-uvdm.py" "$KERNEL_SRC"
+grep -q 'dagu_uvdm_waiting' \
+	"$KERNEL_SRC/drivers/usb/typec/tcpm/tcpm.c" || {
+	echo "tcpm xiaomi uvdm hook missing" >&2
+	exit 1
+}
+
 # L81A: CAF lp11-init + bllp HS. Re-applied every build (linux/ is a checkout).
 python3 - "$KERNEL_SRC" <<'PY'
 from pathlib import Path

@@ -40,6 +40,7 @@ grep -q 'nanosic_consumer_inject' \
 }
 install_src drivers/power/supply/bq2597x-dagu.c
 install_src drivers/power/supply/pm8150b-charger-dagu.c
+install_src drivers/power/supply/dagu-usbpd-pm.c
 install_src drivers/power/supply/p9418-dagu.c
 install_src drivers/power/supply/xiaomi-dual-fg.c
 install_src drivers/watchdog/qcom-wdt-early-dagu.c
@@ -140,6 +141,10 @@ append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
 append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
 	'pm8150b-charger-dagu.o' \
 	'obj-$(CONFIG_CHARGER_PM8150B_DAGU) += pm8150b-charger-dagu.o'
+
+append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
+	'dagu-usbpd-pm.o' \
+	'obj-$(CONFIG_CHARGER_DAGU_USBPD_PM) += dagu-usbpd-pm.o'
 
 append_once "$KERNEL_SRC/drivers/power/supply/Makefile" \
 	'p9418-dagu.o' \
@@ -310,6 +315,20 @@ insert_kconfig(
 insert_kconfig(
     root / "drivers/power/supply/Kconfig",
     "config CHARGER_P9418_DAGU",
+    """config CHARGER_DAGU_USBPD_PM
+	bool "Xiaomi dagu USB-PD PPS policy"
+	depends on TYPEC_TCPM
+	depends on CHARGER_BQ2597X_DAGU
+	depends on CHARGER_PM8150B_DAGU
+	help
+	  After the 5 V contract, request PPS for the 67 W pumps or
+	  9 V fixed for the SMB5 buck.
+
+""")
+
+insert_kconfig(
+    root / "drivers/power/supply/Kconfig",
+    "config CHARGER_P9418_DAGU",
     """config BATTERY_XIAOMI_DUAL_FG
 	tristate "Xiaomi dual BQ27Z561 combiner (dagu)"
 	depends on POWER_SUPPLY
@@ -433,6 +452,153 @@ PY
 grep -q 'dagu: SNK_TRANSITION_SINK may see VBUS drop' \
 	"$KERNEL_SRC/drivers/usb/typec/tcpm/tcpm.c" || {
 	echo "tcpm SNK_TRANSITION vbus-off ignore missing" >&2
+	exit 1
+}
+
+# First PD contract stays at 5 V. 9 V and PPS are explicit later requests.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+tcpm = Path(sys.argv[1]) / "drivers/usb/typec/tcpm/tcpm.c"
+text = tcpm.read_text()
+if "dagu_fixed_mv_cap" in text:
+    raise SystemExit(0)
+
+old = "\tbool slow_charger_loop;\n"
+new = """\tbool slow_charger_loop;
+
+	/*
+	 * dagu: first fixed contract stays at or below this voltage.
+	 * 9 V is requested later. 0 disables the cap.
+	 */
+	unsigned int dagu_fixed_mv_cap;
+"""
+if old not in text:
+    raise SystemExit("slow_charger_loop anchor missing")
+text = text.replace(old, new, 1)
+
+old = """\t\tdefault:
+\t\t\ttcpm_log(port, "Invalid source PDO type, ignoring");
+\t\t\tcontinue;
+\t\t}
+
+\t\tswitch (type) {
+\t\tcase PDO_TYPE_FIXED:
+\t\tcase PDO_TYPE_VAR:
+\t\t\tsrc_ma = pdo_max_current(pdo);
+"""
+new = """\t\tdefault:
+\t\t\ttcpm_log(port, "Invalid source PDO type, ignoring");
+\t\t\tcontinue;
+\t\t}
+
+\t\t/*
+\t\t * dagu: do not auto-select 9 V / 15 V / 20 V. A 100 W bank
+\t\t * Accept of 9 V drops VBUS in tPSTransition. The policy
+\t\t * raises dagu_fixed_mv_cap after SNK_READY, or uses PPS.
+\t\t */
+\t\tif (port->dagu_fixed_mv_cap &&
+\t\t    min_src_mv > port->dagu_fixed_mv_cap)
+\t\t\tcontinue;
+
+\t\tswitch (type) {
+\t\tcase PDO_TYPE_FIXED:
+\t\tcase PDO_TYPE_VAR:
+\t\t\tsrc_ma = pdo_max_current(pdo);
+"""
+if old not in text:
+    raise SystemExit("PDO select anchor missing")
+text = text.replace(old, new, 1)
+
+old = "\tport->dev = dev;\n\tport->tcpc = tcpc;\n"
+new = "\tport->dev = dev;\n\tport->tcpc = tcpc;\n\tport->dagu_fixed_mv_cap = 5000;\n"
+if old not in text:
+    raise SystemExit("tcpm_register_port anchor missing")
+text = text.replace(old, new, 1)
+
+old = """\tcase POWER_SUPPLY_PROP_ONLINE:
+\t\tret = tcpm_psy_set_online(port, val);
+\t\tbreak;
+\tcase POWER_SUPPLY_PROP_VOLTAGE_NOW:
+"""
+new = """\tcase POWER_SUPPLY_PROP_ONLINE:
+\t\tret = tcpm_psy_set_online(port, val);
+\t\tbreak;
+\tcase POWER_SUPPLY_PROP_VOLTAGE_MAX:
+\t\tret = tcpm_dagu_set_fixed_cap(port, val->intval / 1000);
+\t\tbreak;
+\tcase POWER_SUPPLY_PROP_VOLTAGE_NOW:
+"""
+if old not in text:
+    raise SystemExit("psy set anchor missing")
+text = text.replace(old, new, 1)
+
+old = """\tcase POWER_SUPPLY_PROP_ONLINE:
+\tcase POWER_SUPPLY_PROP_VOLTAGE_NOW:
+\tcase POWER_SUPPLY_PROP_CURRENT_NOW:
+\t\treturn 1;
+"""
+new = """\tcase POWER_SUPPLY_PROP_ONLINE:
+\tcase POWER_SUPPLY_PROP_VOLTAGE_MAX:
+\tcase POWER_SUPPLY_PROP_VOLTAGE_NOW:
+\tcase POWER_SUPPLY_PROP_CURRENT_NOW:
+\t\treturn 1;
+"""
+if old not in text:
+    raise SystemExit("psy writeable anchor missing")
+text = text.replace(old, new, 1)
+
+helper = '''static int tcpm_dagu_set_fixed_cap(struct tcpm_port *port, unsigned int mv)
+{
+	int ret = 0;
+
+	if (mv != 5000 && mv != 9000)
+		return -EINVAL;
+
+	mutex_lock(&port->swap_lock);
+	mutex_lock(&port->lock);
+	port->dagu_fixed_mv_cap = mv;
+	if (port->pps_data.active || port->state != SNK_READY) {
+		mutex_unlock(&port->lock);
+		mutex_unlock(&port->swap_lock);
+		return 0;
+	}
+
+	port->upcoming_state = SNK_NEGOTIATE_CAPABILITIES;
+	ret = tcpm_ams_start(port, POWER_NEGOTIATION);
+	if (ret == -EAGAIN) {
+		port->upcoming_state = INVALID_STATE;
+		mutex_unlock(&port->lock);
+		mutex_unlock(&port->swap_lock);
+		return ret;
+	}
+
+	reinit_completion(&port->pps_complete);
+	port->pps_status = 0;
+	port->pps_pending = true;
+	mutex_unlock(&port->lock);
+
+	if (!wait_for_completion_timeout(&port->pps_complete,
+					 msecs_to_jiffies(PD_PPS_CTRL_TIMEOUT)))
+		ret = -ETIMEDOUT;
+	else
+		ret = port->pps_status;
+
+	mutex_unlock(&port->swap_lock);
+	return ret;
+}
+
+'''
+anchor = "static int tcpm_psy_set_prop(struct power_supply *psy,\n"
+if anchor not in text:
+    raise SystemExit("tcpm_psy_set_prop anchor missing")
+text = text.replace(anchor, helper + anchor, 1)
+tcpm.write_text(text)
+PY
+grep -q 'dagu_fixed_mv_cap' \
+	"$KERNEL_SRC/drivers/usb/typec/tcpm/tcpm.c" || {
+	echo "tcpm dagu fixed voltage cap missing" >&2
 	exit 1
 }
 

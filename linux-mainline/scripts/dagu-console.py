@@ -110,14 +110,12 @@ def load_password() -> str:
 
 
 def _auth_pairs() -> list[tuple[str, str]]:
-    # Public prebuilt is dagu/dagu (rootfs-guide). Local image uses
-    # out/root-password for both users. Try the live pair first so a
-    # wrong file password does not burn the getty attempt.
-    pairs: list[tuple[str, str]] = [("dagu", "dagu"), ("root", "dagu")]
+    pairs: list[tuple[str, str]] = []
     if PASS_FILE.is_file():
         local = PASS_FILE.read_text().strip()
-        if local and local != "dagu":
-            pairs.extend([("dagu", local), ("root", local)])
+        if local:
+            pairs.extend([("root", local), ("dagu", local)])
+    pairs.extend([("dagu", "dagu"), ("root", "dagu")])
     return pairs
 
 

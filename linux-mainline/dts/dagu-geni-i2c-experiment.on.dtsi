@@ -301,6 +301,13 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&bq2597x_master_int_default>;
 		ti,bq2597x,master;
+		ti,bq2597x,bat-ovp-threshold = <4550>;
+		ti,bq2597x,bus-ovp-threshold = <12000>;
+		ti,bq2597x,bus-ocp-threshold = <3800>;
+		ti,bq2597x,bus-ovp-alarm-threshold = <11000>;
+		ti,bq2597x,bus-ocp-alarm-threshold = <3500>;
+		ti,bq2597x,ac-ovp-threshold = <14>;
+		sc8551,ac-ovp-threshold = <14>;
 	};
 };
 
@@ -319,5 +326,12 @@
 	geni_chg_pump_slave: charger-pump-slave@66 {
 		compatible = "ti,bq25970";
 		reg = <0x66>;
+		ti,bq2597x,bat-ovp-threshold = <4550>;
+		ti,bq2597x,bus-ovp-threshold = <12000>;
+		ti,bq2597x,bus-ocp-threshold = <3500>;
+		ti,bq2597x,bus-ovp-alarm-threshold = <11000>;
+		ti,bq2597x,bus-ocp-alarm-threshold = <3000>;
+		ti,bq2597x,ac-ovp-threshold = <14>;
+		sc8551,ac-ovp-threshold = <13>;
 	};
 };

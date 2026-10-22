@@ -304,6 +304,13 @@
 			pinctrl-names = "default";
 			pinctrl-0 = <&bq2597x_master_int_default>;
 			ti,bq2597x,master;
+			ti,bq2597x,bat-ovp-threshold = <4550>;
+			ti,bq2597x,bus-ovp-threshold = <12000>;
+			ti,bq2597x,bus-ocp-threshold = <3800>;
+			ti,bq2597x,bus-ovp-alarm-threshold = <11000>;
+			ti,bq2597x,bus-ocp-alarm-threshold = <3500>;
+			ti,bq2597x,ac-ovp-threshold = <14>;
+			sc8551,ac-ovp-threshold = <14>;
 		};
 	};
 
@@ -324,6 +331,13 @@
 		chg_pump_slave: charger-pump-slave@66 {
 			compatible = "ti,bq25970";
 			reg = <0x66>;
+			ti,bq2597x,bat-ovp-threshold = <4550>;
+			ti,bq2597x,bus-ovp-threshold = <12000>;
+			ti,bq2597x,bus-ocp-threshold = <3500>;
+			ti,bq2597x,bus-ovp-alarm-threshold = <11000>;
+			ti,bq2597x,bus-ocp-alarm-threshold = <3000>;
+			ti,bq2597x,ac-ovp-threshold = <14>;
+			sc8551,ac-ovp-threshold = <13>;
 		};
 	};
 
@@ -439,6 +453,33 @@
 	 * fg-*-disable is ACTIVE_HIGH isolate. Default both inactive so both
 	 * packs stay on the charge path (do not hog high — that drops a cell).
 	 */
+	/*
+	 * Stock usbpd_pm numbers. The policy driver is xiaomi,dagu-usbpd-pm,
+	 * not the CAF state machine.
+	 */
+	usbpd_pm: usbpd-pm {
+		compatible = "xiaomi,dagu-usbpd-pm";
+		mi,pd-bat-volt-max = <4480>;
+		mi,pd-bat-curr-max = <12400>;
+		mi,pd-bus-volt-max = <12000>;
+		mi,pd-bus-curr-max = <6200>;
+		mi,pd-bus-curr-compensate = <50>;
+		mi,pd-non-ffc-bat-volt-max = <4450>;
+		mi,pd-battery-warm-th = <480>;
+		mi,step-charge-high-vol-curr-max = <7840>;
+		mi,cell-vol-high-threshold-mv = <4450>;
+		mi,cell-vol-max-threshold-mv = <4487>;
+		mi,pd-power-max = <67>;
+		mi,therm-level-threshold = <12>;
+		mi,qc3-bat-volt-max = <4420>;
+		mi,qc3-bat-curr-max = <3600>;
+		mi,qc3-bus-curr-max = <2100>;
+		mi,thermal-fcc-pps-bq = <12400000 10000000 8800000 8000000
+					 7000000 6000000 5600000 5000000
+					 4000000 3000000 2500000 2000000
+					 1400000 1000000 700000 300000>;
+	};
+
 	dual_fg: dual-fuel-gauge {
 		compatible = "xiaomi,dual-fuel-gauge";
 		pinctrl-names = "default";
@@ -953,19 +994,20 @@
 		 * Try.SNK: a power bank is also DRP. If we present Rp
 		 * first it sinks from us and VBUS collapses to ~2 V.
 		 *
-		 * TCPM picks the source PDO with the most watts that
-		 * matches a sink PDO. A 9 V / 3 A sink cap makes a
-		 * 100 W bank Accept 9 V; tPSTransition drops VBUS and
-		 * default TCPM unattaches (2.2 V / 2.8 V loop). 5 V /
-		 * 2 A is the SMB5 contract until SNK_TRANSITION_SINK
-		 * ignores that VBUS-off. Do not add 9 V / 15 V here.
+		 * TCPM would pick the source PDO with the most watts.
+		 * dagu_fixed_mv_cap holds the first contract at 5 V.
+		 * dagu-usbpd-pm raises it to 9 V for a non-PPS brick,
+		 * or requests the PPS APDO for 67 W. 15 V / 20 V fixed
+		 * is not a 2:1 pump target.
 		 */
 		try-power-role = "sink";
 		op-sink-microwatt = <10000000>;
 		sink-pdos = <PDO_FIXED(5000, 2000,
 				       PDO_FIXED_DUAL_ROLE |
 				       PDO_FIXED_USB_COMM |
-				       PDO_FIXED_DATA_SWAP)>;
+				       PDO_FIXED_DATA_SWAP)>,
+			    <PDO_FIXED(9000, 3000, PDO_FIXED_HIGHER_CAP)>,
+			    <PDO_PPS_APDO(3300, 11000, 6200)>;
 	};
 };
 
@@ -1007,6 +1049,14 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&vbus_path_enable>;
 		monitored-battery = <&battery_l>;
+		qcom,thermal-mitigation = <3000000 2800000 2600000 2400000
+					   2200000 2100000 2000000 1800000
+					   1600000 1500000 1400000 1200000
+					   1000000 900000 800000 500000>;
+		qcom,thermal-mitigation-icl = <2800000 2700000 2600000 2400000
+					       2200000 2100000 2000000 1800000
+					       1600000 1500000 1400000 1300000
+					       1200000 1100000 950000 750000>;
 		status = "okay";
 	};
 };

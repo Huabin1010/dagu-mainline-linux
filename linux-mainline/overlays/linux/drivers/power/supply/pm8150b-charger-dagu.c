@@ -83,7 +83,18 @@
 #define USBIN_ADAPTER_ALLOW_5V_TO_12V		0x0c
 
 #define USBIN_OPTIONS_1_CFG			(USBIN_BASE + 0x62)
+#define HVDCP_AUTH_ALG_EN_BIT			BIT(6)
+#define HVDCP_AUTONOMOUS_MODE_EN_BIT		BIT(5)
 #define HVDCP_EN_BIT				BIT(2)
+
+#define CMD_HVDCP_2				(USBIN_BASE + 0x43)
+#define FORCE_5V_BIT				BIT(3)
+#define SINGLE_DECREMENT_BIT			BIT(1)
+#define SINGLE_INCREMENT_BIT			BIT(0)
+#define QC3_MAX_PULSES				23
+
+#define QC_3P0_BIT				BIT(6)
+#define QC_2P0_BIT				BIT(5)
 
 #define USBIN_ICL_OPTIONS			(USBIN_BASE + 0x66)
 #define USB51_MODE_BIT				BIT(1)
@@ -109,8 +120,20 @@
 #define CURRENT_STEP_UA				50000
 #define FV_MIN_UV				3600000
 #define FV_STEP_UV				10000
-#define FV_TARGET_UV				4450000
+#define FV_TARGET_UV				4500000
 #define FCC_UA					3000000
+#define THERM_LEVELS				16
+
+/* qcom,thermal-mitigation on stock qpnp-smb5, microamps, level 0..15. */
+static const u32 dagu_therm_fcc_ua[THERM_LEVELS] = {
+	3000000, 2800000, 2600000, 2400000, 2200000, 2100000, 2000000, 1800000,
+	1600000, 1500000, 1400000, 1200000, 1000000, 900000, 800000, 500000,
+};
+/* qcom,thermal-mitigation-icl. */
+static const u32 dagu_therm_icl_ua[THERM_LEVELS] = {
+	2800000, 2700000, 2600000, 2400000, 2200000, 2100000, 2000000, 1800000,
+	1600000, 1500000, 1400000, 1300000, 1200000, 1100000, 950000, 750000,
+};
 #define SDP_UA					500000
 #define CDP_UA					1500000
 #define DCP_UA					2000000
@@ -134,8 +157,107 @@ struct pm8150b_chg {
 	int plugin_irq;
 	int last_icl;
 	int last_uv;
+	int last_fcc;
 	unsigned long hold_until;
+	/* Pump path owns the pack; do not re-enable the buck. */
+	bool cp_mode;
+	/* Stock CHARGE_CONTROL_LIMIT: index into the thermal FCC/ICL tables. */
+	int therm_level;
+	u32 therm_fcc_ua[16];
+	u32 therm_icl_ua[16];
+	int pulse_cnt;
+	bool qc3_apsd_once;
+	unsigned long qc3_wait_until;
 };
+
+static struct pm8150b_chg *dagu_chg;
+
+int pm8150b_dagu_qc3_prepare(void);
+int pm8150b_dagu_qc_pulse(int dir);
+void pm8150b_dagu_qc3_stop(void);
+
+/*
+ * QC3 (Quick Charge 3) rides D+/D-. Only a dedicated charger is allowed
+ * to rerun BC1.2; a host on D+/D- is the serial gadget.
+ */
+int pm8150b_dagu_qc3_prepare(void)
+{
+	unsigned int result = 0;
+	int ret;
+
+	if (!dagu_chg)
+		return -ENODEV;
+	ret = regmap_read(dagu_chg->regmap, APSD_RESULT_STATUS, &result);
+	if (ret)
+		return ret;
+	result &= APSD_RESULT_STATUS_MASK;
+	if (result & QC_3P0_BIT)
+		return 1;
+	if (result & (SDP_CHARGER_BIT | CDP_CHARGER_BIT))
+		return 0;
+	if (!(result & DCP_CHARGER_BIT))
+		return 0;
+	if (!dagu_chg->qc3_apsd_once) {
+		dagu_chg->qc3_apsd_once = true;
+		dagu_chg->qc3_wait_until = jiffies + 2 * HZ;
+		ret = regmap_update_bits(dagu_chg->regmap, USBIN_OPTIONS_1_CFG,
+					 HVDCP_AUTH_ALG_EN_BIT |
+					 HVDCP_AUTONOMOUS_MODE_EN_BIT |
+					 HVDCP_EN_BIT,
+					 HVDCP_AUTH_ALG_EN_BIT | HVDCP_EN_BIT);
+		if (ret)
+			return ret;
+		ret = regmap_update_bits(dagu_chg->regmap, CMD_APSD,
+					 APSD_RERUN_BIT, APSD_RERUN_BIT);
+		if (ret)
+			return ret;
+		return -EAGAIN;
+	}
+	if (time_before(jiffies, dagu_chg->qc3_wait_until))
+		return -EAGAIN;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pm8150b_dagu_qc3_prepare);
+
+int pm8150b_dagu_qc_pulse(int dir)
+{
+	unsigned int bit;
+	int ret;
+
+	if (!dagu_chg)
+		return -ENODEV;
+	if (dir > 0) {
+		if (dagu_chg->pulse_cnt >= QC3_MAX_PULSES)
+			return -ERANGE;
+		bit = SINGLE_INCREMENT_BIT;
+	} else if (dir < 0) {
+		bit = SINGLE_DECREMENT_BIT;
+	} else {
+		bit = FORCE_5V_BIT;
+	}
+	ret = regmap_update_bits(dagu_chg->regmap, CMD_HVDCP_2, bit, bit);
+	if (ret)
+		return ret;
+	if (dir > 0)
+		dagu_chg->pulse_cnt++;
+	else if (dir < 0 && dagu_chg->pulse_cnt)
+		dagu_chg->pulse_cnt--;
+	else if (!dir)
+		dagu_chg->pulse_cnt = 0;
+	return dagu_chg->pulse_cnt;
+}
+EXPORT_SYMBOL_GPL(pm8150b_dagu_qc_pulse);
+
+void pm8150b_dagu_qc3_stop(void)
+{
+	if (!dagu_chg)
+		return;
+	regmap_update_bits(dagu_chg->regmap, CMD_HVDCP_2, FORCE_5V_BIT,
+			   FORCE_5V_BIT);
+	dagu_chg->pulse_cnt = 0;
+	regmap_update_bits(dagu_chg->regmap, USBIN_OPTIONS_1_CFG, HVDCP_EN_BIT, 0);
+}
+EXPORT_SYMBOL_GPL(pm8150b_dagu_qc3_stop);
 
 static int chg_write_ua(struct pm8150b_chg *chg, unsigned int reg, int ua)
 {
@@ -279,6 +401,8 @@ static void chg_status_work(struct work_struct *work)
 
 	ret = chg_usb_online(chg, &online);
 	if (ret || !online) {
+		chg->cp_mode = false;
+		chg->qc3_apsd_once = false;
 		if (chg->last_icl || chg->last_uv) {
 			regmap_read(chg->regmap, USBIN_INT_RT_STS, &usbin);
 			regmap_read(chg->regmap, POWER_PATH_STATUS, &path);
@@ -289,6 +413,17 @@ static void chg_status_work(struct work_struct *work)
 		chg->last_uv = 0;
 		chg->hold_until = 0;
 		chg_set_icl(chg, ICL_USB_DEFAULT_UA);
+		power_supply_changed(chg->psy);
+		return;
+	}
+
+	/*
+	 * 67 W PPS holds the buck off. status_work must not turn it
+	 * back on while the charge pumps are the battery path.
+	 */
+	if (chg->cp_mode) {
+		regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD,
+				   CHARGING_ENABLE_CMD_BIT, 0);
 		power_supply_changed(chg->psy);
 		return;
 	}
@@ -349,6 +484,17 @@ static void chg_status_work(struct work_struct *work)
 					   APSD_RERUN_BIT);
 		}
 		icl = ICL_5V_MAX_UA;
+	}
+
+	if (chg->therm_level < 0)
+		chg->therm_level = 0;
+	if (chg->therm_level >= THERM_LEVELS)
+		chg->therm_level = THERM_LEVELS - 1;
+	icl = min_t(int, icl, chg->therm_icl_ua[chg->therm_level]);
+	if (chg->therm_fcc_ua[chg->therm_level] != chg->last_fcc) {
+		chg_write_ua(chg, CHGR_FAST_CHARGE_CURRENT_CFG,
+			     chg->therm_fcc_ua[chg->therm_level]);
+		chg->last_fcc = chg->therm_fcc_ua[chg->therm_level];
 	}
 
 	if (icl != chg->last_icl || uv != chg->last_uv) {
@@ -484,9 +630,51 @@ static int chg_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_MANUFACTURER:
 		val->strval = "qualcomm";
 		return 0;
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
+		val->intval = chg->therm_level;
+		return 0;
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX:
+		val->intval = THERM_LEVELS - 1;
+		return 0;
 	default:
 		return -EINVAL;
 	}
+}
+
+static int chg_set_property(struct power_supply *psy,
+			    enum power_supply_property psp,
+			    const union power_supply_propval *val)
+{
+	struct pm8150b_chg *chg = power_supply_get_drvdata(psy);
+	int ret = 0;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
+		if (val->intval < 0 || val->intval >= THERM_LEVELS)
+			return -EINVAL;
+		chg->therm_level = val->intval;
+		schedule_delayed_work(&chg->status_work, 0);
+		break;
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+		/* 0 is the pump path. Non-zero hands the pack back to the buck. */
+		chg->cp_mode = val->intval <= 0;
+		if (chg->cp_mode)
+			ret = regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD,
+						 CHARGING_ENABLE_CMD_BIT, 0);
+		else
+			ret = chg_enable_path(chg);
+		break;
+	default:
+		return -EINVAL;
+	}
+	return ret;
+}
+
+static int chg_prop_writeable(struct power_supply *psy,
+			      enum power_supply_property psp)
+{
+	return psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT ||
+	       psp == POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT;
 }
 
 static const enum power_supply_property chg_props[] = {
@@ -498,6 +686,8 @@ static const enum power_supply_property chg_props[] = {
 	POWER_SUPPLY_PROP_USB_TYPE,
 	POWER_SUPPLY_PROP_MODEL_NAME,
 	POWER_SUPPLY_PROP_MANUFACTURER,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
 };
 
 static const struct power_supply_desc chg_desc = {
@@ -513,6 +703,8 @@ static const struct power_supply_desc chg_desc = {
 	.properties = chg_props,
 	.num_properties = ARRAY_SIZE(chg_props),
 	.get_property = chg_get_property,
+	.set_property = chg_set_property,
+	.property_is_writeable = chg_prop_writeable,
 };
 
 static int chg_hw_init(struct pm8150b_chg *chg)
@@ -572,6 +764,13 @@ static int chg_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	chg->dev = &pdev->dev;
+	dagu_chg = chg;
+	memcpy(chg->therm_fcc_ua, dagu_therm_fcc_ua, sizeof(chg->therm_fcc_ua));
+	memcpy(chg->therm_icl_ua, dagu_therm_icl_ua, sizeof(chg->therm_icl_ua));
+	of_property_read_u32_array(pdev->dev.of_node, "qcom,thermal-mitigation",
+				   chg->therm_fcc_ua, THERM_LEVELS);
+	of_property_read_u32_array(pdev->dev.of_node, "qcom,thermal-mitigation-icl",
+				   chg->therm_icl_ua, THERM_LEVELS);
 	chg->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!chg->regmap)
 		return dev_err_probe(&pdev->dev, -ENODEV, "regmap\n");

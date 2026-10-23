@@ -455,6 +455,64 @@ grep -q 'dagu: SNK_TRANSITION_SINK may see VBUS drop' \
 	exit 1
 }
 
+# Rp-Def is USB default 500 mA. qcom_pmic_typec has no get_current_limit,
+# so upstream leaves CURRENT_MAX at 0 mA and a PC host never charges.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+tcpm = Path(sys.argv[1]) / "drivers/usb/typec/tcpm/tcpm.c"
+text = tcpm.read_text()
+if "dagu: Rp-Def is USB default 500 mA" in text:
+    raise SystemExit(0)
+old = """	case TYPEC_CC_RP_DEF:
+	default:
+		if (port->tcpc->get_current_limit)
+			limit = port->tcpc->get_current_limit(port->tcpc);
+		else
+			limit = 0;
+		break;
+"""
+new = """	case TYPEC_CC_RP_DEF:
+	default:
+		/*
+		 * dagu: Rp-Def is USB default 500 mA. qcom_pmic_typec
+		 * has no get_current_limit, so upstream leaves 0 mA.
+		 * A PC host never sends PD caps; CURRENT_MAX stays 0
+		 * and the charger takes the APSD 2 A HC path, which
+		 * draws nothing on SDP D+/D-.
+		 */
+		if (port->tcpc->get_current_limit)
+			limit = port->tcpc->get_current_limit(port->tcpc);
+		if (!limit)
+			limit = 500;
+		break;
+"""
+if old not in text:
+    raise SystemExit("tcpm_get_current_limit Rp-Def block not found")
+text = text.replace(old, new, 1)
+
+old = """		if (!port->pd_capable && port->slow_charger_loop)
+			tcpm_set_current_limit(port, tcpm_get_current_limit(port), 5000);
+"""
+new = """		/*
+		 * dagu: after PD timeout a PC is SNK_READY with no
+		 * explicit contract. Apply Type-C current even when
+		 * slow_charger_loop is off, or CURRENT_MAX stays 0.
+		 */
+		if (!port->pd_capable)
+			tcpm_set_current_limit(port, tcpm_get_current_limit(port), 5000);
+"""
+if old not in text:
+    raise SystemExit("tcpm SNK_READY slow_charger_loop current limit not found")
+tcpm.write_text(text.replace(old, new, 1))
+PY
+grep -q 'dagu: Rp-Def is USB default 500 mA' \
+	"$KERNEL_SRC/drivers/usb/typec/tcpm/tcpm.c" || {
+	echo "tcpm Rp-Def 500 mA default missing" >&2
+	exit 1
+}
+
 # First PD contract stays at 5 V. 9 V and PPS are explicit later requests.
 python3 - "$KERNEL_SRC" <<'PY'
 from pathlib import Path

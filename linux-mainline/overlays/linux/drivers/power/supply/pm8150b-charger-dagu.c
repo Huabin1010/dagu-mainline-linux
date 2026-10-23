@@ -4,10 +4,11 @@
  *
  * CAF qpnp-smb5-dagu.c is thousands of lines (PD / JEITA / dual-pump policy).
  * This is the 5 V / 9 V buck path only: unsuspend USBIN, enable charge, kick
- * the charger watchdog off, set ICL from TCPM's PD contract (fallback APSD
- * for BC1.2 bricks). Do not touch Type-C @1500 — qcom_pmic_typec owns CC /
- * PD, including crude moisture sensors. Do not copy qcom_smbx (SMB2) scales:
- * PM8150B ICL/FCC is 50 mA/LSB and float is 3.6 V + 10 mV/LSB.
+ * the charger watchdog off, set ICL from TCPM's PD contract. PC USB / Rp-Def
+ * stays at 500 mA USB51; APSD 2 A HC is only for DCP bricks. Do not touch
+ * Type-C @1500 — qcom_pmic_typec owns CC / PD, including crude moisture
+ * sensors. Do not copy qcom_smbx (SMB2) scales: PM8150B ICL/FCC is
+ * 50 mA/LSB and float is 3.6 V + 10 mV/LSB.
  */
 
 #include <linux/bits.h>
@@ -96,6 +97,9 @@
 #define QC_3P0_BIT				BIT(6)
 #define QC_2P0_BIT				BIT(5)
 
+#define USBIN_LOAD_CFG				(USBIN_BASE + 0x65)
+#define ICL_OVERRIDE_AFTER_APSD_BIT		BIT(4)
+
 #define USBIN_ICL_OPTIONS			(USBIN_BASE + 0x66)
 #define USB51_MODE_BIT				BIT(1)
 #define USBIN_MODE_CHG_BIT			BIT(0)
@@ -122,6 +126,14 @@
 #define FV_STEP_UV				10000
 #define FV_TARGET_UV				4480000
 #define FCC_UA					3000000
+/*
+ * Stop the buck once the gauge shows 100%. Re-enable only after the
+ * pack falls 100 mV under the 4.48 V float. Sitting full, with charge
+ * current removed, this pack rests near 4.42 V, so 4.38 V does not
+ * turn charging straight back on.
+ */
+#define DAGU_RECHARGE_UV			4380000
+#define DAGU_FULL_POLL_MS			2000
 #define THERM_LEVELS				16
 
 /* qcom,thermal-mitigation on stock qpnp-smb5, microamps, level 0..15. */
@@ -161,6 +173,9 @@ struct pm8150b_chg {
 	unsigned long hold_until;
 	/* Pump path owns the pack; do not re-enable the buck. */
 	bool cp_mode;
+	/* Gauge is at 100%. Hold the buck off until the recharge voltage. */
+	bool charge_done;
+	struct power_supply *bms;
 	/* Stock CHARGE_CONTROL_LIMIT: index into the thermal FCC/ICL tables. */
 	int therm_level;
 	u32 therm_fcc_ua[16];
@@ -298,8 +313,12 @@ static int chg_tcpm_contract(struct pm8150b_chg *chg, int *ua, int *uv,
 	ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_VOLTAGE_NOW, &volt);
 	if (ret)
 		return ret;
-	if (curr.intval <= 0)
-		return -ENODATA;
+	/*
+	 * Rp-Def / PD timeout leaves CURRENT_MAX at 0. That is still a
+	 * Type-C attach (PC USB 5 V). Do not fall through to APSD 2 A.
+	 */
+	if (curr.intval < 0)
+		curr.intval = 0;
 	*ua = curr.intval;
 	*uv = volt.intval;
 	*usb_type = type.intval;
@@ -358,11 +377,25 @@ static int chg_usb_online(struct pm8150b_chg *chg, int *online)
 
 static int chg_set_icl(struct pm8150b_chg *chg, int ua)
 {
-	unsigned int icl_opt = USBIN_MODE_CHG_BIT;
+	unsigned int icl_opt;
 	int ret;
 
-	if (ua <= SDP_UA)
+	if (ua <= SDP_UA) {
 		icl_opt = USB51_MODE_BIT;
+		/*
+		 * USB 100/500 on SDP. HC + AICL after a 2 A vote on a PC
+		 * port leaves ICL_STATUS at 0 mA while STATUS_1 is FULLON.
+		 */
+		regmap_update_bits(chg->regmap, USBIN_AICL_OPTIONS_CFG,
+				   SUSPEND_ON_COLLAPSE_USBIN_BIT |
+				   USBIN_AICL_EN_BIT, 0);
+	} else {
+		icl_opt = USBIN_MODE_CHG_BIT;
+		regmap_update_bits(chg->regmap, USBIN_AICL_OPTIONS_CFG,
+				   SUSPEND_ON_COLLAPSE_USBIN_BIT |
+				   USBIN_AICL_EN_BIT,
+				   USBIN_AICL_EN_BIT);
+	}
 
 	ret = regmap_update_bits(chg->regmap, USBIN_ICL_OPTIONS,
 				 USB51_MODE_BIT | USBIN_MODE_CHG_BIT, icl_opt);
@@ -388,6 +421,49 @@ static int chg_enable_path(struct pm8150b_chg *chg)
 	return regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD,
 				  CHARGING_ENABLE_CMD_BIT,
 				  CHARGING_ENABLE_CMD_BIT);
+}
+
+static void chg_hold_off(struct pm8150b_chg *chg)
+{
+	regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD,
+			   CHARGING_ENABLE_CMD_BIT, 0);
+}
+
+/* Gauge capacity is the full signal. Voltage only decides when to start again. */
+static void chg_poll_full(struct pm8150b_chg *chg)
+{
+	union power_supply_propval cap, uv;
+	int ret;
+
+	if (!chg->bms)
+		chg->bms = power_supply_get_by_name("bms");
+	if (!chg->bms)
+		return;
+	ret = power_supply_get_property(chg->bms, POWER_SUPPLY_PROP_CAPACITY,
+					&cap);
+	if (ret)
+		return;
+	ret = power_supply_get_property(chg->bms, POWER_SUPPLY_PROP_VOLTAGE_NOW,
+					&uv);
+	if (ret)
+		return;
+
+	if (!chg->charge_done) {
+		if (cap.intval < 100)
+			return;
+		chg->charge_done = true;
+		chg_hold_off(chg);
+		dev_info(chg->dev, "pack full %d%% %d uV, stop charge\n",
+			 cap.intval, uv.intval);
+		power_supply_changed(chg->psy);
+		return;
+	}
+
+	if (uv.intval < DAGU_RECHARGE_UV) {
+		chg->charge_done = false;
+		dev_info(chg->dev, "pack %d uV, recharge\n", uv.intval);
+		power_supply_changed(chg->psy);
+	}
 }
 
 static void chg_status_work(struct work_struct *work)
@@ -418,13 +494,14 @@ static void chg_status_work(struct work_struct *work)
 	}
 
 	/*
-	 * 67 W PPS holds the buck off. status_work must not turn it
-	 * back on while the charge pumps are the battery path.
+	 * 67 W PPS holds the buck off. A full gauge does too: status_work
+	 * must not turn the buck back on in either case.
 	 */
-	if (chg->cp_mode) {
-		regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD,
-				   CHARGING_ENABLE_CMD_BIT, 0);
-		power_supply_changed(chg->psy);
+	chg_poll_full(chg);
+	if (chg->cp_mode || chg->charge_done) {
+		chg_hold_off(chg);
+		schedule_delayed_work(&chg->status_work,
+				      msecs_to_jiffies(DAGU_FULL_POLL_MS));
 		return;
 	}
 
@@ -447,8 +524,10 @@ static void chg_status_work(struct work_struct *work)
 	 * C, not PD). Treating that as a PD contract drew 2 A, then
 	 * requested 9 V; tPSTransition dropped VBUS (2.2 V / 2.8 V).
 	 * Stay at USB default until USB_TYPE is PD and the current is
-	 * above the 500 mA PS_RDY standby. Type-C without PD ramps to
-	 * 1.5 A after ICL_HOLD_MS. 5 V PD caps at 2 A; 9 V at 3 A.
+	 * above the 500 mA PS_RDY standby. Type-C Rp-1.5 / Rp-3.0
+	 * without PD ramps to 1.5 A after ICL_HOLD_MS. Rp-Def (a PC)
+	 * stays at 500 mA USB51 — HC 2 A on SDP draws 0 mA. 5 V PD
+	 * caps at 2 A; 9 V at 3 A.
 	 */
 	if (!chg_tcpm_contract(chg, &ua, &uv, &usb_type)) {
 		if (chg_usb_type_pd(usb_type) && ua > SDP_UA) {
@@ -461,9 +540,13 @@ static void chg_status_work(struct work_struct *work)
 		} else if (chg->last_uv >= 8000000 && ua <= SDP_UA) {
 			src = "pd-hold";
 			icl = chg->last_icl;
-		} else {
+		} else if (ua >= ICL_TYPEC_MAX_UA) {
 			src = "typec";
 			icl = chg_typec_icl(chg);
+		} else {
+			src = "usb-sdp";
+			icl = ICL_USB_DEFAULT_UA;
+			chg->hold_until = 0;
 		}
 	} else {
 		for (tries = 0; tries < 8; tries++) {
@@ -483,7 +566,12 @@ static void chg_status_work(struct work_struct *work)
 			regmap_update_bits(chg->regmap, CMD_APSD, APSD_RERUN_BIT,
 					   APSD_RERUN_BIT);
 		}
-		icl = ICL_5V_MAX_UA;
+		if (result & SDP_CHARGER_BIT)
+			icl = ICL_USB_DEFAULT_UA;
+		else if (result & CDP_CHARGER_BIT)
+			icl = CDP_UA;
+		else
+			icl = ICL_5V_MAX_UA;
 	}
 
 	if (chg->therm_level < 0)
@@ -506,6 +594,8 @@ static void chg_status_work(struct work_struct *work)
 		chg->last_uv = uv;
 		power_supply_changed(chg->psy);
 	}
+	schedule_delayed_work(&chg->status_work,
+			      msecs_to_jiffies(DAGU_FULL_POLL_MS));
 }
 
 static int chg_psy_notifier(struct notifier_block *nb, unsigned long event,
@@ -557,6 +647,10 @@ static int chg_get_property(struct power_supply *psy,
 			return ret;
 		if (!online) {
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+			return 0;
+		}
+		if (chg->charge_done) {
+			val->intval = POWER_SUPPLY_STATUS_FULL;
 			return 0;
 		}
 		ret = regmap_read(chg->regmap, BATTERY_CHARGER_STATUS_1, &stat);
@@ -658,7 +752,7 @@ static int chg_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 		/* 0 is the pump path. Non-zero hands the pack back to the buck. */
 		chg->cp_mode = val->intval <= 0;
-		if (chg->cp_mode)
+		if (chg->cp_mode || chg->charge_done)
 			ret = regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD,
 						 CHARGING_ENABLE_CMD_BIT, 0);
 		else
@@ -738,6 +832,12 @@ static int chg_hw_init(struct pm8150b_chg *chg)
 				 SUSPEND_ON_COLLAPSE_USBIN_BIT |
 				 USBIN_AICL_EN_BIT,
 				 USBIN_AICL_EN_BIT);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(chg->regmap, USBIN_LOAD_CFG,
+				 ICL_OVERRIDE_AFTER_APSD_BIT,
+				 ICL_OVERRIDE_AFTER_APSD_BIT);
 	if (ret)
 		return ret;
 

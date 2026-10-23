@@ -113,6 +113,10 @@ if ! grep -q 'chg_5v_icl' \
 	"$KERNEL_SRC/drivers/power/supply/pm8150b-charger-dagu.c"; then
 	die "pm8150b-charger-dagu.c missing 5 V AICL ramp — a 5 V bank would stick at 500 mA"
 fi
+if ! grep -q 'dagu: keep audio_client across prepare fail' \
+	"$KERNEL_SRC/sound/soc/qcom/qdsp6/q6asm-dai.c"; then
+	die "q6asm-dai.c still frees audio_client on prepare fail — PipeWire would flood printk"
+fi
 grep -q '^CONFIG_ARM64_VA_BITS_52=y' "$cfg" && die "VA_BITS_52 still on — Kryo 585 has no FEAT_LVA"
 grep -q '^CONFIG_ARM64_VA_BITS_48=y' "$cfg" && die "VA_BITS_48 still on — dump 4.19 is VA_BITS_39 / 3-level"
 grep -q '^CONFIG_KVM=y' "$cfg" && die "KVM still on — dump 4.19 has no hypervisor stub"

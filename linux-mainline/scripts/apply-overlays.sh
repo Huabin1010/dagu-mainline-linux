@@ -9988,6 +9988,9 @@ PY
 # Fluence AEC/NS COPP + SLIMBUS_7 A2DP virtual port. Idempotent.
 python3 "$ROOT/scripts/dagu-overlay-adsp-voice.py" "$KERNEL_SRC"
 
+# q6asm: keep audio_client on prepare fail so PipeWire SETUP cannot flood printk.
+python3 "$ROOT/scripts/dagu-overlay-q6asm-prepare.py" "$KERNEL_SRC"
+
 # FastRPC: user kref + DMA cookie so close cannot Oops reboot.
 python3 "$ROOT/scripts/dagu-overlay-fastrpc.py" "$KERNEL_SRC"
 python3 - "$KERNEL_SRC" <<'PY'

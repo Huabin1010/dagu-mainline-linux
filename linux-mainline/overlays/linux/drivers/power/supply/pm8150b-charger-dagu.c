@@ -4,11 +4,11 @@
  *
  * CAF qpnp-smb5-dagu.c is thousands of lines (PD / JEITA / dual-pump policy).
  * This is the 5 V / 9 V buck path only: unsuspend USBIN, enable charge, kick
- * the charger watchdog off, set ICL from TCPM's PD contract. PC USB / Rp-Def
- * stays at 500 mA USB51; APSD 2 A HC is only for DCP bricks. Do not touch
- * Type-C @1500 — qcom_pmic_typec owns CC / PD, including crude moisture
- * sensors. Do not copy qcom_smbx (SMB2) scales: PM8150B ICL/FCC is
- * 50 mA/LSB and float is 3.6 V + 10 mV/LSB.
+ * the charger watchdog off, set ICL from TCPM's PD contract. 5 V (PC, bank,
+ * Rp-Def) starts at 500 mA then AICL-ramps to 2 A. Do not touch Type-C
+ * @1500 — qcom_pmic_typec owns CC / PD, including crude moisture sensors.
+ * Do not copy qcom_smbx (SMB2) scales: PM8150B ICL/FCC is 50 mA/LSB and
+ * float is 3.6 V + 10 mV/LSB.
  */
 
 #include <linux/bits.h>
@@ -147,8 +147,6 @@ static const u32 dagu_therm_icl_ua[THERM_LEVELS] = {
 	1600000, 1500000, 1400000, 1300000, 1200000, 1100000, 950000, 750000,
 };
 #define SDP_UA					500000
-#define CDP_UA					1500000
-#define DCP_UA					2000000
 /* USB default while PD negotiates. Type-C Rp-3.0 is not a PD contract. */
 #define ICL_USB_DEFAULT_UA			500000
 #define ICL_TYPEC_MAX_UA			1500000
@@ -171,6 +169,7 @@ struct pm8150b_chg {
 	int last_uv;
 	int last_fcc;
 	unsigned long hold_until;
+	int icl_step;
 	/* Pump path owns the pack; do not re-enable the buck. */
 	bool cp_mode;
 	/* Gauge is at 100%. Hold the buck off until the recharge voltage. */
@@ -331,20 +330,42 @@ static bool chg_usb_type_pd(int usb_type)
 	       usb_type == POWER_SUPPLY_USB_TYPE_PD_PPS;
 }
 
-static int chg_typec_icl(struct pm8150b_chg *chg)
+static const int chg_5v_steps_ua[] = {
+	ICL_USB_DEFAULT_UA, 1000000, ICL_TYPEC_MAX_UA, ICL_5V_MAX_UA,
+};
+
+/*
+ * 5 V: start at USB default, then let AICL walk up to 2 A. A power bank
+ * on Rp-Def can do 10 W; a PC port settles where VBUS holds.
+ */
+static int chg_5v_icl(struct pm8150b_chg *chg)
 {
+	int last = ARRAY_SIZE(chg_5v_steps_ua) - 1;
+
+	if (chg->icl_step < 0)
+		chg->icl_step = 0;
+	if (chg->icl_step > last)
+		chg->icl_step = last;
+
 	if (!chg->hold_until) {
+		chg->icl_step = 0;
 		chg->hold_until = jiffies + msecs_to_jiffies(ICL_HOLD_MS);
 		schedule_delayed_work(&chg->status_work,
 				      msecs_to_jiffies(ICL_HOLD_MS));
-		return ICL_USB_DEFAULT_UA;
+		return chg_5v_steps_ua[0];
 	}
 	if (time_before(jiffies, chg->hold_until)) {
 		schedule_delayed_work(&chg->status_work,
 				      chg->hold_until - jiffies);
-		return ICL_USB_DEFAULT_UA;
+		return chg_5v_steps_ua[chg->icl_step];
 	}
-	return ICL_TYPEC_MAX_UA;
+	if (chg->icl_step < last) {
+		chg->icl_step++;
+		chg->hold_until = jiffies + msecs_to_jiffies(ICL_HOLD_MS);
+		schedule_delayed_work(&chg->status_work,
+				      msecs_to_jiffies(ICL_HOLD_MS));
+	}
+	return chg_5v_steps_ua[chg->icl_step];
 }
 
 static int chg_usbin_present(struct pm8150b_chg *chg)
@@ -382,15 +403,15 @@ static int chg_set_icl(struct pm8150b_chg *chg, int ua)
 
 	if (ua <= SDP_UA) {
 		icl_opt = USB51_MODE_BIT;
-		/*
-		 * USB 100/500 on SDP. HC + AICL after a 2 A vote on a PC
-		 * port leaves ICL_STATUS at 0 mA while STATUS_1 is FULLON.
-		 */
 		regmap_update_bits(chg->regmap, USBIN_AICL_OPTIONS_CFG,
 				   SUSPEND_ON_COLLAPSE_USBIN_BIT |
 				   USBIN_AICL_EN_BIT, 0);
 	} else {
 		icl_opt = USBIN_MODE_CHG_BIT;
+		/* Restart AICL at the new ceiling so it can walk down. */
+		regmap_update_bits(chg->regmap, USBIN_AICL_OPTIONS_CFG,
+				   SUSPEND_ON_COLLAPSE_USBIN_BIT |
+				   USBIN_AICL_EN_BIT, 0);
 		regmap_update_bits(chg->regmap, USBIN_AICL_OPTIONS_CFG,
 				   SUSPEND_ON_COLLAPSE_USBIN_BIT |
 				   USBIN_AICL_EN_BIT,
@@ -488,6 +509,7 @@ static void chg_status_work(struct work_struct *work)
 		chg->last_icl = 0;
 		chg->last_uv = 0;
 		chg->hold_until = 0;
+		chg->icl_step = 0;
 		chg_set_icl(chg, ICL_USB_DEFAULT_UA);
 		power_supply_changed(chg->psy);
 		return;
@@ -524,15 +546,15 @@ static void chg_status_work(struct work_struct *work)
 	 * C, not PD). Treating that as a PD contract drew 2 A, then
 	 * requested 9 V; tPSTransition dropped VBUS (2.2 V / 2.8 V).
 	 * Stay at USB default until USB_TYPE is PD and the current is
-	 * above the 500 mA PS_RDY standby. Type-C Rp-1.5 / Rp-3.0
-	 * without PD ramps to 1.5 A after ICL_HOLD_MS. Rp-Def (a PC)
-	 * stays at 500 mA USB51 — HC 2 A on SDP draws 0 mA. 5 V PD
+	 * above the 500 mA PS_RDY standby. 5 V without PD (Rp-Def bank,
+	 * PC, APSD) starts at 500 mA then AICL-ramps to 2 A. 5 V PD
 	 * caps at 2 A; 9 V at 3 A.
 	 */
 	if (!chg_tcpm_contract(chg, &ua, &uv, &usb_type)) {
 		if (chg_usb_type_pd(usb_type) && ua > SDP_UA) {
 			src = "pd";
 			chg->hold_until = 0;
+			chg->icl_step = 0;
 			if (uv >= 8000000)
 				icl = min_t(int, ua, ICL_PD_MAX_UA);
 			else
@@ -540,13 +562,9 @@ static void chg_status_work(struct work_struct *work)
 		} else if (chg->last_uv >= 8000000 && ua <= SDP_UA) {
 			src = "pd-hold";
 			icl = chg->last_icl;
-		} else if (ua >= ICL_TYPEC_MAX_UA) {
-			src = "typec";
-			icl = chg_typec_icl(chg);
 		} else {
-			src = "usb-sdp";
-			icl = ICL_USB_DEFAULT_UA;
-			chg->hold_until = 0;
+			src = "5v-aicl";
+			icl = chg_5v_icl(chg);
 		}
 	} else {
 		for (tries = 0; tries < 8; tries++) {
@@ -558,20 +576,17 @@ static void chg_status_work(struct work_struct *work)
 			msleep(100);
 		}
 
-		if (!ret && (apsd & APSD_DTC_STATUS_DONE_BIT)) {
-			ret = regmap_read(chg->regmap, APSD_RESULT_STATUS, &result);
-			if (!ret)
-				result &= APSD_RESULT_STATUS_MASK;
-		} else {
+		if (ret || !(apsd & APSD_DTC_STATUS_DONE_BIT))
 			regmap_update_bits(chg->regmap, CMD_APSD, APSD_RERUN_BIT,
 					   APSD_RERUN_BIT);
+		else {
+			ret = regmap_read(chg->regmap, APSD_RESULT_STATUS,
+					  &result);
+			if (!ret)
+				result &= APSD_RESULT_STATUS_MASK;
 		}
-		if (result & SDP_CHARGER_BIT)
-			icl = ICL_USB_DEFAULT_UA;
-		else if (result & CDP_CHARGER_BIT)
-			icl = CDP_UA;
-		else
-			icl = ICL_5V_MAX_UA;
+		src = "5v-aicl";
+		icl = chg_5v_icl(chg);
 	}
 
 	if (chg->therm_level < 0)

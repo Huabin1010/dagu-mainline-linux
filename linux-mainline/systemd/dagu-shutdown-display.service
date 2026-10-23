@@ -1,0 +1,18 @@
+[Unit]
+Description=dagu: unbind framebuffer console before shutdown redraw
+DefaultDependencies=no
+# Start after GDM so stop order is: this unit, then GDM. ExecStop therefore
+# runs while Mutter still owns the panel, before fbcon can steal it.
+After=gdm.service display-manager.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/local/sbin/dagu-shutdown-display
+TimeoutStopSec=3
+
+[Install]
+WantedBy=graphical.target

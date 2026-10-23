@@ -317,6 +317,10 @@ ln -sfn ../dagu-gnome-status-spinner.service \
 if [ -f /tmp/dagu-gnome-cc/dagu-gnome-cc-wifi-spinner.py ]; then
 	install -m 755 /tmp/dagu-gnome-cc/dagu-gnome-cc-wifi-spinner.py \
 		/usr/local/sbin/dagu-gnome-cc-wifi-spinner.py
+	if [ -f /tmp/dagu-gnome-cc/dagu-gnome-cc-wifi-dialog.py ]; then
+		install -m 755 /tmp/dagu-gnome-cc/dagu-gnome-cc-wifi-dialog.py \
+			/usr/local/sbin/dagu-gnome-cc-wifi-dialog.py
+	fi
 	install -m 755 /tmp/dagu-gnome-cc/dagu-build-gnome-cc-wifi.sh \
 		/usr/local/sbin/dagu-build-gnome-cc-wifi.sh
 	if [ "${DAGU_PATCH_GCC:-0}" = 1 ]; then
@@ -1767,6 +1771,20 @@ ExecStart=-/usr/sbin/agetty -L --noreset --noclear --keep-baud 115200,57600,3840
 EOF
 systemctl enable ssh.service || true
 systemctl enable NetworkManager.service || true
+# Single-user tablet: the session user must add/scan/activate Wi-Fi without
+# an admin password. SSH-started Settings is not polkit "active", and
+# settings.modify.system otherwise stays auth_admin_keep.
+getent group netdev >/dev/null && usermod -aG netdev dagu 2>/dev/null || true
+mkdir -p /etc/polkit-1/rules.d
+cat >/etc/polkit-1/rules.d/49-dagu-networkmanager.rules <<'EOF'
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
+        subject.user === "dagu") {
+        return polkit.Result.YES;
+    }
+});
+EOF
+
 # QCA6390 stays associated across s2idle (ath11k wowlan + NM).
 # Folio open is gpio-keys GPIO110 wakeup; unlock on resume.
 mkdir -p /etc/NetworkManager/conf.d /etc/udev/rules.d \
@@ -3389,6 +3407,47 @@ if [ -f /usr/local/share/applications/hmcl-stable.desktop ]; then
 	sed -i 's|^Exec=.*|Exec=/usr/local/bin/dagu-hmcl|' \
 		/usr/local/share/applications/hmcl-stable.desktop
 fi
+
+cat >/usr/local/sbin/dagu-shutdown-display <<'EOF'
+#!/bin/sh
+# Stop the framebuffer console from taking the panel when GNOME/Mutter
+# drops DRM master. ignore_loglevel + console=tty0 would otherwise keep
+# reprinting the same kernel log block until the PMIC finally cuts power.
+set -eu
+echo 1 >/proc/sys/kernel/printk 2>/dev/null || true
+for bind in /sys/class/vtconsole/vtcon*/bind; do
+	[ -w "$bind" ] || continue
+	echo 0 >"$bind" 2>/dev/null || true
+done
+for tty in /dev/tty1 /dev/tty0; do
+	[ -c "$tty" ] || continue
+	setterm --cursor off --blank force --term linux <"$tty" >"$tty" 2>/dev/null || true
+done
+exit 0
+EOF
+chmod 755 /usr/local/sbin/dagu-shutdown-display
+cat >/etc/systemd/system/dagu-shutdown-display.service <<'EOF'
+[Unit]
+Description=dagu: unbind framebuffer console before shutdown redraw
+DefaultDependencies=no
+After=gdm.service display-manager.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/local/sbin/dagu-shutdown-display
+TimeoutStopSec=3
+
+[Install]
+WantedBy=graphical.target
+EOF
+ln -sf /etc/systemd/system/dagu-shutdown-display.service \
+	/etc/systemd/system/graphical.target.wants/dagu-shutdown-display.service
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl enable --now dagu-shutdown-display.service >/dev/null 2>&1 || true
 
 rm -f /usr/sbin/policy-rc.d
 echo "==> desktop setup done"

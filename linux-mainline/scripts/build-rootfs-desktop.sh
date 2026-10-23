@@ -91,6 +91,8 @@ install -m 755 "$ROOT/scripts/dagu-gnome-status-spinner.py" \
 		"$ROOTFS/tmp/dagu-gnome-status/dagu-gnome-status-spinner.py"
 install -m 755 "$ROOT/scripts/dagu-gnome-cc-wifi-spinner.py" \
 		"$ROOTFS/tmp/dagu-gnome-cc/dagu-gnome-cc-wifi-spinner.py"
+install -m 755 "$ROOT/scripts/dagu-gnome-cc-wifi-dialog.py" \
+		"$ROOTFS/tmp/dagu-gnome-cc/dagu-gnome-cc-wifi-dialog.py"
 install -m 755 "$ROOT/scripts/dagu-build-gnome-cc-wifi.sh" \
 		"$ROOTFS/tmp/dagu-gnome-cc/dagu-build-gnome-cc-wifi.sh"
 chroot "$ROOTFS" env ROOT_PASSWORD="$PASS" SUITE="$SUITE" MIRROR="$MIRROR" \

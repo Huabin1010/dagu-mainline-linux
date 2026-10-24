@@ -18,7 +18,7 @@ This tree builds Linux 7.0 + an Ubuntu arm64 desktop, then flashes them onto the
 | P7 | CS35L41 speakers + WCD9385 mics | Done |
 | P8 | Venus 4K60 + front/rear cameras | Done (preview path) |
 
-Hardware notes and the full bring-up record live under [`linux-mainline/docs/`](linux-mainline/docs/dagu-adaptation-status.md). The board status table is [`linux-mainline/docs/dagu-adaptation-status.md`](linux-mainline/docs/dagu-adaptation-status.md).
+Hardware notes and the full bring-up record live under [`linux-mainline/docs/`](linux-mainline/docs/dagu-adaptation-status.md). The board status table is [`linux-mainline/docs/dagu-adaptation-status.md`](linux-mainline/docs/dagu-adaptation-status.md). The end-to-end adaptation record and lessons learned (Chinese) are in [`linux-mainline/docs/dagu-mainline-adaptation-handbook.md`](linux-mainline/docs/dagu-mainline-adaptation-handbook.md).
 
 An unfinished Windows-on-ARM / edk2-msm port lives under [`port/dagu/`](port/dagu/) and [`docs/uefi-port-dagu.md`](docs/uefi-port-dagu.md). That is **not** the daily system.
 

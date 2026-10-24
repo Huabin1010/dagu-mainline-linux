@@ -4,6 +4,8 @@
 
 内核源码和 `out/` **不入库**。blob 用 `./scripts/stage-firmware.sh` 从 `dumps/` 解开。
 
+**完整适配记录与心得**（从解锁到两个摄像头走上硬件通路，按子系统写根因、修法、实测和教训）：[docs/dagu-mainline-adaptation-handbook.md](docs/dagu-mainline-adaptation-handbook.md)。
+
 刷写 / ABL / ramdisk 实验记录（2026-08-30，P0 未通）：[docs/dagu-fastboot-abl-ramdisk.md](docs/dagu-fastboot-abl-ramdisk.md)。ABL 是什么、和 LK / ginkgo 的差别：[docs/abl-vs-lk.md](docs/abl-vs-lk.md)。**刷机指南**：[docs/flash-guide.md](../docs/flash-guide.md) / [简体中文](../docs/zh-CN/flash-guide.md)。**外设适配总表**：[docs/dagu-adaptation-status.md](docs/dagu-adaptation-status.md)。Wi‑Fi 866 PHY、Adreno/GMU、Turnip dEQP、CPU 调频与 stress-ng：[docs/dagu-wifi-gpu-turnip-cpu.md](docs/dagu-wifi-gpu-turnip-cpu.md)。
 
 ## 铁律

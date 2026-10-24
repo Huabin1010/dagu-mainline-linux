@@ -1729,13 +1729,14 @@ int main(int argc, char **argv)
 	test_hot_switch_front_rear();
 	test_switch();
 
-	/* Watch should spawn SoftISP once we hold the node. Wait then require live. */
-	printf("WAIT live SoftISP on rear (8s)...\n");
+	/* Watch should spawn the camera child (IFE, else SoftISP) once we
+	 * hold the node. Wait then require live. */
+	printf("WAIT live camera on rear (8s)...\n");
 	fflush(stdout);
 	sleep(8);
 	test_xcast_stream(REAR, "live_rear", 1, 45, 0);
 	test_flicker(REAR, "flicker_rear");
-	printf("WAIT live SoftISP on front (8s)...\n");
+	printf("WAIT live camera on front (8s)...\n");
 	fflush(stdout);
 	sleep(8);
 	test_xcast_stream(FRONT, "live_front", 1, 45, 0);

@@ -28,6 +28,11 @@ int dagu_pipe_start(int slot, const char *camera_id, const char *loopback_dev,
 		    unsigned w, unsigned h);
 void dagu_pipe_stop(int slot);
 int dagu_pipe_running(int slot);
+/* Hardware ISP path: IFE1 PIX NV12 + 3A -> loopback YUYV. 0 on success;
+ * -1 lets the caller fall back to SoftISP. */
+int dagu_hw_start(int slot, const char *loopback_dev);
+int dagu_loop_open(int slot, const char *dev, unsigned w, unsigned h);
+int dagu_loop_fd(int slot);
 
 #ifdef __cplusplus
 }

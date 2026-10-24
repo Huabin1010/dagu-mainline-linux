@@ -23,8 +23,10 @@ tests/test_app_v4l2: tests/test_app_v4l2.c
 dagu_cam.o: cpp/dagu_cam.cpp cpp/dagu_cam.h
 	$(CXX) $(CXXFLAGS) -O3 -c cpp/dagu_cam.cpp -o dagu_cam.o
 
-libdagu_cam.a: dagu_cam.o
-	ar rcs libdagu_cam.a dagu_cam.o
+dagu_hw.o: cpp/dagu_hw.cpp cpp/dagu_cam.h cpp/dagu_lsc_imx596.h
+	$(CXX) $(CXXFLAGS) -O3 -c cpp/dagu_hw.cpp -o dagu_hw.o
+libdagu_cam.a: dagu_cam.o dagu_hw.o
+	ar rcs libdagu_cam.a dagu_cam.o dagu_hw.o
 
 dagu-camera-loopback: libdagu_cam.a src/main.rs
 	$(RUSTC) --edition 2021 -C opt-level=3 -C panic=abort \
@@ -38,4 +40,4 @@ install: dagu-camera-loopback
 	install -m755 dagu-camera-loopback $(DESTDIR)$(PREFIX)/sbin/dagu-camera-loopback
 
 clean:
-	rm -f dagu_cam.o libdagu_cam.a dagu-camera-loopback
+	rm -f dagu_cam.o dagu_hw.o libdagu_cam.a dagu-camera-loopback

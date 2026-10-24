@@ -952,3 +952,20 @@ int dagu_pipe_running(int slot)
 		return 0;
 	return g_pipe[slot].th.joinable() ? 1 : 0;
 }
+
+/* Hardware path (dagu_hw.cpp) reuses the loopback OUTPUT handling. */
+extern "C" int dagu_loop_open(int slot, const char *dev, unsigned w, unsigned h)
+{
+	if (slot < 0 || slot > 1)
+		return -1;
+	Pipe *p = &g_pipe[slot];
+	p->dev = dev;
+	return open_loop(p, w, h);
+}
+
+extern "C" int dagu_loop_fd(int slot)
+{
+	if (slot < 0 || slot > 1)
+		return -1;
+	return g_pipe[slot].loop_fd;
+}

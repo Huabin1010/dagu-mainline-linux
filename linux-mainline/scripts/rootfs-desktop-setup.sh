@@ -2892,7 +2892,7 @@ EOF
 rm -f /etc/systemd/system/multi-user.target.wants/dagu-camera-loopback.service
 cat >/etc/systemd/system/dagu-camera-loopback-watch.service <<'EOF'
 [Unit]
-Description=dagu: SoftISP on video20/21 only while a client is open
+Description=dagu: IFE camera (SoftISP fallback) on video20/21 only while a client is open
 After=systemd-modules-load.service
 
 [Service]

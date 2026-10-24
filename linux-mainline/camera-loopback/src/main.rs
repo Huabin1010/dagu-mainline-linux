@@ -1,5 +1,6 @@
-//! dagu camera loopback: libcamera Viewfinder → YUYV /dev/video20/21.
-//! SoftISP stays on CPU 0–3. No GStreamer. No spa-libcamera.
+//! dagu camera loopback: IFE1 PIX NV12 + 3A → YUYV /dev/video20/21.
+//! libcamera SoftISP (CPU 0–3) is only the fallback when the hardware
+//! path cannot start. No GStreamer. No spa-libcamera.
 
 use std::ffi::{c_char, CString};
 use std::fs::{self, File};
@@ -41,6 +42,7 @@ extern "C" {
     ) -> i32;
     fn dagu_pipe_stop(slot: i32);
     fn dagu_pipe_running(slot: i32) -> i32;
+    fn dagu_hw_start(slot: i32, loopback_dev: *const c_char) -> i32;
 }
 
 fn cstr(s: &str) -> CString {
@@ -175,7 +177,7 @@ fn child_alive(kid: &mut Option<Child>) -> bool {
         Some(ch) => match ch.try_wait() {
             Ok(None) => true,
             Ok(Some(st)) => {
-                eprintln!("dagu-camera-loopback: SoftISP child exited {st}");
+                eprintln!("dagu-camera-loopback: camera child exited {st}");
                 *kid = None;
                 false
             }
@@ -194,7 +196,7 @@ fn kill_child(kid: &mut Option<Child>) {
         /* SIGKILL: libcamera IPA asserts on stop() and must not take watch down. */
         let _ = ch.kill();
         let _ = ch.wait();
-        eprintln!("dagu-camera-loopback: killed SoftISP pid {pid}");
+        eprintln!("dagu-camera-loopback: killed camera child pid {pid}");
     }
 }
 
@@ -270,7 +272,7 @@ fn watch() -> ! {
     let mut hold_fds: [Option<File>; 2] = [None, None];
     restamp(&mut hold_fds, 0);
     restamp(&mut hold_fds, 1);
-    eprintln!("dagu-camera-loopback: rust watch YUYV {LOOP_W}x{LOOP_H} hold-fd (SoftISP child, SIGKILL on idle)");
+    eprintln!("dagu-camera-loopback: rust watch YUYV {LOOP_W}x{LOOP_H} hold-fd (camera child: IFE first, SoftISP fallback; SIGKILL on idle)");
 
     let mut kids: [Option<Child>; 2] = [None, None];
     let mut idle_since: Option<Instant> = None;
@@ -347,7 +349,10 @@ fn main() {
                  * SWIspWorker on A55 and the preview drops to ~11 fps. */
                 let id = cstr(FRONT_ID);
                 let dev = cstr(FRONT_DEV);
-                if dagu_pipe_start(0, id.as_ptr(), dev.as_ptr(), FRONT_W, FRONT_H) != 0 {
+                /* IFE1 PIX hardware ISP first; SoftISP only if it cannot start. */
+                if dagu_hw_start(0, dev.as_ptr()) != 0
+                    && dagu_pipe_start(0, id.as_ptr(), dev.as_ptr(), FRONT_W, FRONT_H) != 0
+                {
                     std::process::exit(1);
                 }
             }
@@ -359,7 +364,10 @@ fn main() {
             unsafe {
                 let id = cstr(REAR_ID);
                 let dev = cstr(REAR_DEV);
-                if dagu_pipe_start(1, id.as_ptr(), dev.as_ptr(), REAR_W, REAR_H) != 0 {
+                /* IFE1 PIX hardware ISP first; SoftISP only if it cannot start. */
+                if dagu_hw_start(1, dev.as_ptr()) != 0
+                    && dagu_pipe_start(1, id.as_ptr(), dev.as_ptr(), REAR_W, REAR_H) != 0
+                {
                     std::process::exit(1);
                 }
             }

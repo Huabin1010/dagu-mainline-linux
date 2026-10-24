@@ -98,6 +98,41 @@ if [[ "$WIFI_STAGED" -eq 0 ]]; then
 
 	copy_one "$DEST/wlan_mac.bin" -path '*/persist/wlan/wlan_mac.bin' || true
 fi
+# QCA6390 amss/m3: upstream linux-firmware (QCAHSTSWPLZ_V2_TO_X86, the
+# build ath11k WoW was validated on), not the dump's Android amss20.bin
+# (QCAHSTSWPL_SILICONZ). With WoWLAN armed the Android build raises a
+# WOW_REASON_PAGE_FAULT (0x3a) host wake within 10 ms of every s2idle
+# entry, so the tablet woke straight back up. board.bin stays bd_l81a.
+# Override the source with ATH11K_FW_DIR=/path/to/ath11k/QCA6390/hw2.0.
+stage_upstream_qca6390() {
+	local src="${ATH11K_FW_DIR:-/lib/firmware/ath11k/QCA6390/hw2.0}"
+	local dst="$LIB/ath11k/QCA6390/hw2.0" f
+	mkdir -p "$dst"
+	for f in amss.bin m3.bin; do
+		if [[ -f "$src/$f.zst" ]]; then
+			zstd -qdcf "$src/$f.zst" >"$dst/$f.tmp"
+		elif [[ -f "$src/$f.xz" ]]; then
+			xz -dc "$src/$f.xz" >"$dst/$f.tmp"
+		elif [[ -f "$src/$f" ]]; then
+			cp -f "$src/$f" "$dst/$f.tmp"
+		else
+			echo "  QCA6390 $f: no upstream copy in $src (install linux-firmware); keeping dump build" >&2
+			rm -f "$dst/$f.tmp"
+			return 1
+		fi
+	done
+	# grep the file itself: under pipefail, grep -q closing a strings
+	# pipe early fails the whole check.
+	grep -aq 'QCAHSTSWPLZ_V2_TO_X86' "$dst/amss.bin.tmp" || {
+		echo "  QCA6390 amss.bin in $src is not the upstream x86 build; keeping dump build" >&2
+		rm -f "$dst"/*.tmp
+		return 1
+	}
+	mv -f "$dst/amss.bin.tmp" "$dst/amss.bin"
+	mv -f "$dst/m3.bin.tmp" "$dst/m3.bin"
+	echo "  QCA6390 amss.bin/m3.bin <- $src ($(grep -aom1 'WLAN\.HST[[:graph:]]*' "$dst/amss.bin" || true))"
+}
+stage_upstream_qca6390 || true
 
 # Remoteproc: on-device /vendor/firmware_mnt/image/{adsp,cdsp,slpi,venus}.mdt
 # plus {adspr,cdspr,slpir,slpius}.jsn for pd-mapper. Must be dagu-signed.

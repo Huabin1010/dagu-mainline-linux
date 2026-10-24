@@ -416,6 +416,82 @@ grep -q 'dagu: ABL leaves EN_SNK/SRC_CRUDE_SENSOR' \
 	exit 1
 }
 
+# Cold-boot white/grey flash. ABL leaves its splash scanning out with the
+# KTZ LEDs lit. msm_mdss_init() resets the MDSS core at ~0.2 s, which
+# stops the DSI video; the L81A TDDI then shows line-buffer noise until
+# the panel driver darkens the LEDs at ~2.2 s. Hold the reset until every
+# backlight in dagu,splash-backlights has bound (ktz8866 goes dark in its
+# probe). The DT lists only chips that exist on enabled buses.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+f = Path(sys.argv[1]) / "drivers/gpu/drm/msm/msm_mdss.c"
+text = f.read_text()
+marker = "dagu: splash backlights dark before MDSS reset"
+if marker in text:
+    raise SystemExit(0)
+old_inc = "#include <linux/reset.h>\n"
+new_inc = "#include <linux/reset.h>\n#include <linux/i2c.h>\n"
+old = """static int msm_mdss_reset(struct device *dev)
+{
+	struct reset_control *reset;
+"""
+new = """/*
+ * dagu: splash backlights dark before MDSS reset. ABL's splash is still
+ * on the panel with the LEDs lit. The core reset below ends the DSI
+ * video and an L81A-style TDDI then shows white/grey noise until
+ * something darkens the LEDs. Wait for the backlight drivers, which
+ * switch the LEDs off in probe, before cutting the splash.
+ */
+static int msm_mdss_wait_splash_backlights(struct device *dev)
+{
+	struct device_node *np;
+	int i;
+
+	for (i = 0; (np = of_parse_phandle(dev->of_node,
+					   "dagu,splash-backlights", i)); i++) {
+		struct i2c_client *client;
+		bool bound;
+
+		if (!of_device_is_available(np) ||
+		    !of_device_is_available(np->parent)) {
+			of_node_put(np);
+			continue;
+		}
+		client = of_find_i2c_device_by_node(np);
+		of_node_put(np);
+		bound = client && device_is_bound(&client->dev);
+		if (client)
+			put_device(&client->dev);
+		if (!bound)
+			return dev_err_probe(dev, -EPROBE_DEFER,
+					     "splash backlight %d not dark yet\\n", i);
+	}
+	return 0;
+}
+
+static int msm_mdss_reset(struct device *dev)
+{
+	struct reset_control *reset;
+	int ret;
+
+	ret = msm_mdss_wait_splash_backlights(dev);
+	if (ret)
+		return ret;
+"""
+if old_inc not in text or old not in text:
+    raise SystemExit(f"{f}: msm_mdss_reset() anchor not found")
+text = text.replace(old_inc, new_inc, 1).replace(old, new, 1)
+f.write_text(text)
+print(f"patched {f}: {marker}")
+PY
+grep -q 'dagu: splash backlights dark before MDSS reset' \
+	"$KERNEL_SRC/drivers/gpu/drm/msm/msm_mdss.c" || {
+	echo "msm_mdss splash-backlight hold missing" >&2
+	exit 1
+}
+
 # PD tPSTransition may drop VBUS while the source slews 5 V → 9 V.
 # Default TCPM unattaches and the bank Hard-Resets (~1.3 s 2.2 V loop).
 python3 - "$KERNEL_SRC" <<'PY'
@@ -10039,3 +10115,133 @@ if "fastrpc_user_put(fl);" not in text:
     raise SystemExit("fastrpc.c: user_put missing")
 print("persist fastrpc user kref + DMA cookie")
 PY
+# FastRPC: freezable user invoke wait. hexagonrpcd parks in an invoke
+# (adsp_listener next2) for the SLPI sensor PD's next reverse call. The
+# s2idle freezer's fake signal ended that wait with -ERESTARTSYS; the
+# restarted ioctl got -EPIPE, hexagonrpcd exited and the DSP side died
+# (EX:sensor_process frpc_dsp) on every resume, restarting the SLPI.
+# TASK_FREEZABLE lets the freezer park the task in place; a DSP reply
+# during sleep is kept in saved_state and seen after thaw. Real signals
+# still end the wait.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+f = Path(sys.argv[1]) / "drivers/misc/fastrpc.c"
+text = f.read_text()
+marker = "dagu: freezable invoke wait"
+if marker in text:
+    raise SystemExit(0)
+old = """	} else {
+		err = wait_for_completion_interruptible(&ctx->work);
+	}
+"""
+new = """	} else {
+		/*
+		 * dagu: freezable invoke wait. A listener thread sits here for
+		 * the DSP's next reverse call. The freezer's fake signal used
+		 * to end it with -ERESTARTSYS and the DSP side crashed; with
+		 * TASK_FREEZABLE the task is frozen in place instead.
+		 */
+		err = wait_for_completion_state(&ctx->work,
+						TASK_INTERRUPTIBLE | TASK_FREEZABLE);
+	}
+"""
+if old not in text:
+    raise SystemExit(f"{f}: user invoke wait not found")
+f.write_text(text.replace(old, new, 1))
+print(f"patched {f}: {marker}")
+PY
+grep -q 'dagu: freezable invoke wait' "$KERNEL_SRC/drivers/misc/fastrpc.c" || {
+	echo "fastrpc freezable invoke wait missing" >&2
+	exit 1
+}
+
+# PON pwrkey is IRQ_TYPE_EDGE_BOTH. GNOME starts suspend on KEY_POWER
+# down and s2idle arms wake IRQs ~0.3 s later, so releasing a press held
+# that long woke the tablet straight back up. While suspended only the
+# press edge wakes; resume re-reads PON_RT_STS so a release that happened
+# during sleep is still reported.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+
+f = Path(sys.argv[1]) / "drivers/input/misc/pm8941-pwrkey.c"
+text = f.read_text()
+marker = "dagu: wake on press only"
+if marker in text:
+    raise SystemExit(0)
+old = """static int pm8941_pwrkey_suspend(struct device *dev)
+{
+	struct pm8941_pwrkey *pwrkey = dev_get_drvdata(dev);
+
+	if (device_may_wakeup(dev))
+		enable_irq_wake(pwrkey->irq);
+
+	return 0;
+}
+
+static int pm8941_pwrkey_resume(struct device *dev)
+{
+	struct pm8941_pwrkey *pwrkey = dev_get_drvdata(dev);
+
+	if (device_may_wakeup(dev))
+		disable_irq_wake(pwrkey->irq);
+
+	return 0;
+}
+"""
+new = """static int pm8941_pwrkey_suspend(struct device *dev)
+{
+	struct pm8941_pwrkey *pwrkey = dev_get_drvdata(dev);
+
+	if (device_may_wakeup(dev)) {
+		/*
+		 * dagu: wake on press only. Suspend starts on the press, so
+		 * its release edge can land after the wake IRQs are armed
+		 * and end s2idle at once. Only a new press is a wake request.
+		 */
+		irq_set_irq_type(pwrkey->irq, IRQ_TYPE_EDGE_RISING);
+		enable_irq_wake(pwrkey->irq);
+	}
+
+	return 0;
+}
+
+static int pm8941_pwrkey_resume(struct device *dev)
+{
+	struct pm8941_pwrkey *pwrkey = dev_get_drvdata(dev);
+	unsigned int sts;
+
+	if (device_may_wakeup(dev)) {
+		disable_irq_wake(pwrkey->irq);
+		irq_set_irq_type(pwrkey->irq, IRQ_TYPE_EDGE_BOTH);
+		/* A release during sleep raised no IRQ; report it now. */
+		if (!regmap_read(pwrkey->regmap,
+				 pwrkey->baseaddr + PON_RT_STS, &sts)) {
+			sts = !!(sts & pwrkey->data->status_bit);
+			if (sts != pwrkey->last_status) {
+				pwrkey->last_status = sts;
+				input_report_key(pwrkey->input, pwrkey->code, sts);
+				input_sync(pwrkey->input);
+			}
+		}
+	}
+
+	return 0;
+}
+"""
+inc_old = "#include <linux/interrupt.h>\n"
+inc_new = "#include <linux/interrupt.h>\n#include <linux/irq.h>\n"
+if old not in text or inc_old not in text:
+    raise SystemExit(f"{f}: suspend/resume pair not found")
+text = text.replace(old, new, 1)
+if "#include <linux/irq.h>\n" not in text:
+    text = text.replace(inc_old, inc_new, 1)
+f.write_text(text)
+print(f"patched {f}: {marker}")
+PY
+grep -q 'dagu: wake on press only' "$KERNEL_SRC/drivers/input/misc/pm8941-pwrkey.c" || {
+	echo "pm8941-pwrkey press-only wake missing" >&2
+	exit 1
+}

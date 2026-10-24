@@ -45,6 +45,7 @@
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/pm.h>
+#include <linux/pm_wakeirq.h>
 #include <linux/pm_wakeup.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -1043,10 +1044,10 @@ static int nanosic_suspend(struct device *dev)
 	struct nanosic_kb *kb = dev_get_drvdata(dev);
 
 	/*
-	 * s2idle wakes on any IRQ. GPIO83 keepalives / gensor abort sleep
-	 * in the same second as lid-close. Sleep the MCU (GPIO155 low)
-	 * and drop the data IRQ. Cover wake is gpio-keys GPIO110.
-	 * Folio key wake is GPIO46 only.
+	 * Sleep the MCU (GPIO155 low) and drop the data IRQ. GPIO83 is not
+	 * a wake IRQ (probe clears the one the I2C core armed), so the
+	 * replies to screen-off below cannot end s2idle. Cover wake is
+	 * gpio-keys GPIO110. Folio key wake is GPIO46 only.
 	 */
 	cancel_delayed_work_sync(&kb->rx_work);
 	nanosic_cmd_176x(kb, 0x25, 0x01, 0x00, "screen-off");
@@ -1151,6 +1152,14 @@ static int nanosic_probe(struct i2c_client *client)
 		}
 	}
 
+	/*
+	 * DT wakeup-source makes the I2C core arm client->irq (GPIO83, the
+	 * data line) as this device's wake IRQ. disable_irq() in suspend
+	 * does not disarm it, so the MCU's replies to the screen-off
+	 * command ended every s2idle 10 ms after it started. The wake line
+	 * is GPIO46 only; nanosic_suspend() arms that one.
+	 */
+	dev_pm_clear_wake_irq(&client->dev);
 	device_init_wakeup(&client->dev, true);
 	dev_info(&client->dev, "nanosic 803 keyboard MCU\n");
 	return 0;

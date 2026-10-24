@@ -28,6 +28,25 @@ install -m644 "$ROOT/systemd/dagu-boot-success.service" \
 install -m644 "$ROOT/systemd/logind-dagu-power.conf" "$STAGE/files/etc/systemd/logind.conf.d/dagu-power.conf"
 install -m644 "$ROOT/systemd/dagu-camera-loopback-watch.service" \
 	"$STAGE/files/etc/systemd/system/dagu-camera-loopback-watch.service"
+# s2idle: SEE client stop/start around sleep, magic-packet-only WoWLAN.
+mkdir -p "$STAGE/files/usr/lib/systemd/system-sleep" \
+	"$STAGE/files/etc/NetworkManager/conf.d"
+install -m755 "$ROOT/systemd/dagu-folio-resume" \
+	"$STAGE/files/usr/lib/systemd/system-sleep/dagu-folio-resume"
+install -m644 "$ROOT/systemd/20-dagu-wifi-wowlan.conf" \
+	"$STAGE/files/etc/NetworkManager/conf.d/20-dagu-wifi-wowlan.conf"
+install -m755 "$ROOT/scripts/dagu-wifi-wowlan-apply.sh" \
+	"$STAGE/files/usr/local/sbin/dagu-wifi-wowlan-apply"
+# Upstream QCA6390 amss/m3 (stage-firmware.sh). The kernel loads them from
+# the boot ramdisk; the rootfs copy is what a Wi-Fi restart reloads.
+FWQ="$ROOT/firmware/dagu/lib/firmware/ath11k/QCA6390/hw2.0"
+if grep -aq 'QCAHSTSWPLZ_V2_TO_X86' "$FWQ/amss.bin" 2>/dev/null; then
+	mkdir -p "$STAGE/files/lib/firmware/ath11k/QCA6390/hw2.0"
+	install -m644 "$FWQ/amss.bin" "$FWQ/m3.bin" \
+		"$STAGE/files/lib/firmware/ath11k/QCA6390/hw2.0/"
+else
+	echo "warning: $FWQ is not the upstream QCA6390 build; run stage-firmware.sh" >&2
+fi
 # Same text the rootfs build writes; keep one source of truth.
 sed -n '/^cat >\/usr\/local\/sbin\/dagu-shutdown-display <<.EOF.$/,/^EOF$/p' \
 	"$ROOT/scripts/rootfs-desktop-setup.sh" | sed '1d;$d' \
@@ -54,6 +73,10 @@ systemctl daemon-reload
 # Mark the booted A/B slot successful on every boot. Without it ABL's
 # retry counter (7 per set_active) runs out and the tablet stops in fastboot.
 systemctl enable --now dagu-boot-success.service
+# Re-stamp Wi-Fi profiles: disconnect / GTK triggers woke the tablet and
+# nothing put it back to sleep with the cover open.
+nmcli general reload conf >/dev/null 2>&1 || true
+/usr/local/sbin/dagu-wifi-wowlan-apply || true
 systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind
 systemctl restart dagu-camera-loopback-watch.service
 echo "installed; reboot once so the new kernel and these files meet"

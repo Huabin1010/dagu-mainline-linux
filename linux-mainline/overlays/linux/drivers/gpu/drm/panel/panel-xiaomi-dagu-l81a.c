@@ -64,11 +64,13 @@ struct dagu_l81a {
 };
 
 /*
- * The first prepare() resets the Himax and replays the CAF init while
- * ABL's backlight is still on. Between reset and the first DSC frame the
- * TDDI drives whatever is in its line buffers: a white, noisy flash.
- * Android never shows it because the backlight comes on only after the
- * first frame. Wait a few 120 Hz frames after video starts.
+ * Without DSC video the TDDI drives whatever is in its line buffers: a
+ * white, noisy flash. That happens twice per boot: from the MDSS core
+ * reset (ABL's splash stops) and from our first prepare() (Himax reset
+ * and CAF init). Android never shows it because the backlight comes on
+ * only after the first frame. The KTZ probe goes dark before the MDSS
+ * reset, probe keeps bl_settling, and the first enable() lights the
+ * LEDs a few 120 Hz frames after video starts.
  */
 #define L81A_BL_SETTLE_MS	100
 
@@ -414,7 +416,9 @@ static int l81a_prepare(struct drm_panel *panel)
 	if (ctx->prepared)
 		return 0;
 
-	/* Dark before the reset; l81a_enable() lights it after video. */
+	/* Dark before the reset (probe set this already); l81a_enable()
+	 * lights it after video.
+	 */
 	ctx->bl_settling = true;
 	l81a_bl_refresh(ctx);
 
@@ -708,7 +712,13 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 
 	INIT_DELAYED_WORK(&ctx->bl_settle_work, l81a_bl_settle_workfn);
 	INIT_DELAYED_WORK(&ctx->charger_dark_work, l81a_charger_dark_workfn);
-	/* Before the backlight registers, so its first update stays dark. */
+	/*
+	 * Before the backlight registers, so its first update stays dark.
+	 * The KTZ probe already switched the LEDs off and the MDSS reset
+	 * has stopped ABL's video; lighting them here showed TDDI noise
+	 * until the first prepare(). The first enable() lights them.
+	 */
+	ctx->bl_settling = true;
 	if (l81a_charger_boot)
 		WRITE_ONCE(l81a_charger_dark, true);
 

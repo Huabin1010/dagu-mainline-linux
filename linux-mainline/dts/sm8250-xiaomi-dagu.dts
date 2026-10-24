@@ -17,6 +17,7 @@
 #include "sm8250-xiaomi-elish-common.dtsi"
 #include <dt-bindings/clock/qcom,camcc-sm8250.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/gpio-keys.h>
 #include <dt-bindings/input/linux-event-codes.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/leds/common.h>
@@ -1131,6 +1132,12 @@
 &mdss {
 	/delete-property/ interconnects;
 	/delete-property/ interconnect-names;
+	/*
+	 * Hold the MDSS core reset (end of ABL's splash) until the KTZ
+	 * backlights have probed and gone dark (msm_mdss.c overlay). Chips
+	 * on a disabled bus are skipped; the GENI include repoints this.
+	 */
+	dagu,splash-backlights = <&ktz8866_a>, <&ktz8866_b>;
 	status = "okay";
 };
 /*
@@ -1712,12 +1719,21 @@
 	pinctrl-0 = <&vol_up_n>, <&hall_pins>;
 	status = "okay";
 
+	/*
+	 * Only opening the cover wakes. Android wakes on every hall edge and
+	 * its PowerManager puts a lid-closed wake straight back to sleep with
+	 * the screen off; logind instead resumes the desktop, lights the
+	 * panel and waits HoldoffTimeoutSec before re-suspending. So closing
+	 * the cover over a tablet already asleep from the power key, or
+	 * folding the folio, must not end s2idle at all.
+	 */
 	hall-lid {
 		label = "hall_key";
 		gpios = <&tlmm 110 GPIO_ACTIVE_LOW>;
 		linux,input-type = <EV_SW>;
 		linux,code = <SW_LID>;
 		wakeup-source;
+		wakeup-event-action = <EV_ACT_DEASSERTED>;
 		debounce-interval = <15>;
 	};
 
@@ -1727,7 +1743,6 @@
 		gpios = <&tlmm 121 GPIO_ACTIVE_HIGH>;
 		linux,input-type = <EV_SW>;
 		linux,code = <SW_TABLET_MODE>;
-		wakeup-source;
 		debounce-interval = <15>;
 	};
 };

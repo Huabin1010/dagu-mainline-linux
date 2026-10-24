@@ -240,6 +240,10 @@
 	backlight-aux = <&geni_ktz8866_b>;
 };
 
+&mdss {
+	dagu,splash-backlights = <&geni_ktz8866_a>, <&geni_ktz8866_b>;
+};
+
 &kb_i2c_se2 { status = "disabled"; };
 &chg_i2c_se15 { status = "disabled"; };
 &chg_i2c_se16 { status = "disabled"; };

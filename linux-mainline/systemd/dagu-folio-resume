@@ -1,17 +1,18 @@
 #!/bin/sh
 # $1 = pre|post
-# Cover close already reaches s2idle. Folio MCU chatter and SLPI
-# sensor_process crash abort it in the same second. Stop SEE
-# before freeze. MCU sleep GPIO155 is the kernel nanosic_suspend.
-
+# Stop the SEE client before freeze; its QRTR traffic must not end
+# s2idle. hexagonrpcd keeps running: its FastRPC listener wait is
+# freezable (fastrpc.c overlay), and restarting it re-runs the SNS
+# registry init, which crashes the SLPI sensor PD (SNS_REG_INIT).
+# post queues the restart (--no-block) so systemd-sleep, and with it
+# logind and the panel, do not wait for the sensor client.
 set -eu
-
 case "${1-}" in
 pre)
 	systemctl stop dagu-ssc.service >/dev/null 2>&1 || true
 	;;
 post)
-	systemctl start dagu-ssc.service >/dev/null 2>&1 || true
+	systemctl start --no-block dagu-ssc.service >/dev/null 2>&1 || true
 	loginctl unlock-sessions >/dev/null 2>&1 || true
 	;;
 esac

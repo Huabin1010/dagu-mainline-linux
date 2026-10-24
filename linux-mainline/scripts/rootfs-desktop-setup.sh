@@ -1871,7 +1871,15 @@ mkdir -p /etc/NetworkManager/conf.d /etc/udev/rules.d \
 	/usr/lib/systemd/system-sleep /usr/local/sbin
 cat >/etc/NetworkManager/conf.d/20-dagu-wifi-wowlan.conf <<'EOF'
 [connection]
-wifi.wake-on-wlan=disconnect,magic,gtk-rekey-failure
+# DEFAULT (0x1) leaves WoWLAN unarmed. NetworkManager then
+# deauthenticates (Reason 3 DEAUTH_LEAVING) and ath11k powers
+# MHI off. QCA6390 firmware can keep the BSS: NULL keepalive,
+# GTK rekey, ARP/NS offload. Any armed trigger keeps it.
+# Magic packet only. Every wake resumes the desktop and lights the
+# panel, and with the cover open nothing puts it back to sleep, so an
+# AP reboot (disconnect) or a rekey miss must not wake the tablet.
+# Do not use any/all either: that wakes on every packet.
+wifi.wake-on-wlan=magic
 EOF
 cat >/etc/udev/rules.d/70-dagu-wifi-wakeup.rules <<'EOF'
 ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x17cb", ATTR{device}=="0x1101", ATTR{power/wakeup}="enabled"
@@ -1880,14 +1888,36 @@ ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlp1s0", ATTR{device/power/wakeup}="en
 EOF
 cat >/usr/lib/systemd/system-sleep/dagu-folio-resume <<'EOF'
 #!/bin/sh
-[ "${1-}" = post ] || exit 0
-loginctl unlock-sessions >/dev/null 2>&1 || true
+# $1 = pre|post
+# Stop the SEE client before freeze; its QRTR traffic must not end
+# s2idle. hexagonrpcd keeps running: its FastRPC listener wait is
+# freezable (fastrpc.c overlay), and restarting it re-runs the SNS
+# registry init, which crashes the SLPI sensor PD (SNS_REG_INIT).
+# post queues the restart (--no-block) so systemd-sleep, and with it
+# logind and the panel, do not wait for the sensor client.
+set -eu
+case "${1-}" in
+pre)
+	systemctl stop dagu-ssc.service >/dev/null 2>&1 || true
+	;;
+post)
+	systemctl start --no-block dagu-ssc.service >/dev/null 2>&1 || true
+	loginctl unlock-sessions >/dev/null 2>&1 || true
+	;;
+esac
 EOF
 chmod 755 /usr/lib/systemd/system-sleep/dagu-folio-resume
 cat >/usr/local/sbin/dagu-wifi-wowlan-apply <<'EOF'
 #!/bin/sh
+# Stamp every Wi-Fi profile so NetworkManager arms ath11k wowlan
+# instead of DEAUTH_LEAVING. Enable QCA6390 / PCIe RC wakeup.
+# Magic packet only (see 20-dagu-wifi-wowlan.conf). Safe to re-run.
+# Does not bring the link down.
+
 set -eu
-WOW='disconnect,magic,gtk-rekey-failure'
+
+WOW='magic'
+
 for pci in /sys/bus/pci/devices/*; do
 	[ -f "$pci/vendor" ] || continue
 	v=$(cat "$pci/vendor")
@@ -1899,21 +1929,22 @@ done
 if [ -f /sys/class/net/wlp1s0/device/power/wakeup ]; then
 	echo enabled >/sys/class/net/wlp1s0/device/power/wakeup
 fi
+
 command -v nmcli >/dev/null 2>&1 || exit 0
+
 nmcli -t -f UUID,TYPE connection show | while IFS=: read -r uuid type; do
 	[ "$type" = "802-11-wireless" ] || continue
 	cur=$(nmcli -g 802-11-wireless.wake-on-wlan connection show "$uuid" 2>/dev/null || true)
-	case $cur in
-	*disconnect*) ;;
-	*)
-		nmcli connection modify "$uuid" \
-			802-11-wireless.wake-on-wlan "$WOW" || true
-		;;
-	esac
+	[ "$cur" = "$WOW" ] && continue
+	nmcli connection modify "$uuid" 802-11-wireless.wake-on-wlan "$WOW" || true
 done
-if command -v iw >/dev/null 2>&1 && [ -d /sys/class/ieee80211/phy0 ]; then
-	iw phy phy0 wowlan enable disconnect magic-packet gtk-rekey-failure \
-		>/dev/null 2>&1 || true
+
+# Arm now so the next s2idle does not wait for a reconnect. The phy
+# index moves when ath11k rebinds (phy0, phy1, ...): ask the netdev.
+# Fails cleanly if the iface is down.
+phy=$(cat /sys/class/net/wlp1s0/phy80211/name 2>/dev/null || true)
+if command -v iw >/dev/null 2>&1 && [ -n "$phy" ]; then
+	iw phy "$phy" wowlan enable magic-packet >/dev/null 2>&1 || true
 fi
 EOF
 chmod 755 /usr/local/sbin/dagu-wifi-wowlan-apply

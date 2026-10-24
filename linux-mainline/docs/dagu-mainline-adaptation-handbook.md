@@ -718,8 +718,15 @@ WCD9385 模拟麦 5（偏置 3）→ ADC4 INP5 → TX DEC0 → TX_CODEC_DMA_TX_3
 - 2026-09-12 第一次：睡约 65.5 分钟，电源键唤醒，成功计数 1；显示仍是高通带宽压缩、视频编解码和音频数字信号处理器都在、无图形挂起、无子系统重启；无线网络重新上电恢复。醒来后功放报一次 −110，声卡还在。
 - 现在的产品路径：合盖（110 号引脚霍尔）和短按电源都进浅休眠。`systemd/logind-dagu-power.conf`：合盖和电源键都休眠，`HoldoffTimeoutSec=2s`（默认 30 秒会吞掉醒来后的下一次合盖）。GNOME 设置守护进程会拿着电源键的阻塞锁，所以动作要在 dconf 里也设成休眠；合盖时“有外接显示器也休眠”要打开，因为醒来后合成器重新探测会以为多了一块屏。
 - 没有实时时钟，`rtcwake` 用不了；时间靠联网校时（没校时的话加密网页证书“尚未生效”，B 站只有文字没有样式，登录认证模块还会以为密码修改日期在未来）。
-- 休眠钩子 `dagu-folio-resume`：睡前停传感器客户端，醒后再起。
-- 不要远程 `echo mem`，旁边没人按电源键就醒不来；数据线上的串口小工具不能唤醒。
+- 休眠钩子 `dagu-folio-resume`：睡前停传感器客户端，醒后用 `--no-block` 再起，不拖慢亮屏。`hexagonrpcd` 不要停：重启它会重跑传感器注册表初始化，20 秒后 SLPI 报 `SNS_REG_INIT` 崩溃。
+- 不要远程 `echo mem`，旁边没人按电源键就醒不来；数据线上的串口小工具不能唤醒。远程测试用无线局域网魔术包唤醒（下面）。
+- 10-25 短按电源一睡就醒，用 `scripts/dagu-s2idle-wake-trace.sh`（`pm_system_irq_wakeup` / `pm_wakeup_pending` 探针）查出三个原因：
+  - 键盘单片机：DT 的 `wakeup-source` 让 I2C 核心把数据线 GPIO83 设成唤醒中断，`disable_irq()` 解除不了；单片机回复熄屏命令，10 毫秒就醒。驱动 probe 里 `dev_pm_clear_wake_irq()`，唤醒只走 GPIO46。
+  - 无线网卡：安卓版 `amss20.bin`（`QCAHSTSWPL_SILICONZ`）进入无线局域网唤醒后马上报 `WOW_REASON_PAGE_FAULT`（0x3a）叫醒主机。换成 linux-firmware 的 `QCAHSTSWPLZ_V2_TO_X86`（`stage-firmware.sh`，内核从启动内存盘加载），实测睡 3 分钟不醒、魔术包 1 秒唤醒。触发条件只留 `magic`：断线或密钥更新失败叫醒后会亮屏，开着盖子没人让它再睡。
+  - 传感器：冻结进程时打断 `hexagonrpcd` 等反向调用的 ioctl，SLPI 的 `sensor_process` 每次醒来都崩溃重启。`fastrpc.c` 的用户等待改成 `TASK_INTERRUPTIBLE | TASK_FREEZABLE`，进程原地冻结。
+- 电源键唤醒只认按下沿（`pm8941-pwrkey` 补丁）：按下就开始休眠，按得久一点，松开沿会落在唤醒中断布防之后。合盖霍尔 GPIO110 只在打开时唤醒（`wakeup-event-action = EV_ACT_DEASSERTED`），GPIO121 不唤醒。
+- 实测（#633/#634）：内核恢复约 240 毫秒，唤醒到面板亮约 470 毫秒；按电源到熄屏约 140 毫秒。
+- 开机白灰花屏：引导程序的开机画面还在扫描、背光亮着，内核约 0.2 秒复位显示子系统核心，视频流停了，屏幕控制芯片显示行缓冲噪点，一直到约 2.2 秒面板驱动关背光。现在 `msm_mdss.c` 补丁等 `dagu,splash-backlights` 里的 KTZ8866 绑定后再复位；KTZ8866 probe 先关灯；面板 probe 就置 `bl_settling`，第一帧稳定后才亮。
 
 ## 17. 无线网络和蓝牙
 

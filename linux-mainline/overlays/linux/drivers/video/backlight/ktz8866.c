@@ -85,9 +85,10 @@ static int ktz8866_update_bits(struct ktz8866 *ktz, unsigned int reg,
 	return regmap_update_bits(ktz->regmap, reg, mask, val);
 }
 
-static void ktz8866_init(struct ktz8866 *ktz)
+static void ktz8866_init(struct ktz8866 *ktz, bool lit)
 {
 	unsigned int val = 0;
+	unsigned int en = lit ? BL_EN_BIT : 0;
 
 	ktz8866_write(ktz, BL_CFG1, BL_CFG1_I2C_ONLY);
 	/* 1µs current ramp (bits 6:3 = 0): blinks are edges, not 128ms fades. */
@@ -97,9 +98,9 @@ static void ktz8866_init(struct ktz8866 *ktz)
 
 	if (!of_property_read_u32(ktz->client->dev.of_node, "current-num-sinks",
 				  &val))
-		ktz8866_write(ktz, BL_EN, (BIT(val) - 1) | BL_EN_BIT);
+		ktz8866_write(ktz, BL_EN, (BIT(val) - 1) | en);
 	else
-		ktz8866_write(ktz, BL_EN, (BIT(6) - 1) | BL_EN_BIT);
+		ktz8866_write(ktz, BL_EN, (BIT(6) - 1) | en);
 
 	if (of_property_read_bool(ktz->client->dev.of_node,
 				  "kinetic,enable-lcd-bias"))
@@ -178,6 +179,7 @@ static int ktz8866_probe(struct i2c_client *client)
 	struct backlight_device *backlight_dev;
 	struct backlight_properties props;
 	struct ktz8866 *ktz;
+	bool internal;
 	int ret = 0;
 
 	ktz = devm_kzalloc(&client->dev, sizeof(*ktz), GFP_KERNEL);
@@ -199,8 +201,21 @@ static int ktz8866_probe(struct i2c_client *client)
 	/* GPIO139 HWEN is owned by the L81A panel. Do not request it. */
 	ktz->enable_gpio = NULL;
 
-	ktz8866_init(ktz);
-	ktz->led_on = true;
+	/*
+	 * kinetic,internal: the L81A panel drives brightness and lights
+	 * the LEDs once its first frame has settled. Until then ABL's
+	 * splash is about to stop: the MDSS core reset (held off until
+	 * this probe, see msm_mdss.c) ends the DSI video, and the TDDI
+	 * shows white/grey line-buffer noise while the LEDs are lit.
+	 * Android hands the splash to its first commit and never shows
+	 * that. Go dark first, before BL_CFG1 leaves PWM mode, so the
+	 * mode switch cannot flash either.
+	 */
+	internal = of_property_read_bool(client->dev.of_node, "kinetic,internal");
+	if (internal)
+		ktz8866_update_bits(ktz, BL_EN, BL_EN_BIT, 0);
+	ktz8866_init(ktz, !internal);
+	ktz->led_on = !internal;
 	i2c_set_clientdata(client, ktz);
 
 	memset(&props, 0, sizeof(props));
@@ -221,7 +236,7 @@ static int ktz8866_probe(struct i2c_client *client)
 	/* Dual-KTZ boards expose one l81a-wled; hide per-chip sysfs so
 	 * GNOME cannot dim only one half of the panel.
 	 */
-	if (of_property_read_bool(client->dev.of_node, "kinetic,internal"))
+	if (internal)
 		return 0;
 
 	backlight_dev = devm_backlight_device_register(&client->dev,

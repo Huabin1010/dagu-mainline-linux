@@ -1,11 +1,12 @@
 #!/bin/sh
 # Stamp every Wi-Fi profile so NetworkManager arms ath11k wowlan
 # instead of DEAUTH_LEAVING. Enable QCA6390 / PCIe RC wakeup.
-# Safe to re-run. Does not bring the link down.
+# Magic packet only (see 20-dagu-wifi-wowlan.conf). Safe to re-run.
+# Does not bring the link down.
 
 set -eu
 
-WOW='disconnect,magic,gtk-rekey-failure'
+WOW='magic'
 
 for pci in /sys/bus/pci/devices/*; do
 	[ -f "$pci/vendor" ] || continue
@@ -24,18 +25,14 @@ command -v nmcli >/dev/null 2>&1 || exit 0
 nmcli -t -f UUID,TYPE connection show | while IFS=: read -r uuid type; do
 	[ "$type" = "802-11-wireless" ] || continue
 	cur=$(nmcli -g 802-11-wireless.wake-on-wlan connection show "$uuid" 2>/dev/null || true)
-	case $cur in
-	*disconnect*) ;;
-	*)
-		nmcli connection modify "$uuid" \
-			802-11-wireless.wake-on-wlan "$WOW" || true
-		;;
-	esac
+	[ "$cur" = "$WOW" ] && continue
+	nmcli connection modify "$uuid" 802-11-wireless.wake-on-wlan "$WOW" || true
 done
 
-# Arm now so the next s2idle does not wait for a reconnect.
+# Arm now so the next s2idle does not wait for a reconnect. The phy
+# index moves when ath11k rebinds (phy0, phy1, ...): ask the netdev.
 # Fails cleanly if the iface is down.
-if command -v iw >/dev/null 2>&1 && [ -d /sys/class/ieee80211/phy0 ]; then
-	iw phy phy0 wowlan enable disconnect magic-packet gtk-rekey-failure \
-		>/dev/null 2>&1 || true
+phy=$(cat /sys/class/net/wlp1s0/phy80211/name 2>/dev/null || true)
+if command -v iw >/dev/null 2>&1 && [ -n "$phy" ]; then
+	iw phy "$phy" wowlan enable magic-packet >/dev/null 2>&1 || true
 fi

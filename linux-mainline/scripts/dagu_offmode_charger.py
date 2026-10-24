@@ -11,6 +11,12 @@ program is that screen on Linux:
   * holding the power key boots the desktop
   * unplug powers off
 
+Shutting down from the desktop is a real power-off, as on Android. With
+the cable in, the PMIC powers the tablet straight back up and ABL boots
+the kernel with androidboot.mode=charger; that is the only way into this
+screen. Nothing holds the shutdown back: an old delay inhibitor kept
+logind waiting its full 20 s, long enough for GDM to respawn the greeter.
+
 A USB cable used for the serial gadget also makes the charger look
 online. That alone must not skip the desktop. Only a charger wake
 (bootloader mode, charger boot reason, or power-on reason without the
@@ -27,7 +33,7 @@ import os
 import select
 import struct
 import subprocess
-import sys
+import threading
 import time
 import zlib
 from dataclasses import dataclass
@@ -36,7 +42,6 @@ from pathlib import Path
 PENDING = Path("/var/lib/dagu/offmode-pending")
 MODE_FLAG = Path("/run/dagu-charger-mode")
 REAL_POWEROFF = Path("/run/dagu-real-poweroff")
-SHUTDOWN_SCHED = Path("/run/systemd/shutdown/scheduled")
 CMDLINE_PATH = Path("/proc/cmdline")
 PSY_CHARGER = Path("/sys/class/power_supply/pm8150b-charger")
 PSY_BATT = Path("/sys/class/power_supply/bms")
@@ -46,8 +51,13 @@ PSY_CELLS = (
 )
 FB_PATH = "/dev/fb0"
 FB_SYS = Path("/sys/class/graphics/fb0")
-DPMS = Path("/sys/class/drm/card0-DSI-1/dpms")
 BACKLIGHT = Path("/sys/class/backlight/l81a-wled/brightness")
+BL_POWER = Path("/sys/class/backlight/l81a-wled/bl_power")
+# The panel driver keeps the LEDs off through a charger boot until this
+# is cleared, so the kernel log never shows (Android shows nothing either).
+CHARGER_DARK = Path("/sys/module/panel_xiaomi_dagu_l81a/parameters/charger_dark")
+BL_POWER_ON = 0
+BL_POWER_OFF = 4
 
 # PM8150 PON_REASON1. Power-key wins over cable, same as the bootloader.
 PON_HARD_RESET = 0x01
@@ -199,20 +209,6 @@ def want_charger_mode(h: BootHints) -> bool:
     if h.charger_online is False:
         return False
     return charger_wake(h)
-
-
-def divert_shutdown(mode: str, online: bool | None) -> str:
-    """What to do with a scheduled shutdown.
-
-    'ui' cancels the power-off and shows the battery (cable still in).
-    'allow' lets the power-off or reboot proceed.
-    """
-    mode = (mode or "").strip().lower()
-    if mode in ("reboot", "halt", "kexec"):
-        return "allow"
-    if mode in ("poweroff", ""):
-        return "ui" if online else "allow"
-    return "allow"
 
 
 def parse_pon_reason(text: str) -> int | None:
@@ -385,13 +381,6 @@ def run(cmd: list[str]) -> int:
         return 127
 
 
-def parse_shutdown_mode(text: str) -> str:
-    for line in text.splitlines():
-        if line.startswith("MODE="):
-            return line.split("=", 1)[1].strip().lower()
-    return ""
-
-
 def cmd_gate() -> int:
     cmdline = read_text(CMDLINE_PATH)
     pending = PENDING.is_file()
@@ -401,6 +390,7 @@ def cmd_gate() -> int:
     hinted = BootHints(cmdline=cmdline, pending=pending, pon_reason=pon, pwrkey_held=pwrkey_held())
     if not charger_wake(hinted):
         clear_mode()
+        release_charger_dark()
         if pending:
             clear_pending()
             log("gate clear stale pending")
@@ -427,8 +417,11 @@ def cmd_gate() -> int:
         # stop job it puts on gdm replaces the pending gdm start.
         run(["systemctl", "start", "--no-block", "dagu-offmode-charger.service"])
         return 0
+    # Charger boot, but the cable is already gone or the key is held:
+    # the desktop comes up, so the panel must light.
     clear_mode()
     clear_pending()
+    release_charger_dark()
     return 0
 
 
@@ -441,6 +434,10 @@ def cmd_mark_pending() -> int:
 def start_gnome() -> None:
     clear_mode()
     clear_pending()
+    # Long press boots the desktop: same as a normal boot from here on,
+    # the rest of the system came up with this charger boot.
+    release_charger_dark()
+    set_bl_power(BL_POWER_ON)
     # The charger service conflicts with the desktop until this process
     # exits. Schedule the handoff in its own unit so it still runs.
     run(
@@ -454,8 +451,7 @@ def start_gnome() -> None:
             "systemctl reset-failed gdm.service gdm3.service || true; "
             "systemctl start gdm.service; "
             "systemctl unmask --runtime serial-getty@tty0.service "
-            "getty@tty1.service || true; "
-            "systemctl start dagu-offmode-daemon.service || true",
+            "getty@tty1.service || true",
         ]
     )
 
@@ -470,57 +466,6 @@ def real_poweroff() -> None:
     time.sleep(8)
     os._exit(0)
 
-
-def enter_charger_target() -> None:
-    mark_mode()
-    mark_pending()
-    run(["shutdown", "-c"])
-    rc = run(["systemctl", "start", "--no-block", "dagu-offmode-charger.service"])
-    if rc != 0:
-        os.execv(sys.argv[0], [sys.argv[0], "ui"])
-
-
-def cmd_daemon() -> int:
-    """While the desktop is up, a shutdown with the cable in stays on
-    the battery screen instead of cutting power."""
-    inhibit = subprocess.Popen(
-        [
-            "systemd-inhibit",
-            "--what=shutdown",
-            "--mode=delay",
-            "--who=dagu-offmode",
-            "--why=off-mode charger",
-            "sleep",
-            "infinity",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    log("daemon inhibit delay")
-    try:
-        while True:
-            if MODE_FLAG.is_file():
-                time.sleep(1)
-                continue
-            if SHUTDOWN_SCHED.is_file():
-                mode = parse_shutdown_mode(read_text(SHUTDOWN_SCHED))
-                online = charger_online()
-                action = divert_shutdown(mode, online)
-                log(f"shutdown scheduled mode={mode} charger={online} action={action}")
-                if action == "ui":
-                    if inhibit.poll() is None:
-                        inhibit.terminate()
-                    enter_charger_target()
-                    return 0
-                if inhibit.poll() is None:
-                    inhibit.terminate()
-                return 0
-            time.sleep(0.25)
-    except KeyboardInterrupt:
-        return 0
-    finally:
-        if inhibit.poll() is None:
-            inhibit.terminate()
 
 
 class Surface:
@@ -584,6 +529,32 @@ class Surface:
     def text_width(self, s: str, scale: int = 10) -> int:
         return len(s) * 6 * scale
 
+    def fb_rect(self, lx: int, ly: int, w: int, h: int) -> tuple[int, int, int, int]:
+        """Scanout rectangle (x0, y0, x1, y1 inclusive) of a logical one."""
+        x0, y0 = self.map_xy(lx, ly)
+        x1, y1 = self.map_xy(lx + w - 1, ly + h - 1)
+        return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+    def copy_to(self, dst: "Surface", lx: int = 0, ly: int = 0,
+                w: int | None = None, h: int | None = None) -> None:
+        """Copy a finished region to the scanout, one memmove per row.
+
+        Drawing straight into the scanout let the panel show the cleared
+        and half-drawn states. The frame is built here first; the scanout
+        only ever sees whole rows of the new frame.
+        """
+        if w is None or h is None:
+            n = self.stride * self.h
+            dst.buf[0:n] = memoryview(self.buf)[0:n]
+            return
+        x0, y0, x1, y1 = self.fb_rect(lx, ly, w, h)
+        src = memoryview(self.buf)
+        a = x0 * 4
+        b = (x1 + 1) * 4
+        for y in range(y0, y1 + 1):
+            off = y * self.stride
+            dst.buf[off + a : off + b] = src[off + a : off + b]
+
     def count(self, bgra: bytes) -> int:
         raw = self.buf if isinstance(self.buf, (bytes, bytearray)) else bytes(self.buf)
         n = 0
@@ -599,39 +570,96 @@ def draw_bolt(fb: Surface, cx: int, cy: int, color: bytes, s: int) -> None:
     fb.rect(cx + s, cy, 2 * s, 5 * s, color)
 
 
-def draw_battery(fb: Surface, cap: int, charging: bool, pulse: float = 1.0) -> None:
-    fb.fill(BLACK)
+# Android's charger animates the level while charging; the frame never
+# blanks. A soft light sweeps across the filled part, 30 frames a second,
+# then rests. Only the inside of the battery changes between frames.
+FRAME_SEC = 1.0 / 30.0
+SWEEP_SEC = 1.6
+REST_SEC = 0.7
+
+
+def _blend(a: bytes, b: bytes, k: float) -> bytes:
+    return bytes(int(a[i] + (b[i] - a[i]) * k) for i in range(3)) + b"\x00"
+
+
+def battery_box(fb: Surface) -> tuple[int, int, int, int, int, int, int, int, int]:
     bw, bh = 520, 260
     x = (fb.lw - bw) // 2
     y = (fb.lh - bh) // 2 - 40
     t = 14
+    ix, iy = x + 2 * t, y + 2 * t
+    return x, y, bw, bh, t, ix, iy, bw - 4 * t, bh - 4 * t
+
+
+def fill_color(cap: int) -> bytes:
+    if cap < 0:
+        return GRAY
+    if cap < 15:
+        return RED
+    if cap < 30:
+        return YELLOW
+    return GREEN
+
+
+def sweep_phase(elapsed: float) -> float:
+    """0 → 1 across the sweep, 1 while resting (no highlight shown)."""
+    cyc = elapsed % (SWEEP_SEC + REST_SEC)
+    return min(1.0, cyc / SWEEP_SEC)
+
+
+BOLT_SCALE = 8
+
+
+def fill_shades(cap: int, charging: bool, phase: float, iw: int) -> list[bytes]:
+    """Colour of each column inside the battery, left to right."""
+    frac = 0.0 if cap < 0 else min(1.0, cap / 100.0)
+    fill_w = int(iw * frac)
+    color = fill_color(cap)
+    cols = [color] * fill_w + [BLACK] * (iw - fill_w)
+    if fill_w > 0 and charging and 0 <= cap < 100:
+        band = max(24, iw // 4)
+        ease = 0.5 - 0.5 * math.cos(math.pi * max(0.0, min(1.0, phase)))
+        centre = -band + (fill_w + 2 * band) * ease
+        hi = _blend(color, WHITE, 0.5)
+        shades = [_blend(color, hi, i / 16) for i in range(17)]
+        for cx in range(max(0, int(centre - band)), min(fill_w, int(centre + band) + 1)):
+            d = 1.0 - abs(cx - centre) / band
+            if d > 0.0:
+                cols[cx] = shades[int(16 * d * d * (3.0 - 2.0 * d))]
+    return cols
+
+
+def bolt_columns(fb: Surface) -> range:
+    """Columns inside the battery that the bolt covers."""
+    x, _y, bw, _bh, _t, ix, _iy, _iw, _ih = battery_box(fb)
+    cx = x + bw // 2
+    return range(cx - 2 * BOLT_SCALE - ix, cx + 3 * BOLT_SCALE - ix)
+
+
+def paint_columns(fb: Surface, shades: list[bytes], columns, charging: bool) -> None:
+    x, y, bw, bh, _t, ix, iy, _iw, ih = battery_box(fb)
+    for cx in columns:
+        fb.rect(ix + cx, iy, 1, ih, shades[cx])
+    if charging:
+        draw_bolt(fb, x + bw // 2, y + bh // 2, WHITE, BOLT_SCALE)
+
+
+def draw_fill(fb: Surface, cap: int, charging: bool, phase: float = 1.0) -> None:
+    """Redraw the inside of the battery. Every pixel is written once."""
+    iw = battery_box(fb)[7]
+    paint_columns(fb, fill_shades(cap, charging, phase, iw), range(iw), charging)
+
+
+def draw_battery(fb: Surface, cap: int, charging: bool, phase: float = 1.0) -> None:
+    fb.fill(BLACK)
+    x, y, bw, bh, t, _ix, _iy, _iw, _ih = battery_box(fb)
     nub_w, nub_h = 36, 90
     fb.rect(x, y, bw, t, WHITE)
     fb.rect(x, y + bh - t, bw, t, WHITE)
     fb.rect(x, y, t, bh, WHITE)
     fb.rect(x + bw - t, y, t, bh, WHITE)
     fb.rect(x + bw, y + (bh - nub_h) // 2, nub_w, nub_h, WHITE)
-
-    inner_w = bw - 4 * t
-    inner_h = bh - 4 * t
-    ix, iy = x + 2 * t, y + 2 * t
-    frac = 0.0 if cap < 0 else cap / 100.0
-    if charging and 0 <= cap < 100:
-        frac = frac * (0.25 + 0.75 * max(0.0, min(1.0, pulse)))
-    fill_w = int(inner_w * frac)
-    if cap < 0:
-        color = GRAY
-    elif cap < 15:
-        color = RED
-    elif cap < 30:
-        color = YELLOW
-    else:
-        color = GREEN
-    if fill_w > 0:
-        fb.rect(ix, iy, fill_w, inner_h, color)
-    if charging:
-        draw_bolt(fb, x + bw // 2, y + bh // 2, WHITE, 8)
-
+    draw_fill(fb, cap, charging, phase)
     label = "--%" if cap < 0 else f"{cap}%"
     scale = 14
     tw = fb.text_width(label, scale)
@@ -681,31 +709,45 @@ def write_brightness(value: int) -> None:
         pass
 
 
+def read_bl_power() -> int | None:
+    try:
+        return int(BL_POWER.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def set_bl_power(value: int) -> None:
+    try:
+        BL_POWER.write_text(str(int(value)), encoding="ascii")
+    except OSError:
+        pass
+
+
+def release_charger_dark() -> None:
+    try:
+        CHARGER_DARK.write_text("0", encoding="ascii")
+    except OSError:
+        pass
+
+
 def unblank(saved: int | None) -> None:
     try:
         (FB_SYS / "blank").write_text("0", encoding="ascii")
     except OSError:
         pass
-    try:
-        DPMS.write_text("On", encoding="ascii")
-    except OSError:
-        pass
-    # Floor in the backlight driver is a dim glow, not link-off.
-    # Restoring the level the desktop was using brings the picture back.
     if saved is not None and saved > 0:
         write_brightness(saved)
+    set_bl_power(BL_POWER_ON)
+    release_charger_dark()
 
 
 def blank_panel(fb: Surface | None) -> None:
+    # bl_power off switches the LED boost off (HWEN and the DSI link stay
+    # up), so the asleep screen is dark like Android's, not a dim glow.
+    # Lights first, then clear: clearing a lit panel shows a black frame.
+    set_bl_power(BL_POWER_OFF)
     if fb is not None:
         fb.fill(BLACK)
-    # Do not clear the enable bit or the panel enable GPIO. Brightness 0
-    # is the darkest level that still leaves the link up.
-    write_brightness(0)
-    try:
-        DPMS.write_text("Off", encoding="ascii")
-    except OSError:
-        pass
 
 
 def quiet_console() -> None:
@@ -738,8 +780,15 @@ def quiet_console() -> None:
             os.close(fd)
 
 
-def own_panel() -> None:
-    quiet_console()
+def hold_consoles() -> None:
+    """Keep GDM and the text logins off the panel for this charger boot.
+
+    Each `systemctl mask --runtime` is a daemon reload (about a second
+    each at boot), so this runs after the battery is already on screen.
+    GDM never started: the gate queued this unit, whose Conflicts= on
+    GDM replaced GDM's start job. Stopping it again is only a guard.
+    """
+    run(["systemctl", "stop", "--no-block", "gdm.service", "gdm3.service"])
     run(["systemctl", "stop", "serial-getty@tty0.service", "getty@tty1.service"])
     run(
         [
@@ -854,12 +903,12 @@ def cmd_preview(seconds: float, blank_after: float) -> int:
             if not blanked and time.monotonic() >= show_until:
                 blank_panel(fb)
                 blanked = True
-                blank_level = read_brightness()
-                log(f"preview blank brightness={blank_level}")
+                blank_level = read_bl_power()
+                log(f"preview blank bl_power={blank_level}")
             time.sleep(0.2)
         if not blanked:
             blank_panel(fb)
-            blank_level = read_brightness()
+            blank_level = read_bl_power()
     finally:
         unblank(saved)
         try:
@@ -874,21 +923,17 @@ def cmd_preview(seconds: float, blank_after: float) -> int:
     if green_before_blank < 1000:
         log("preview frame has too little fill")
         return 1
-    if blank_level not in (0, None) and blank_level > 32:
-        log("preview blank did not drop the backlight")
+    if blank_level != BL_POWER_OFF:
+        log("preview blank did not power the backlight down")
         return 1
     return 0
 
 
 def cmd_ui() -> int:
     mark_mode()
-    # Unbind the console before the desktop lets go of the panel, or the
-    # kernel log paints the instant the desktop stops.
-    own_panel()
-    run(["systemctl", "stop", "gdm.service"])
-    run(["systemctl", "stop", "gdm3.service"])
-    own_panel()
-    time.sleep(0.2)
+    # Only a charger boot gets here. The kernel log is on fb0 but the
+    # panel is dark (charger_dark): take the console, draw, then light.
+    quiet_console()
     saved = read_brightness()
     if saved is None or saved <= 0:
         saved = 800
@@ -898,28 +943,62 @@ def cmd_ui() -> int:
         log(f"fb open failed: {err}; start desktop")
         start_gnome()
         return 1
-    unblank(saved)
+    # Light the LEDs only once the battery is on fb0 (show_battery), or
+    # the kernel log left on the console flashes first.
     enable_wakeup()
     inhibit = start_inhibit()
     pfd = open_pwrkey()
     log(f"ui fb={fb.w}x{fb.h} rotate={ROTATE} pwrkey_fd={pfd} bl={saved}")
 
+    # Frames are built in `back` and copied to the scanout. Drawing into
+    # the scanout itself cleared the whole panel to black and redrew it
+    # every 0.35 s: the panel showed those half-drawn frames as flicker.
+    back = Surface(bytearray(fb.stride * fb.h), fb.w, fb.h, fb.stride)
+    _x, _y, _bw, _bh, _t, ix, iy, iw, ih = battery_box(back)
+    bolt = set(bolt_columns(back))
+    prev_shades: list[bytes] = []
+
     down_at: float | None = None
     visible_until = time.monotonic() + SCREEN_ON_SEC
-    last_draw = 0.0
     blanked = False
     offline_since: float | None = None
-    t0 = time.monotonic()
+    shown: tuple[int, bool] | None = None
+    sweep_t0 = time.monotonic()
+    next_frame = 0.0
+    next_poll = 0.0
+    cap, charging = -1, False
 
-    def pulse() -> float:
-        return 0.5 + 0.5 * math.sin((time.monotonic() - t0) * 2.2)
+    def read_state() -> tuple[int, bool]:
+        c = battery_capacity()
+        return c, battery_status().lower() == "charging" and c < 100
+
+    def present_full() -> None:
+        nonlocal shown, prev_shades
+        phase = sweep_phase(time.monotonic() - sweep_t0)
+        draw_battery(back, cap, charging, phase)
+        back.copy_to(fb)
+        shown = (cap, charging)
+        prev_shades = fill_shades(cap, charging, phase, iw)
+
+    def present_sweep(now: float) -> None:
+        # Only the columns under the moving light change, so only those
+        # scanout rows are written. Resting between sweeps costs nothing.
+        nonlocal prev_shades
+        shades = fill_shades(cap, charging, sweep_phase(now - sweep_t0), iw)
+        changed = [i for i in range(iw) if shades[i] != prev_shades[i]]
+        if not changed:
+            return
+        over_bolt = charging and not bolt.isdisjoint(changed)
+        paint_columns(back, shades, changed, over_bolt)
+        for i in sorted(set(changed) | (bolt if over_bolt else set())):
+            back.copy_to(fb, ix + i, iy, 1, ih)
+        prev_shades = shades
 
     def show_battery() -> None:
-        nonlocal blanked, visible_until
-        cap = battery_capacity()
-        st = battery_status().lower()
-        charging = st == "charging" and cap < 100
-        draw_battery(fb, cap, charging, pulse() if charging else 1.0)
+        nonlocal blanked, visible_until, sweep_t0, cap, charging
+        cap, charging = read_state()
+        sweep_t0 = time.monotonic()
+        present_full()
         unblank(saved)
         blanked = False
         visible_until = time.monotonic() + SCREEN_ON_SEC
@@ -936,27 +1015,39 @@ def cmd_ui() -> int:
         return 0
 
     show_battery()
+    log("battery on screen")
+    threading.Thread(target=hold_consoles, daemon=True).start()
     try:
         while True:
             now = time.monotonic()
-            quiet_console()
-            online = vbus_present()
-            if online is False:
-                if offline_since is None:
-                    offline_since = now
-                    log("charger offline, debounce")
-                elif now - offline_since >= UNPLUG_SEC:
-                    return finish_poweroff()
-            else:
-                offline_since = None
+            if now >= next_poll:
+                next_poll = now + 1.0
+                online = vbus_present()
+                if online is False:
+                    if offline_since is None:
+                        offline_since = now
+                        log("charger offline, debounce")
+                    elif now - offline_since >= UNPLUG_SEC:
+                        return finish_poweroff()
+                else:
+                    offline_since = None
+                if not blanked:
+                    cap, charging = read_state()
 
-            evs: list[int] = []
+            # Sleep until the next frame (or a key). Asleep: wait for keys.
+            if blanked:
+                timeout = max(0.0, next_poll - now)
+            else:
+                timeout = max(0.0, next_frame - now)
+            if down_at is not None:
+                timeout = min(timeout, max(0.0, down_at + LONG_PRESS - now))
             if pfd is not None:
-                evs, _, _ = select.select([pfd], [], [], 0.2)
+                evs, _, _ = select.select([pfd], [], [], timeout)
             else:
-                time.sleep(0.2)
+                time.sleep(timeout)
+                evs = []
 
-            if pfd is not None and evs:
+            if evs:
                 while True:
                     try:
                         data = os.read(pfd, EV_SIZE)
@@ -977,29 +1068,26 @@ def cmd_ui() -> int:
                         if held >= LONG_PRESS:
                             return finish_gnome()
                         log("short power, show battery")
-                        show_battery()
-
-            if down_at is not None and time.monotonic() - down_at >= LONG_PRESS:
-                return finish_gnome()
+                        visible_until = time.monotonic() + SCREEN_ON_SEC
 
             now = time.monotonic()
-            if now < visible_until:
-                if blanked:
-                    unblank(saved)
-                    blanked = False
-                if now - last_draw >= 0.35:
-                    cap = battery_capacity()
-                    st = battery_status().lower()
-                    charging = st == "charging" and cap < 100
-                    draw_battery(fb, cap, charging, pulse() if charging else 1.0)
-                    last_draw = now
-                continue
+            if down_at is not None and now - down_at >= LONG_PRESS:
+                return finish_gnome()
 
-            if not blanked:
+            if blanked:
+                continue
+            if now >= visible_until:
                 log("idle, blank panel")
                 blank_panel(fb)
                 blanked = True
-            enable_wakeup()
+                enable_wakeup()
+                continue
+            if now >= next_frame:
+                next_frame = now + FRAME_SEC
+                if shown != (cap, charging):
+                    present_full()
+                elif charging:
+                    present_sweep(now)
     except KeyboardInterrupt:
         return 0
     finally:
@@ -1048,7 +1136,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "mode",
         nargs="?",
-        choices=("gate", "ui", "daemon", "mark-pending", "status", "render", "preview"),
+        choices=("gate", "ui", "mark-pending", "status", "render", "preview"),
         default="status",
     )
     ap.add_argument("--capacity", type=int, default=67)
@@ -1061,8 +1149,6 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_gate()
     if args.mode == "ui":
         return cmd_ui()
-    if args.mode == "daemon":
-        return cmd_daemon()
     if args.mode == "mark-pending":
         return cmd_mark_pending()
     if args.mode == "render":

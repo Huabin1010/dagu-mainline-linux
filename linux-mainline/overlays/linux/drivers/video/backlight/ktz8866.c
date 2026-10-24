@@ -20,6 +20,7 @@
 #include <linux/regmap.h>
 
 int ktz8866_set_brightness(struct i2c_client *client, unsigned int brightness);
+int ktz8866_led_off(struct i2c_client *client);
 
 #define DEFAULT_BRIGHTNESS 1500
 #define MAX_BRIGHTNESS 2047
@@ -114,7 +115,9 @@ static int ktz8866_apply(struct ktz8866 *ktz, unsigned int brightness)
 	if (brightness < KTZ_MIN_BRIGHTNESS)
 		brightness = KTZ_MIN_BRIGHTNESS;
 
-	/* Never drop HWEN or BL_EN: slider 0 stays a readable glow. */
+	/* Never drop HWEN. Slider 0 stays a readable glow; only a blanked
+	 * panel uses ktz8866_led_off().
+	 */
 	if (!ktz->led_on) {
 		ktz8866_update_bits(ktz, BL_EN, BL_EN_BIT, BL_EN_BIT);
 		ktz->led_on = true;
@@ -137,6 +140,27 @@ int ktz8866_set_brightness(struct i2c_client *client, unsigned int brightness)
 	return ktz8866_apply(ktz, brightness);
 }
 EXPORT_SYMBOL_GPL(ktz8866_set_brightness);
+
+/*
+ * Switch the LED boost off without touching HWEN. HWEN low resets the
+ * chip, and the LCD bias it also supplies; BL_EN only gates the LED
+ * strings. The next ktz8866_set_brightness() turns BL_EN back on.
+ * The brightness floor of 32 is for a user slider at 0; a blanked
+ * panel (DPMS off, panel re-init, charger screen asleep) must be dark.
+ */
+int ktz8866_led_off(struct i2c_client *client)
+{
+	struct ktz8866 *ktz;
+
+	if (!client)
+		return -ENODEV;
+	ktz = i2c_get_clientdata(client);
+	if (!ktz)
+		return -ENODEV;
+	ktz->led_on = false;
+	return ktz8866_update_bits(ktz, BL_EN, BL_EN_BIT, 0);
+}
+EXPORT_SYMBOL_GPL(ktz8866_led_off);
 
 static int ktz8866_backlight_update_status(struct backlight_device *backlight_dev)
 {

@@ -1684,9 +1684,6 @@ HandleLidSwitchExternalPower=suspend
 HandleLidSwitchDocked=suspend
 LidSwitchIgnoreInhibited=yes
 HoldoffTimeoutSec=2s
-# Let the off-mode charger cancel a shutdown while the cable is in,
-# instead of cutting power out from under that screen.
-InhibitDelayMaxSec=20s
 IdleAction=ignore
 EOF
 systemctl unmask sleep.target suspend.target >/dev/null 2>&1 || true
@@ -1747,21 +1744,13 @@ StandardError=journal
 Restart=on-failure
 RestartSec=1
 EOF
-	cat >/etc/systemd/system/dagu-offmode-daemon.service <<'EOF'
-[Unit]
-Description=dagu off-mode charger: stay on the battery when shutting down with the cable in
-After=multi-user.target
-ConditionPathExists=!/run/dagu-charger-mode
-
-[Service]
-Type=simple
-ExecStart=/usr/local/sbin/dagu-offmode-charger daemon
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
+	# Power-off is a real power-off, as on Android: with the cable in,
+	# the PMIC boots straight back and ABL passes androidboot.mode=charger.
+	# The old daemon held a shutdown delay inhibitor it never released, so
+	# every power-off waited 20 s and GDM respawned the greeter meanwhile.
+	systemctl disable dagu-offmode-daemon.service >/dev/null 2>&1 || true
+	rm -f /etc/systemd/system/dagu-offmode-daemon.service \
+		/etc/systemd/system/multi-user.target.wants/dagu-offmode-daemon.service
 	cat >/etc/systemd/system/dagu-offmode-pending.service <<'EOF'
 [Unit]
 Description=dagu: remember a power-off so a later cable wake can show the battery
@@ -1787,8 +1776,6 @@ EOF
 	# next to graphical.target, systemd dropped the gdm start job on
 	# every boot, so the gate starts it only for a charger wake.
 	rm -f /etc/systemd/system/multi-user.target.wants/dagu-offmode-charger.service
-	ln -sfn /etc/systemd/system/dagu-offmode-daemon.service \
-		/etc/systemd/system/multi-user.target.wants/dagu-offmode-daemon.service
 	ln -sfn /etc/systemd/system/dagu-offmode-pending.service \
 		/etc/systemd/system/poweroff.target.wants/dagu-offmode-pending.service
 fi
@@ -3507,6 +3494,12 @@ cat >/usr/local/sbin/dagu-shutdown-display <<'EOF'
 # drops DRM master. ignore_loglevel + console=tty0 would otherwise keep
 # reprinting the same kernel log block until the PMIC finally cuts power.
 set -eu
+# Dark at once, as Android goes dark after "Power off": nothing of the
+# greeter or the console shows while the desktop stops. bl_power off
+# switches the LED boost off; HWEN and the panel link stay up.
+for p in /sys/class/backlight/*/bl_power; do
+	echo 4 >"$p" 2>/dev/null || true
+done
 echo 1 >/proc/sys/kernel/printk 2>/dev/null || true
 for bind in /sys/class/vtconsole/vtcon*/bind; do
 	[ -w "$bind" ] || continue

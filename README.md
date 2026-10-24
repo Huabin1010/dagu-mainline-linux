@@ -16,7 +16,7 @@ This tree builds Linux 7.0 + an Ubuntu arm64 desktop, then flashes them onto the
 | P5 | QCA6390 Wi-Fi (ath11k) | Done |
 | P6 | Adreno 650 / Turnip + GNOME | Done |
 | P7 | CS35L41 speakers + WCD9385 mics | Done |
-| P8 | Venus 4K60 + front/rear cameras | Done (preview path) |
+| P8 | Venus 4K60 + front/rear cameras | Done (IFE hardware path) |
 
 Hardware notes and the full bring-up record live under [`linux-mainline/docs/`](linux-mainline/docs/dagu-adaptation-status.md). The board status table is [`linux-mainline/docs/dagu-adaptation-status.md`](linux-mainline/docs/dagu-adaptation-status.md). The end-to-end adaptation record and lessons learned (Chinese) are in [`linux-mainline/docs/dagu-mainline-adaptation-handbook.md`](linux-mainline/docs/dagu-mainline-adaptation-handbook.md).
 
@@ -24,16 +24,20 @@ An unfinished Windows-on-ARM / edk2-msm port lives under [`port/dagu/`](port/dag
 
 **Flash tutorial:** [English](docs/flash-guide.md) · [简体中文](docs/zh-CN/flash-guide.md)
 **Rootfs / desktop image:** [English](docs/rootfs-guide.md) · [简体中文](docs/zh-CN/rootfs-guide.md)
-**Latest images:** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases) (`v0.1.4`)
+**Latest images:** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases) (`v0.1.5`)
 
-## Recent updates (`v0.1.4`)
+## Recent updates (`v0.1.5`)
 
-Since `v0.1.3` (22 Oct 2026):
+Since `v0.1.4` (22 Oct 2026). Kernel `#630`.
 
-- **9 V charge after Xiaomi authentication:** Unstructured vendor messages (SVID `0x2717`) run on the 5 V contract. On this bank the programmable object then advertises 6 A. The request stays at 9.000 V and does not walk upward. Kernel `#579`.
-- **Buck fallback:** If the charge pumps clear their own enable, the policy leaves the programmable contract and charges through PM8150B at fixed 9 V / 3 A. Live result about 18 W on the bank, pack current under the 3 A fast-charge cap, float voltage 4.48 V. The 67 W nameplate is not reached.
+- **Cameras on the hardware ISP:** Both cameras stream through the Titan 480 IFE1 pixel path as linear NV12, with auto exposure and auto white balance in the producer. SoftISP is only the fallback. 30 fps, about 23% of one core.
+- **Front camera keeps streaming:** The blocks the driver used as display crop and clamp are the face-detection branch. With no write master behind it, it stalled the pipeline after one frame. It stays off now.
+- **Off-mode charging like Android:** Power off with the cable in is a real power-off. The screen goes dark at once, the tablet powers back up into the battery screen, and a long press boots the desktop. Before, a shutdown inhibitor held logind for 20 s and GDM brought the greeter back first.
+- **Smooth charger animation:** Frames are built off-screen and only the changed columns reach the scanout, at 30 fps. The screen no longer flickers. About 9% of one core.
+- **Boot and blank:** The backlight stays off while the panel is reset and comes on after the first frame, so the white flash at boot is gone. A charger boot keeps the kernel log off the panel. Blanked screens are dark instead of a dim glow.
+- **Docs:** [`linux-mainline/docs/dagu-mainline-adaptation-handbook.md`](linux-mainline/docs/dagu-mainline-adaptation-handbook.md), the full adaptation record and lessons (Chinese).
 
-Prebuilt login is unchanged: `dagu` / `dagu` (change it on first boot). Only flash **slot B**. Desktop userdata from `v0.1.2` is unchanged.
+Prebuilt login is unchanged: `dagu` / `dagu` (change it on first boot). Only flash **slot B**. Existing userdata stays: install `dagu-userspace-v0.1.5.tar.gz` from the release on the tablet (`sudo ./install.sh`). Without it the new kernel still boots, but cameras stay on SoftISP and a charger boot stays dark for 60 s.
 
 ## Quick start
 

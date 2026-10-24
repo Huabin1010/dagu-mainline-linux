@@ -19,10 +19,13 @@
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/i2c.h>
+#include <linux/init.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
 #include <linux/regulator/consumer.h>
+#include <linux/workqueue.h>
 
 #include <drm/display/drm_dsc.h>
 #include <drm/display/drm_dsc_helper.h>
@@ -54,7 +57,43 @@ struct dagu_l81a {
 	bool dsc_enabled;
 	int power_mode_rc;
 	u8 power_mode;
+	/* LEDs held off from the first reset until video has settled. */
+	bool bl_settling;
+	struct delayed_work bl_settle_work;
+	struct delayed_work charger_dark_work;
 };
+
+/*
+ * The first prepare() resets the Himax and replays the CAF init while
+ * ABL's backlight is still on. Between reset and the first DSC frame the
+ * TDDI drives whatever is in its line buffers: a white, noisy flash.
+ * Android never shows it because the backlight comes on only after the
+ * first frame. Wait a few 120 Hz frames after video starts.
+ */
+#define L81A_BL_SETTLE_MS	100
+
+/*
+ * ABL boots the kernel with androidboot.mode=charger when a cable wakes
+ * the tablet from power-off. Android shows nothing until the charger
+ * draws the battery. Keep the LEDs off through the kernel log until the
+ * charger screen (or the desktop) clears charger_dark. If userspace
+ * never does, light up after 60 s so a broken boot is still readable.
+ */
+#define L81A_CHARGER_DARK_MAX_MS	60000
+
+static bool l81a_charger_boot;
+static bool l81a_charger_dark;
+static struct dagu_l81a *l81a_ctx;
+
+#ifndef MODULE
+static int __init l81a_boot_mode(char *mode)
+{
+	l81a_charger_boot = mode && !strcmp(mode, "charger");
+	/* Leave the token in /proc/cmdline for the userspace gate. */
+	return 0;
+}
+__setup("androidboot.mode=", l81a_boot_mode);
+#endif
 
 #define L81A_CMD(_wait, ...) \
 	{ .wait_ms = (_wait), .len = sizeof((u8[]){ __VA_ARGS__ }), \
@@ -183,12 +222,25 @@ static void l81a_hwen_on(struct dagu_l81a *ctx)
 }
 
 int ktz8866_set_brightness(struct i2c_client *client, unsigned int brightness);
+int ktz8866_led_off(struct i2c_client *client);
 
 static int l81a_backlight_update(struct backlight_device *bl)
 {
 	struct dagu_l81a *ctx = bl_get_data(bl);
 	int brightness = backlight_get_brightness(bl);
 	unsigned int hw;
+
+	/*
+	 * Blank means dark: DPMS off (drm_panel_disable), bl_power, the
+	 * first panel reset and the charger boot. The 32 floor below is
+	 * only for a lit panel with the slider at 0.
+	 */
+	if (backlight_is_blank(bl) || ctx->bl_settling ||
+	    READ_ONCE(l81a_charger_dark)) {
+		ktz8866_led_off(ctx->ktz[0]);
+		ktz8866_led_off(ctx->ktz[1]);
+		return 0;
+	}
 
 	/*
 	 * Quadratic map: GNOME's linear 0–2047 still looks bright at
@@ -205,6 +257,65 @@ static int l81a_backlight_update(struct backlight_device *bl)
 static const struct backlight_ops l81a_backlight_ops = {
 	.update_status = l81a_backlight_update,
 };
+
+static void l81a_bl_refresh(struct dagu_l81a *ctx)
+{
+	if (ctx->panel.backlight)
+		backlight_update_status(ctx->panel.backlight);
+}
+
+static void l81a_bl_settle_workfn(struct work_struct *work)
+{
+	struct dagu_l81a *ctx = container_of(to_delayed_work(work),
+					     struct dagu_l81a, bl_settle_work);
+
+	ctx->bl_settling = false;
+	l81a_bl_refresh(ctx);
+}
+
+static void l81a_charger_dark_release(void)
+{
+	if (!xchg(&l81a_charger_dark, false))
+		return;
+	if (l81a_ctx) {
+		cancel_delayed_work(&l81a_ctx->charger_dark_work);
+		l81a_bl_refresh(l81a_ctx);
+	}
+}
+
+static void l81a_charger_dark_workfn(struct work_struct *work)
+{
+	struct dagu_l81a *ctx = container_of(to_delayed_work(work),
+					     struct dagu_l81a, charger_dark_work);
+
+	if (xchg(&l81a_charger_dark, false)) {
+		dev_warn(ctx->panel.dev,
+			 "charger boot: no screen claimed the panel, lighting it\n");
+		l81a_bl_refresh(ctx);
+	}
+}
+
+/* echo 0 > /sys/module/panel_xiaomi_dagu_l81a/parameters/charger_dark */
+static int l81a_charger_dark_set(const char *val, const struct kernel_param *kp)
+{
+	bool on;
+	int ret = kstrtobool(val, &on);
+
+	if (ret)
+		return ret;
+	if (on)
+		return -EINVAL;	/* only the kernel arms it, at a charger boot */
+	l81a_charger_dark_release();
+	return 0;
+}
+
+static const struct kernel_param_ops l81a_charger_dark_ops = {
+	.set = l81a_charger_dark_set,
+	.get = param_get_bool,
+};
+module_param_cb(charger_dark, &l81a_charger_dark_ops, &l81a_charger_dark, 0644);
+MODULE_PARM_DESC(charger_dark,
+		 "Y while a charger boot keeps the LEDs off; write 0 to light the panel");
 
 static void l81a_reset(struct dagu_l81a *ctx)
 {
@@ -303,6 +414,10 @@ static int l81a_prepare(struct drm_panel *panel)
 	if (ctx->prepared)
 		return 0;
 
+	/* Dark before the reset; l81a_enable() lights it after video. */
+	ctx->bl_settling = true;
+	l81a_bl_refresh(ctx);
+
 	/* CAF supply order: vddio, enp, enn. TDDI then raises TP RST. */
 	ret = l81a_enable_one(ctx->vddio, "vddio", dev);
 	if (ret)
@@ -385,6 +500,9 @@ err_enp:
 	l81a_disable_one(ctx->enp);
 err_vddio:
 	l81a_disable_one(ctx->vddio);
+	/* No enable() will follow; do not leave the LEDs held off. */
+	ctx->bl_settling = false;
+	l81a_bl_refresh(ctx);
 	return ret;
 }
 
@@ -404,6 +522,14 @@ static int l81a_enable(struct drm_panel *panel)
 	 * the video link.
 	 */
 	l81a_hwen_on(ctx);
+	/*
+	 * Video is running now (msm_dsi_host_enable ran in the bridge
+	 * before us). drm_panel_enable() calls backlight_enable() right
+	 * after this; bl_settling keeps that dark until DSC has locked.
+	 */
+	if (ctx->bl_settling)
+		schedule_delayed_work(&ctx->bl_settle_work,
+				      msecs_to_jiffies(L81A_BL_SETTLE_MS));
 	return 0;
 }
 
@@ -580,6 +706,12 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 
 	l81a_init_dsc(ctx);
 
+	INIT_DELAYED_WORK(&ctx->bl_settle_work, l81a_bl_settle_workfn);
+	INIT_DELAYED_WORK(&ctx->charger_dark_work, l81a_charger_dark_workfn);
+	/* Before the backlight registers, so its first update stays dark. */
+	if (l81a_charger_boot)
+		WRITE_ONCE(l81a_charger_dark, true);
+
 	drm_panel_init(&ctx->panel, dev, &l81a_funcs, DRM_MODE_CONNECTOR_DSI);
 	ctx->panel.prepare_prev_first = true;
 
@@ -641,6 +773,14 @@ static int l81a_probe(struct mipi_dsi_device *dsi)
 			return dev_err_probe(dev, ret, "attach DSI%d\n", i);
 	}
 
+	/* Probe can no longer defer; ctx lives until remove(). */
+	l81a_ctx = ctx;
+	if (READ_ONCE(l81a_charger_dark)) {
+		schedule_delayed_work(&ctx->charger_dark_work,
+				      msecs_to_jiffies(L81A_CHARGER_DARK_MAX_MS));
+		dev_info(dev, "charger boot: LEDs off until the battery screen\n");
+	}
+
 	return 0;
 }
 
@@ -648,6 +788,9 @@ static void l81a_remove(struct mipi_dsi_device *dsi)
 {
 	struct dagu_l81a *ctx = mipi_dsi_get_drvdata(dsi);
 
+	l81a_ctx = NULL;
+	cancel_delayed_work_sync(&ctx->bl_settle_work);
+	cancel_delayed_work_sync(&ctx->charger_dark_work);
 	if (ctx->ktz[0])
 		put_device(&ctx->ktz[0]->dev);
 	if (ctx->ktz[1])

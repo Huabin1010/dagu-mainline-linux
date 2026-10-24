@@ -22,6 +22,9 @@ mkdir -p "$STAGE/files/usr/local/sbin" "$STAGE/files/etc/systemd/logind.conf.d" 
 
 install -m755 "$ROOT/scripts/dagu_offmode_charger.py" "$STAGE/files/usr/local/sbin/dagu-offmode-charger"
 install -m755 "$CAM" "$STAGE/files/usr/local/sbin/dagu-camera-loopback"
+install -m755 "$ROOT/scripts/dagu_boot_success.py" "$STAGE/files/usr/local/sbin/dagu-boot-success"
+install -m644 "$ROOT/systemd/dagu-boot-success.service" \
+	"$STAGE/files/etc/systemd/system/dagu-boot-success.service"
 install -m644 "$ROOT/systemd/logind-dagu-power.conf" "$STAGE/files/etc/systemd/logind.conf.d/dagu-power.conf"
 install -m644 "$ROOT/systemd/dagu-camera-loopback-watch.service" \
 	"$STAGE/files/etc/systemd/system/dagu-camera-loopback-watch.service"
@@ -48,6 +51,9 @@ systemctl disable --now dagu-offmode-daemon.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/dagu-offmode-daemon.service \
 	/etc/systemd/system/multi-user.target.wants/dagu-offmode-daemon.service
 systemctl daemon-reload
+# Mark the booted A/B slot successful on every boot. Without it ABL's
+# retry counter (7 per set_active) runs out and the tablet stops in fastboot.
+systemctl enable --now dagu-boot-success.service
 systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind
 systemctl restart dagu-camera-loopback-watch.service
 echo "installed; reboot once so the new kernel and these files meet"

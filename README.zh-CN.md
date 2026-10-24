@@ -78,6 +78,7 @@ ROOT_PASSWORD=... ./linux-mainline/scripts/build-rootfs-desktop.sh
 - **不要用 Google `fastboot` 37**（AMD 主机上会卡在 `USBDEVFS_REAPURB`）。刷写走 `linux-mainline/scripts/fb-usb.py` / `flash-boot.sh`。
 - 空 DTBO（`dt_entry_count=0`）约 6 秒回 fastboot，不要刷。
 - userdata 已是 Ubuntu 后，**不要** `fastboot reboot` 进当前槽的原厂安卓 `boot`。用仓内脚本。
+- 每次 `set_active`（`flash-b` 也会做）都把 B 槽重置成 7 次重试、`slot-successful:b: no`。没有标记成功的话，每次开机（包括关机充电唤醒）扣一次，第 8 次 ABL 把 B 标成 unbootable 并停在 fastboot。`dagu-boot-success.service` 每次开机都会标记成功，必须保持 enabled。卡在 fastboot 且 `slot-unbootable:b: yes` 时：`python3 linux-mainline/scripts/fb-usb.py set-active b`，再 `timeout 3 python3 linux-mainline/scripts/fb-usb.py reboot`。
 - 救砖：音量下 + 电源进 fastboot，或 9008 EDL 刷官方 `flash_all`（**不要 lock**）。见 [EDL 流程](docs/dagu-edl-recovery-full-playbook.md)。
 
 登录：USB ACM `ttyACM0`，或 USB RNDIS SSH（`root@192.168.7.2`）/ 平板 Wi-Fi 地址。**预构建**桌面账号是 `dagu` / `dagu`。本机编镜像：导出 `ROOT_PASSWORD`，或写到已忽略的 `linux-mainline/out/root-password`。

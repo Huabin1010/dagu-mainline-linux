@@ -71,6 +71,15 @@ install -m 755 "$ROOT/scripts/dagu_offmode_charger.py" \
 	"$ROOTFS/tmp/dagu-offmode-charger.py"
 install -m 755 "$ROOT/scripts/dagu_offmode_charger.py" \
 	"$ROOTFS/usr/local/sbin/dagu-offmode-charger"
+# ABL counts down 7 retries per set_active unless the slot is marked
+# booted; without this the 8th boot lands in fastboot (slot unbootable).
+install -m 755 "$ROOT/scripts/dagu_boot_success.py" \
+	"$ROOTFS/usr/local/sbin/dagu-boot-success"
+install -m 644 "$ROOT/systemd/dagu-boot-success.service" \
+	"$ROOTFS/etc/systemd/system/dagu-boot-success.service"
+mkdir -p "$ROOTFS/etc/systemd/system/multi-user.target.wants"
+ln -sfn /etc/systemd/system/dagu-boot-success.service \
+	"$ROOTFS/etc/systemd/system/multi-user.target.wants/dagu-boot-success.service"
 install -m 755 "$ROOT/scripts/dagu-folio-repeat-verify.py" \
 	"$ROOTFS/usr/local/sbin/dagu-folio-repeat-verify.py"
 install -m 755 "$ROOT/scripts/dagu-mutter-repeat-keep.sh" \

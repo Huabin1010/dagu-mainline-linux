@@ -1,0 +1,18 @@
+[Unit]
+Description=dagu: mark this A/B slot booted so ABL stops counting retries
+# Without this, every boot after set_active burns one of 7 retries and
+# the 8th lands in fastboot with slot-unbootable=yes. Ordered on
+# boot-complete.target (kernel up, rootfs mounted, sysinit done), not on
+# multi-user.target, which can wait 90 s on an unrelated device job.
+# The by-partlabel links come from udev; at ~8 s they can still be
+# missing, so wait for both boot partitions' device units.
+Requires=boot-complete.target
+Wants=dev-disk-by\x2dpartlabel-boot_a.device dev-disk-by\x2dpartlabel-boot_b.device
+After=boot-complete.target local-fs.target
+After=dev-disk-by\x2dpartlabel-boot_a.device dev-disk-by\x2dpartlabel-boot_b.device
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-boot-success mark
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

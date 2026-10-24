@@ -78,6 +78,7 @@ Kernel sources (`linux-mainline/linux/`) and build outputs (`linux-mainline/out/
 - **Do not use Google `fastboot` 37** on AMD hosts (it can stall in `USBDEVFS_REAPURB`). Flash with `linux-mainline/scripts/fb-usb.py` / `flash-boot.sh`.
 - Empty DTBO (`dt_entry_count=0`) returns to fastboot in ~6 s. Do not flash it.
 - After userdata is Ubuntu, **do not** `fastboot reboot` into the stock Android `boot` of the current slot. Use the in-tree boot/flash scripts.
+- Every `set_active` (`flash-b` does one) resets slot B to 7 retries and `slot-successful:b: no`. Until the slot is marked successful, each boot (charger wakes included) costs one retry, and on the 8th ABL marks B unbootable and stops in fastboot. `dagu-boot-success.service` marks it on every boot and must stay enabled. If the tablet is stuck in fastboot with `slot-unbootable:b: yes`: `python3 linux-mainline/scripts/fb-usb.py set-active b`, then `timeout 3 python3 linux-mainline/scripts/fb-usb.py reboot`.
 - Brick recovery: volume-down + power → fastboot, or EDL 9008 with the official `flash_all` (**do not relock**). See [EDL playbook](docs/dagu-edl-recovery-full-playbook.md).
 
 Login: USB ACM `ttyACM0`, or SSH over USB RNDIS (`root@192.168.7.2`) / the tablet's Wi-Fi address. The **prebuilt** desktop uses `dagu` / `dagu`. Local builds: export `ROOT_PASSWORD` or write `linux-mainline/out/root-password` (gitignored).

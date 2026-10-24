@@ -1,5 +1,7 @@
 # dagu：相机两路与 IFE 卡死点
 
+> **2026-10-24 更新（内核 `#629`）：** 前后摄像头的桌面预览已经改走 IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）硬件 NV12（NV12 semi-planar 4:2:0，亮度平面加交织色度平面的 4:2:0 格式），不再用 SoftISP（Software Image Signal Processor，软件图像信号处理器），后者只作退路。现状见 `dagu-ife-disp-pipeline.md`。下面是历史记录。
+
 对照 **`#437`**（2026-09-18 15:54 CST；前置 `#420` 活 Demux `0x3058` 仍 0 字节）。后置 **CLC（Camera Logic Core，相机逻辑核）门已过**（`#360` / `#365`）。**2026-09-19 15:18 复测**：`dagu-ife-pix-test.sh` 硬写 `SGBRG10` 而 `s5kjn1` 第一表是 `SGRBG10`，`media_pipeline_start` 回 **EPIPE（Broken pipe，管道破裂）-32**、0 字节，不是 `#365` 硅回退。对齐传感器 pad 后再跑：`/tmp/pix.nv12` **9331200 = 3×3110400**，`r0114=0x300`，`viol=0`。本刀把前置 imx596 接到同一条 **IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）**：**CSIPHY4（CSI Physical Layer，CSI 物理层）→ CSID1（CSI Decoder，CSI 解码器）IPP → IFE1 CAMIF（Camera Interface，相机接口）→ CLC（Camera Logic Core，相机逻辑核）→ WM（Write Master，AXI 写通道）4/5 线性 NV12**。桌面仍走 RDI（Raw Dump Interface，原始旁路出口）SoftISP（Software Image Signal Processor，软件图像信号处理器）。前置还要过的门：`dagu-front-camera-pipeline-status.md`。前置卡死细账：`dagu-ife-front-pipeline-status.md`。细账：`dagu-ife-pix-nv12-attempts.md`。
 
 图例：绿 = 板上已证明 · 蓝 = 正在飞的软预览 · 黄 = 寄存器粘住、像素没证明穿过 · 红 = 卡死 · 灰 = 本阶段不做。

@@ -1,5 +1,7 @@
 # dagu：前置 imx596 还要走的流水线
 
+> **2026-10-24 更新（内核 `#629`）：** 前置 imx596 已经走通 IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）硬件 NV12（NV12 semi-planar 4:2:0，亮度平面加交织色度平面的 4:2:0 格式），桌面预览不再用 SoftISP（Software Image Signal Processor，软件图像信号处理器），后者只作退路。现状见 `dagu-ife-disp-pipeline.md`。下面是历史记录。
+
 对照 **`#449`**（2026-09-19 00:11 CST）。`#431` 第一表 `0x6070` **仍 0 字节** `img=0xc0`。后置 s5kjn1 **IFE（Image Front End，图像前端）PIX（Pixel path，像素通路）门已过**（`#360` / `#365`）。本文件只画 **前置还没走完的门**，按顺序，缺一不准跳。
 
 卡死细账（已刷刀、证伪清单）：`dagu-ife-front-pipeline-status.md`。后置总图：`dagu-ife-pipeline-status.md`。总表：`dagu-adaptation-status.md`。飞行规则：`.cursor/rules/dagu-camera-front.mdc`。

@@ -67,6 +67,10 @@ rm -rf "$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback"
 cp -a "$ROOT/userspace" "$ROOTFS/tmp/dagu-userspace"
 cp -a "$ROOT/camera-loopback" "$ROOTFS/tmp/dagu-camera-loopback"
 install -m 755 "$ROOT/scripts/rootfs-desktop-setup.sh" "$ROOTFS/tmp/rootfs-desktop-setup.sh"
+install -m 755 "$ROOT/scripts/dagu_offmode_charger.py" \
+	"$ROOTFS/tmp/dagu-offmode-charger.py"
+install -m 755 "$ROOT/scripts/dagu_offmode_charger.py" \
+	"$ROOTFS/usr/local/sbin/dagu-offmode-charger"
 install -m 755 "$ROOT/scripts/dagu-folio-repeat-verify.py" \
 	"$ROOTFS/usr/local/sbin/dagu-folio-repeat-verify.py"
 install -m 755 "$ROOT/scripts/dagu-mutter-repeat-keep.sh" \

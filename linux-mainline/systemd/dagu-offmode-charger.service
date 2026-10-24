@@ -1,0 +1,15 @@
+[Unit]
+Description=dagu off-mode charger screen
+After=dagu-offmode-gate.service systemd-udevd.service
+Before=gdm.service gdm3.service display-manager.service
+ConditionPathExists=/run/dagu-charger-mode
+Conflicts=gdm.service gdm3.service display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-offmode-charger ui
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=1
+

@@ -1684,6 +1684,9 @@ HandleLidSwitchExternalPower=suspend
 HandleLidSwitchDocked=suspend
 LidSwitchIgnoreInhibited=yes
 HoldoffTimeoutSec=2s
+# Let the off-mode charger cancel a shutdown while the cable is in,
+# instead of cutting power out from under that screen.
+InhibitDelayMaxSec=20s
 IdleAction=ignore
 EOF
 systemctl unmask sleep.target suspend.target >/dev/null 2>&1 || true
@@ -1699,6 +1702,96 @@ rm -f /usr/local/sbin/dagu-power-menu \
 	/etc/systemd/system/dagu-power-button.service \
 	/etc/systemd/system/multi-user.target.wants/dagu-power-button.service
 systemctl disable --now dagu-power-button.service >/dev/null 2>&1 || true
+
+# Off-mode charging. The gate runs before the desktop and only sets
+# /run/dagu-charger-mode for a charger wake (androidboot.mode=charger,
+# a charger boot reason, or a power-on reason without the power key).
+# A USB cable that is merely online does not skip the desktop.
+if [ -f /tmp/dagu-offmode-charger.py ]; then
+	install -m755 /tmp/dagu-offmode-charger.py /usr/local/sbin/dagu-offmode-charger
+fi
+if [ -x /usr/local/sbin/dagu-offmode-charger ]; then
+	mkdir -p /var/lib/dagu /etc/systemd/system/gdm.service.d \
+		/etc/systemd/system/poweroff.target.wants \
+		/etc/systemd/system/multi-user.target.wants
+	cat >/etc/systemd/system/dagu-offmode-gate.service <<'EOF'
+[Unit]
+Description=dagu off-mode charger gate (before the desktop)
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=gdm.service gdm3.service display-manager.service graphical.target
+Wants=systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-offmode-charger gate
+RemainAfterExit=yes
+TimeoutStartSec=20
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	cat >/etc/systemd/system/dagu-offmode-charger.service <<'EOF'
+[Unit]
+Description=dagu off-mode charger screen
+After=dagu-offmode-gate.service systemd-udevd.service
+Before=gdm.service gdm3.service display-manager.service
+ConditionPathExists=/run/dagu-charger-mode
+Conflicts=gdm.service gdm3.service display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-offmode-charger ui
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=1
+EOF
+	cat >/etc/systemd/system/dagu-offmode-daemon.service <<'EOF'
+[Unit]
+Description=dagu off-mode charger: stay on the battery when shutting down with the cable in
+After=multi-user.target
+ConditionPathExists=!/run/dagu-charger-mode
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/dagu-offmode-charger daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	cat >/etc/systemd/system/dagu-offmode-pending.service <<'EOF'
+[Unit]
+Description=dagu: remember a power-off so a later cable wake can show the battery
+DefaultDependencies=no
+Before=shutdown.target umount.target
+Conflicts=reboot.target halt.target kexec.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-offmode-charger mark-pending
+TimeoutStartSec=5
+
+[Install]
+WantedBy=poweroff.target
+EOF
+	cat >/etc/systemd/system/gdm.service.d/dagu-charger.conf <<'EOF'
+[Unit]
+After=dagu-offmode-gate.service
+EOF
+	ln -sfn /etc/systemd/system/dagu-offmode-gate.service \
+		/etc/systemd/system/multi-user.target.wants/dagu-offmode-gate.service
+	# The charger unit Conflicts= gdm. Pulled into the boot transaction
+	# next to graphical.target, systemd dropped the gdm start job on
+	# every boot, so the gate starts it only for a charger wake.
+	rm -f /etc/systemd/system/multi-user.target.wants/dagu-offmode-charger.service
+	ln -sfn /etc/systemd/system/dagu-offmode-daemon.service \
+		/etc/systemd/system/multi-user.target.wants/dagu-offmode-daemon.service
+	ln -sfn /etc/systemd/system/dagu-offmode-pending.service \
+		/etc/systemd/system/poweroff.target.wants/dagu-offmode-pending.service
+fi
 cat >/usr/local/bin/dagu-blank-on-lock <<'EOF'
 #!/bin/sh
 # Intentionally empty: writing l81a-wled (DCS 0x51) ETIMEDOUTs and racing

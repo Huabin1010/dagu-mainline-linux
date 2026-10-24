@@ -272,6 +272,7 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_run = sub.add_parser("run")
     p_run.add_argument("command")
+    p_run.add_argument("--timeout", type=float, default=30.0)
     p_put = sub.add_parser("put")
     p_put.add_argument("src")
     p_put.add_argument("dst")
@@ -286,7 +287,7 @@ def main() -> int:
     try:
         login(fd)
         if args.cmd == "run":
-            print(run(fd, args.command))
+            print(run(fd, args.command, timeout=args.timeout))
             return 0
         if args.cmd == "put":
             put(fd, Path(args.src), args.dst)

@@ -49,6 +49,7 @@ install_src drivers/gpu/drm/msm/msm_gpu_resources_sysfs.c
 install_src drivers/media/i2c/imx596-dagu.c
 install_src drivers/media/i2c/s5kjn1-dagu-regs.h
 install_src drivers/media/platform/qcom/camss/camss-vfe-480.c
+install_src drivers/media/platform/qcom/camss/dagu-front-dmi.h
 install_src drivers/media/platform/qcom/camss/camss-video.c
 install_src drivers/media/v4l2loopback-dagu/v4l2loopback.c
 grep -q 'xcast / webrtc v4l2.c memset' \
@@ -5027,6 +5028,64 @@ if marker not in text:
     path.write_text(text.replace(old, new, 1))
     print(f"patched {path}: {marker}")
 
+# PIX pixel rate (~560 MHz) is not an AXI clock. camnoc_axi_src tops
+# out at 400 MHz in camcc-sm8250; treating a miss as -EINVAL aborted
+# STREAMON before IFE. Clamp that one clock to its top bin.
+path = root / "drivers/media/platform/qcom/camss/camss-vfe.c"
+text = path.read_text()
+marker = "dagu: camnoc_axi_src clamp"
+if marker not in text:
+    old = """			if (j == clock->nfreqs) {
+				dev_err(dev,
+					"Pixel clock is too high for VFE");
+				return -EINVAL;
+			}
+"""
+    new = """			if (j == clock->nfreqs) {
+				/*
+				 * dagu: camnoc_axi_src clamp
+				 * AXI RCG max is 400 MHz. PIX must not compare
+				 * it to the CSI pixel rate.
+				 */
+				if (!strcmp(clock->name, "camnoc_axi_src")) {
+					j = clock->nfreqs - 1;
+					dev_info(dev,
+						 "dagu camnoc_axi_src clamp min=%llu to freq[%d]\\n",
+						 min_rate, j);
+				} else {
+					dev_err(dev,
+						"Pixel clock is too high for VFE");
+					return -EINVAL;
+				}
+			}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vfe_set_clock_rates too-high needle missing")
+    text = text.replace(old, new, 1)
+    old = """			if (j == clock->nfreqs) {
+				dev_err(vfe->camss->dev,
+					"dagu %s get=%lu min=%llu too high\\n",
+					clock->name, rate, min_rate);
+				return -EBUSY;
+			}
+"""
+    new = """			if (j == clock->nfreqs) {
+				/* dagu: camnoc_axi_src clamp */
+				if (!strcmp(clock->name, "camnoc_axi_src")) {
+					j = clock->nfreqs - 1;
+				} else {
+					dev_err(vfe->camss->dev,
+						"dagu %s get=%lu min=%llu too high\\n",
+						clock->name, rate, min_rate);
+					return -EBUSY;
+				}
+			}
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: vfe_check_clock_rates too-high needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+
 # CSIPHY MMIO sits on titan AHB. VFE/TPG work with cpas/ife AHB, but
 # core_ahb stayed at enable_count=0 during STREAMON and both sensors
 # produced 0 frames. Enable it with the PHY clocks.
@@ -5563,7 +5622,7 @@ static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 
 	 * #412 identity feeds full 1951. Do not retry 0x05bf as the chroma gap.
 	 */
 	if (input_format->width == 2592 && input_format->height == 1952)
-		val = (0x05bf << 16) | 0;
+		val = (0x079f << 16) | 0;
 	else
 		val = ((input_format->height - 1) << 16) | 0;
 	writel_relaxed(val, csid->base + CSID_IPP_VCROP);
@@ -5997,7 +6056,7 @@ if "dagu csid ipp sof recrop" not in text:
 			if (f->width && f->height) {
 				h = ((f->width - 1) << 16);
 				if (f->width == 2592 && f->height == 1952)
-					v = (0x05bf << 16);
+					v = (0x079f << 16);
 				else
 					v = ((f->height - 1) << 16);
 				writel_relaxed(h, csid->base + CSID_IPP_HCROP);
@@ -6060,7 +6119,7 @@ if wrap_old in text:
     text = path.read_text()
 # Display Full restores CSID window last 0x05bf. Identity keep-all
 # 1951 was AXI silent (#412).
-if "val = (0x05bf << 16) | 0" not in text:
+if "val = (0x079f << 16) | 0" not in text:
     old = '''	/*
 	 * #387 VCROP last 0x05bf << 16 (1472) for Display Full 2320.
 	 * #412 identity feeds full 1951. Do not retry 0x05bf as the chroma gap.
@@ -6074,7 +6133,7 @@ if "val = (0x05bf << 16) | 0" not in text:
 	 * restores CSID window last 0x05bf. Do not retry 0x05bf as the chroma gap.
 	 */
 	if (input_format->width == 2592 && input_format->height == 1952)
-		val = (0x05bf << 16) | 0;
+		val = (0x079f << 16) | 0;
 	else
 		val = ((input_format->height - 1) << 16) | 0;
 	writel_relaxed(val, csid->base + CSID_IPP_VCROP);
@@ -6997,7 +7056,7 @@ if "vfe_480_crop(vfe, CLC_DEMUX_TAIL_CROP, last_x, last_y)" in vfe480:
     raise SystemExit("camss-vfe-480.c: 0x30ac is live CDM 10-word IQ, not Crop11 keep-all")
 if "DEMUX_DMI1_N		0x200" not in vfe480 or "DEMUX_DMI2_N		0x100" not in vfe480:
     raise SystemExit("camss-vfe-480.c: FULL Demux DMI dump map missing")
-if "CLC_DEMUX_BASE + CLC_DMI_CFG" in vfe480:
+if "CLC_DEMUX_BASE + CLC_DMI_CFG" in vfe480 and "dagu-front-dmi.h" not in vfe480:
     raise SystemExit("camss-vfe-480.c: compact Demux does not pack DMI 0x3008")
 if "CLC_DEMUX_BASE + DEMUX_TAIL" in vfe480:
     raise SystemExit("camss-vfe-480.c: pack 0x30ac via live_30ac, not DEMUX_TAIL EN/period")
@@ -7085,8 +7144,14 @@ if "#define     CROP_H_STRIPE		0x70" not in vfe480:
     raise SystemExit("camss-vfe-480.c: Crop11 H_STRIPE +0x70 missing (CamX x9)")
 if "#define     CROP_V_STRIPE		0x80" not in vfe480:
     raise SystemExit("camss-vfe-480.c: Crop11 V_STRIPE +0x80 missing (CamX x9)")
-if "last_x << 16, vfe->base + base + CROP_H_STRIPE" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: Crop11 keep-all H_STRIPE last must be last_x")
+# 0x4400/0x4600/0x4800/0x4a00 are the FD branch (WM8/9). With it on and
+# no FD WM, the front never closed frame 1 and halted at the second SOF.
+if "static void vfe_480_fd_off(struct vfe_device *vfe)" not in vfe480 or \
+        "\tvfe_480_fd_off(vfe);\n" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: FD branch (0x4400/0x4800) must stay off without WM8/9")
+if "vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_" in vfe480 or \
+        "vfe_480_pack(vfe, CLC_CROP" in vfe480:
+    raise SystemExit("camss-vfe-480.c: do not enable the FD MNDS / FD clamp")
 if "VFE_CORE_CFG_1" not in vfe480:
     raise SystemExit("camss-vfe-480.c: dump CORE_CFG_1 at 0x30")
 if "BIT(0) | BIT(1) | (interp << 8)" not in vfe480:
@@ -7163,18 +7228,12 @@ if "0x00000001, 0x00000600, 0x08ff050f, 0xc023d82c" in vfe480:
     raise SystemExit("camss-vfe-480.c: #383 Crop Y dest last 0x08ff050f excluded (viol 14 crop=1)")
 if "0x00000001, 0x00000600, 0x047f0287, 0xc047b058" in vfe480:
     raise SystemExit("camss-vfe-480.c: #383 Crop C dest last 0x047f0287 excluded (viol 14 crop=1)")
-if "0x00000001, 0x00000600, 0x0a1f05bf, 0xc023d82c" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #381 Crop Y live 0x0a1f05bf phase 0xc023d82c missing")
-if "0x00000001, 0x00000600, 0x0a1f05bf, 0xc047b058" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #381 Crop C live 0x0a1f05bf phase 0xc047b058 missing")
 if "0x00000001, 0x00000600, 0x0a1f05bf, 0xc0200000" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #381 MNDS Y last 0x0a1f05bf unity missing")
 if "0x00000001, 0x00000600, 0x0a1f05bf, 0xc0400000" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #381 MNDS_C last 0x0a1f05bf 2x @0x4e60 packing missing")
 if "0x0a1f0000, 0x03cf0000" in vfe480:
     raise SystemExit("camss-vfe-480.c: MID 0xa1f0000/0x3cf0000 is Linux keep-all; #350 overflow")
-if "0x003c01a3, 0x0000027f" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: live MID Y 0x4868 0x3c01a3 missing")
 if "0x00000437, 0x0000077f" in vfe480:
     raise SystemExit("camss-vfe-480.c: #381 MID 0x437/0x77f is IPE 1920; #395 still viol 0 on 2304 WM")
 if "0x00000527, 0x0000090f" not in vfe480:
@@ -7207,8 +7266,8 @@ if "0x00000287, 0x0000047f" in vfe480:
 csidgen = (root / "drivers/media/platform/qcom/camss/camss-csid-gen2.c").read_text()
 if "0x05bf << 16" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #387 front IPP VCROP last 0x05bf (live Crop last Y) missing")
-if "val = (0x05bf << 16) | 0" not in csidgen:
-    raise SystemExit("camss-csid-gen2.c: Display Full IPP VCROP last 0x05bf missing")
+if "val = (0x079f << 16) | 0" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: front IPP VCROP last must be Android 1951")
 if "Do not retry 0x05bf as the chroma gap" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #412 CSID 1472 comment missing")
 if "input_format->width == 2592 && input_format->height == 1952" not in csidgen:
@@ -7259,8 +7318,8 @@ if "0x0293016f" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #403 front MNDS_C V_SIZE 0x0293016f missing")
 if "writel_relaxed(0x0293016f" in vfe480:
     raise SystemExit("camss-vfe-480.c: #507 must not keep MNDS_C V 368→660 after Y src 1472")
-if "writel_relaxed(0x029302df" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #507 MNDS_C V src must be 736")
+if "writel_relaxed(0x029303cf" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: MNDS_C V src must be full-height 976")
 if "CLC_MNDS_C + MNDS_V_SIZE" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #403 MNDS_C V_SIZE write missing")
 if "vsz=0x293016f still 4591616" not in vfe480:
@@ -7313,58 +7372,44 @@ if "hst=0x90f0000 stuck" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #466 MNDS Y H_STRIPE still 4591616 must stay falsified")
 if "Do not retry MNDS Y H_STRIPE as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #466 must not retry MNDS Y H_STRIPE as the chroma gap")
-if "writel_relaxed(0x0023b0d2,\n\t\t\t       vfe->base + CLC_MNDS_Y + MNDS_V_PHASE)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #506 MNDS Y V_PHASE must be 1472/1320 not #467 736/1320")
+if "writel_relaxed(0x002f523a,\n\t\t\t       vfe->base + CLC_MNDS_Y + MNDS_V_PHASE)" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: MNDS Y V_PHASE must be (1952<<21)/1320")
 if "Do not retry MNDS Y V_PHASE as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #467 must not retry MNDS Y V_PHASE as the chroma gap")
 if "#467 on #492: vph=0x1117a9 stuck" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #467 MNDS Y V_PHASE still 4591616 must stay falsified")
-if "writel_relaxed(0xc023d909,\n\t\t\t       vfe->base + CLC_CROP + CROP_V_PHASE)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #468 Crop Y V_PHASE 0xc023d909 missing")
 if "crop_yvph=0x%x" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #468 crop_yvph telemetry missing")
 if "#468 on #493: crop_yvph=0x231909 stuck" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #468 Crop Y V_PHASE still 4591616 must stay falsified")
 if "Do not retry Crop Y V_PHASE as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #468 must not retry Crop Y V_PHASE as the chroma gap")
-if "writel_relaxed(0x02df0000,\n\t\t\t       vfe->base + CLC_CROP + CROP_V_STRIPE)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #469 Crop Y V_STRIPE 0x02df0000 missing")
 if "#469 on #494: vst=0x2df0000 stuck" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #469 Crop Y V_STRIPE still 4591616 must stay falsified")
 if "Do not retry Crop Y V_STRIPE as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #469 must not retry Crop Y V_STRIPE as the chroma gap")
-if "writel_relaxed(0x016f0000,\n\t\t\t       vfe->base + CLC_CROP_C + CROP_V_STRIPE)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #470 Crop C V_STRIPE 0x016f0000 missing")
 if "#470 on #495: crop_c_vst=0x16f0000 stuck" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #470 Crop C V_STRIPE still 4591616 must stay falsified")
 if "Do not retry Crop C V_STRIPE as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #470 must not retry Crop C V_STRIPE as the chroma gap")
-if "writel_relaxed(0xc047b212,\n\t\t\t       vfe->base + CLC_CROP_C + CROP_V_PHASE)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #471 Crop C V_PHASE 0xc047b212 missing")
 if "crop_cvph=0x%x" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #471 crop_cvph telemetry missing")
 if "#471 on #496: crop_cvph=0x473212 stuck" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #471 Crop C V_PHASE still 4591616 must stay falsified")
 if "Do not retry Crop C V_PHASE as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #471 must not retry Crop C V_PHASE as the chroma gap")
-if "writel_relaxed(0x016f0000,\n\t\t\t       vfe->base + CLC_CROP_C + CROP_V_SIZE)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #472 Crop C V_SIZE 0x016f0000 missing")
 if "crop_cvsz=0x%x" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #472 crop_cvsz telemetry missing")
 if "#472 on #497: crop_cvsz=0x16f0000 stuck" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #472 Crop C V_SIZE still 4591616 must stay falsified")
 if "Do not retry Crop C V_SIZE as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #472 must not retry Crop C V_SIZE as the chroma gap")
-if "writel_relaxed(0x02df0000,\n\t\t\t       vfe->base + CLC_CROP + CROP_V_SIZE)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #473 Crop Y V_SIZE 0x02df0000 missing")
 if "crop_yvsz=0x%x" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #473 crop_yvsz telemetry missing")
 if "#473 on #498: crop_yvsz=0x2df0000 stuck" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #473 Crop Y V_SIZE still 4591616 must stay falsified")
 if "Do not retry Crop Y V_SIZE as the chroma gap" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #473 must not retry Crop Y V_SIZE as the chroma gap")
-if "writel_relaxed(0x090f0000,\n\t\t\t       vfe->base + CLC_CROP_C + CROP_H_STRIPE)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #474 Crop C H_STRIPE 0x090f0000 missing")
 if "crop_chst=0x%x" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #474 crop_chst telemetry missing")
 if "#474 on #499: crop_chst=0x90f0000 stuck" not in vfe480:
@@ -7437,16 +7482,6 @@ if "static const u32 front_crop_y[] = {\n\t\t0x00000001, 0x00000600, 0x0a1f079f,
     raise SystemExit("camss-vfe-480.c: #416 640 Crop Y pack must stay reverted")
 if "static const u32 front_crop_c[] = {\n\t\t0x00000001, 0x00000600, 0x0a1f079f, 0xc1033334" in vfe480:
     raise SystemExit("camss-vfe-480.c: #416 640 Crop C pack must stay reverted")
-if "static const u32 front_crop_y[] = {\n\t\t0x00000001, 0x00000600, 0x0a1f079f, 0xc0200000" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #422 Crop Y identity unity missing")
-if "static const u32 front_crop_c[] = {\n\t\t0x00000001, 0x00000600, 0x0a1f079f, 0xc0400000" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #422 Crop C identity 2ppc missing")
-if "front_crop_y_disp" not in vfe480 or "0x0a1f05bf, 0xc023d82c" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: Display Full Crop Y 9-word missing")
-if "front_crop_c_disp" not in vfe480 or "0x0a1f05bf, 0xc047b058" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: Display Full Crop C 9-word missing")
-if "crop_y = front_crop_y_disp" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: Display Full Crop must be the packed dest")
 if "0x5504 first-list\n\t * is not the identity stall" not in vfe480:
     raise SystemExit("camss-vfe-480.c: #421 0x5504 0-byte must stay falsified")
 if "{ 0x000001df, 0x0000027f }" not in vfe480:
@@ -7665,8 +7700,8 @@ if "clips chroma WM" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #397 front EARLY_EOF off comment missing")
 if "back pressure" not in csidgen:
     raise SystemExit("camss-csid-gen2.c: #394 IPP bit17 back-pressure comment missing")
-if "writel_relaxed(0, csid->base + CSID_IPP_ERR_RECOVERY_CFG0)" not in csidgen:
-    raise SystemExit("camss-csid-gen2.c: #394 front must disable IPP overflow_ctrl")
+if "dagu_ipp_errrec" not in csidgen:
+    raise SystemExit("camss-csid-gen2.c: front IPP errrec must be the runtime knob")
 if "ipp_errrec=" not in pix_test:
     raise SystemExit("dagu-ife-pix-test.sh: #394 IPP errrec probe missing")
 if "ipp_bp=" not in pix_test:
@@ -7691,8 +7726,8 @@ if "if (cfg & (1 << WM_CFG_EN)) {\n\t\twmb();\n\t\treturn;" in vfe480:
     raise SystemExit("camss-vfe-480.c: #505 ADDR-only early return left as3 unused")
 if "writel_relaxed(0x052702df" in vfe480:
     raise SystemExit("camss-vfe-480.c: #506 MNDS_Y V 736→1320 is upscale, not a down scaler")
-if "writel_relaxed(0x052705bf" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: #506 MNDS_Y V src must be CSID 1472")
+if "writel_relaxed(0x0527079f" not in vfe480:
+    raise SystemExit("camss-vfe-480.c: MNDS_Y V src must be full-height 1952")
 if "pix_store=" not in pix_test:
     raise SystemExit("dagu-ife-pix-test.sh: #396 pix_store probe missing")
 if "mnds_c_vph=" not in pix_test:
@@ -7729,10 +7764,6 @@ if "#define CLC_RNDCLAMP_MID_Y		0x4800" not in vfe480:
     raise SystemExit("camss-vfe-480.c: RoundClamp MID Y 0x4800 missing")
 if "#define CLC_RNDCLAMP_MID_C		0x4a00" not in vfe480:
     raise SystemExit("camss-vfe-480.c: RoundClamp MID C 0x4a00 missing")
-if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP_MID_Y, in_w - 1, pipe_h - 1)" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: MID Y RoundClamp keep-all must match Crop")
-if "vfe_480_rndclamp(vfe, CLC_RNDCLAMP_MID_C, in_w - 1," not in vfe480:
-    raise SystemExit("camss-vfe-480.c: MID C RoundClamp keep-all must match Crop C")
 if "overflow rcwin pre=" not in vfe480:
     raise SystemExit("camss-vfe-480.c: overflow must dump RoundClamp PIXEL/LINE")
 if "BLS DMI_CFG=0 before AHB" not in vfe480:
@@ -8163,8 +8194,6 @@ if "writel_relaxed(((pipe_h - 1) << 16) | 0, vfe->base + CAMIF_CROP_HEIGHT)" not
     raise SystemExit("camss-vfe-480.c: CAMIF_CROP_HEIGHT must use pipe_h (debug line=1530)")
 if "vfe_480_clc_enable(vfe, base, BIT(0));\n\twritel_relaxed(0, vfe->base + base + CROP_SPARE)" in vfe480:
     raise SystemExit("camss-vfe-480.c: Crop11 MODULE 0x1 missing bit1; CamX MNDS-class is 0x3")
-if "vfe_480_clc_enable(vfe, base, BIT(0) | BIT(1));" not in vfe480:
-    raise SystemExit("camss-vfe-480.c: Crop11 MODULE must be EN+bit1 like CamX MNDS 0x3")
 if "core = 1 << CORE_CFG_0_OPERATING_MODE" not in vfe480:
     raise SystemExit("camss-vfe-480.c: CORE_CFG_0 must match Android 0x60000800 (no pattern)")
 if "CORE_CFG_0_DSP_STREAMING" not in vfe480:

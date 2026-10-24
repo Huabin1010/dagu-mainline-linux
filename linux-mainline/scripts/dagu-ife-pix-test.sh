@@ -19,6 +19,19 @@ SCP=(scp -i "$KEY" -o StrictHostKeyChecking=no)
 
 remote() { "${SSH[@]}" "$@"; }
 
+# cmdline ignore_loglevel sends every camss dev_info to fbcon and ttyGS0
+# from hard IRQ. That held IFE1 IRQs off for ~80 ms around frame 1.
+# Keep printk in dmesg only while streaming; restore on exit.
+remote 'cat /sys/module/printk/parameters/ignore_loglevel > /tmp/dagu-pix-ignore-loglevel
+cut -f1 /proc/sys/kernel/printk > /tmp/dagu-pix-console-loglevel
+echo N > /sys/module/printk/parameters/ignore_loglevel
+echo 1 > /proc/sys/kernel/printk'
+restore_console() {
+	remote 'cat /tmp/dagu-pix-ignore-loglevel > /sys/module/printk/parameters/ignore_loglevel
+cat /tmp/dagu-pix-console-loglevel > /proc/sys/kernel/printk' || true
+}
+trap restore_console EXIT
+
 # Kill SoftISP loopback — it holds VFE0 RDI and makes PIX vfe_get EBUSY.
 remote 'systemctl stop dagu-camera-loopback-watch.service dagu-camera-loopback.service || true
 pkill -9 -x dagu-camera-loopback || true

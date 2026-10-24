@@ -8,15 +8,275 @@
  * Copyright (C) 2021 Jonathan Marek
  */
 
+#include <linux/cacheflush.h>
 #include <linux/dma-mapping.h>
+#include <linux/hrtimer.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/math64.h>
+#include <linux/moduleparam.h>
 #include <media/v4l2-mediabus.h>
 
 #include "camss.h"
 #include "camss-vfe.h"
+#include "dagu-front-dmi.h"
+
+/*
+ * Front EOF→next SOF is ~23 ms of blanking. Rear is ~1 ms and the
+ * same EOF dbg1 (0x82d68008) still reaches another epoch. The
+ * buf_done 0x41 is ~3 ms before EOF, so on the front it is ~26 ms
+ * stale at the next SOF. A second 0x41 16 ms after EOF made that
+ * SOF match a continuing rear frame (dbg1=0x10628018 wmd=0x2ea)
+ * and then halted before epoch. Reloading crop/epoch there
+ * ("dagu front late camif") and skipping the buf_done 0x41
+ * ("dagu front blank rup", as3 stayed 0xfe800000) did not reach
+ * epoch either. Reloading keep-all skip/period/subsample
+ * ("dagu front blank skip") was the same halt. A read 3 ms
+ * after the second SOF ("dagu front mid") already showed
+ * dbg1=0x10218010 wmd=0x20a, viol=0, irq0=0, irq1=0, bus=0x4.
+ * The halt is latched before epoch with no top error. Replaying
+ * the WM program in that window ("dagu front blank wm"
+ * y=0xfe000000) left as3=0xfe800000, the buffer already queued
+ * at init, and the same 3 ms halt. At that halt the WM
+ * constraint register was 0 through frame 1 and the halt,
+ * and CAMIF cmd was still 0x2000101. Skipping the IPP SOF
+ * recrop after frame 1 ("dagu csid ipp sof nocrop") was the
+ * same halt. Clock overrides already read back set
+ * (0xffffffff/0xff/0x1/0x1, bus 0x3ffffff); forcing them
+ * again did not help. Reloading the frame-1 Demux program
+ * ("dagu front late demux") was the same halt. Writing the
+ * whole Camera ID 1 CDM packet-1 AHB program in that window
+ * ("dagu front cdm pkt", #612) still halted at +3 ms:
+ * dbg1=0x10218010 wmd=0x20a viol=0 irq0=0 bus=0x4, one
+ * 8110080 frame. Do not replay that packet. The 2026-10-24
+ * front capture now supplies the DMI bytes at init.
+ */
+static bool dagu_front_pix;
+static bool dagu_front_rup_ready;
+static int dagu_front_sof_n;
+static struct hrtimer dagu_front_rup_timer;
+static struct hrtimer dagu_front_mid_timer;
+static struct vfe_device *dagu_front_rup_vfe;
+static unsigned int dagu_front_evt_n;
+static unsigned int dagu_front_evt_shown;
+static int dagu_reload_phase;
+
+/*
+ * #621 values. #622 wrote all three Android words at once and the
+ * first frame never completed, so each word is a runtime knob.
+ * Rear does not read these.
+ */
+unsigned int dagu_core_cfg0 = 0x78000800;
+module_param(dagu_core_cfg0, uint, 0644);
+MODULE_PARM_DESC(dagu_core_cfg0, "front VFE_CORE_CFG_0");
+unsigned int dagu_ipp_cfg1 = 2;
+module_param(dagu_ipp_cfg1, uint, 0644);
+MODULE_PARM_DESC(dagu_ipp_cfg1, "front CSID IPP CFG1");
+unsigned int dagu_ipp_errrec;
+module_param(dagu_ipp_errrec, uint, 0644);
+MODULE_PARM_DESC(dagu_ipp_errrec, "front CSID IPP errrec");
+static unsigned int dagu_rup_mode;
+module_param(dagu_rup_mode, uint, 0644);
+MODULE_PARM_DESC(dagu_rup_mode, "front RUP: bit0 buf_done RUP waits for EOF, bit1 no late timer RUP");
+static unsigned int dagu_wm5_rearm;
+module_param(dagu_wm5_rearm, uint, 0644);
+MODULE_PARM_DESC(dagu_wm5_rearm, "front: rewrite chroma WM cfg at CAMIF EOF");
+static unsigned int dagu_wm_pattern;
+module_param(dagu_wm_pattern, uint, 0644);
+MODULE_PARM_DESC(dagu_wm_pattern, "front WM4/5 drop/subsample pattern: 0 = 1, 1 = 0xffffffff");
+/*
+ * Android Camera ID 1 runs DS4/DS16 with WM6/7 PD10 clients whose
+ * addresses rotate every frame. 1 programs that path from the live
+ * 2026-10-24 read and feeds WM6/7 an address with every WM4 update.
+ */
+static unsigned int dagu_ds_mode;
+module_param(dagu_ds_mode, uint, 0644);
+MODULE_PARM_DESC(dagu_ds_mode, "front: 1 = Android DS4/DS16 + WM6/7");
+static bool dagu_in_comp_done;
+static bool dagu_rup_pending;
+static int dagu_mid_n;
+
+/*
+ * Flight recorder. Top debug 0x80..0xc0 is 4 bits per CLC module:
+ * bit0 ready, bit1 valid, bit2 idle (from the #624 frame-1 trace:
+ * flowing modules toggle 1/3, idle is 5, the front halt leaves 2).
+ * CAF top_debug_4..13 sit at 0x9c..0xc0, not 0x90..0xb4. Samples
+ * run in a hard hrtimer from pix_go and stop in vfe_wm_stop before
+ * the clocks drop; a /dev/mem poller that outlived the rear stream
+ * hung the bus on #624.
+ */
+static const u16 dagu_fr_off[] = {
+	0x27f0, 0x27f4,
+	0x80, 0x84, 0x88, 0x8c, 0x9c, 0xa0, 0xa4, 0xa8, 0xac, 0xb0,
+	0xb4, 0xb8, 0xbc, 0xc0,
+	0x54, 0x58, 0xaa28, 0xb07c, 0xb17c, 0xb068, 0xb168,
+};
+#define DAGU_FR_NREG	ARRAY_SIZE(dagu_fr_off)
+#define DAGU_FR_MAX	2048
+struct dagu_fr_ent {
+	u32 t_us;
+	u32 v[DAGU_FR_NREG];
+};
+static struct dagu_fr_ent dagu_fr_buf[DAGU_FR_MAX];
+static unsigned int dagu_fr_n;
+static unsigned int dagu_fr_polls;
+static bool dagu_fr_on;
+static ktime_t dagu_fr_t0;
+static struct hrtimer dagu_fr_timer;
+static bool dagu_fr_init_done;
+static struct vfe_device *dagu_fr_vfe;
+static unsigned int dagu_fr_us = 20;
+module_param(dagu_fr_us, uint, 0644);
+MODULE_PARM_DESC(dagu_fr_us, "flight recorder period in us, 0 = off");
+static unsigned int dagu_fr_ms = 120;
+module_param(dagu_fr_ms, uint, 0644);
+MODULE_PARM_DESC(dagu_fr_ms, "flight recorder window after pix_go");
+
+static enum hrtimer_restart dagu_fr_fn(struct hrtimer *timer)
+{
+	struct vfe_device *vfe = dagu_fr_vfe;
+	struct dagu_fr_ent *e;
+	u32 v[DAGU_FR_NREG];
+	s64 us;
+	int i;
+
+	if (!dagu_fr_on || !vfe)
+		return HRTIMER_NORESTART;
+	us = ktime_us_delta(ktime_get(), dagu_fr_t0);
+	for (i = 0; i < DAGU_FR_NREG; i++)
+		v[i] = readl_relaxed(vfe->base + dagu_fr_off[i]);
+	dagu_fr_polls++;
+	if (!dagu_fr_n ||
+	    memcmp(dagu_fr_buf[dagu_fr_n - 1].v, v, sizeof(v))) {
+		if (dagu_fr_n < DAGU_FR_MAX) {
+			e = &dagu_fr_buf[dagu_fr_n++];
+			e->t_us = us;
+			memcpy(e->v, v, sizeof(v));
+		}
+	}
+	if (us > (s64)dagu_fr_ms * 1000 || dagu_fr_n >= DAGU_FR_MAX) {
+		dagu_fr_on = false;
+		return HRTIMER_NORESTART;
+	}
+	hrtimer_forward_now(timer, us_to_ktime(dagu_fr_us));
+	return HRTIMER_RESTART;
+}
+
+static void dagu_fr_start(struct vfe_device *vfe)
+{
+	if (!dagu_fr_us || vfe->id != 1)
+		return;
+	if (!dagu_fr_init_done) {
+		hrtimer_setup(&dagu_fr_timer, dagu_fr_fn, CLOCK_MONOTONIC,
+			      HRTIMER_MODE_REL_HARD);
+		dagu_fr_init_done = true;
+	}
+	hrtimer_cancel(&dagu_fr_timer);
+	dagu_fr_vfe = vfe;
+	dagu_fr_n = 0;
+	dagu_fr_polls = 0;
+	dagu_fr_t0 = ktime_get();
+	dagu_fr_on = true;
+	hrtimer_start(&dagu_fr_timer, 0, HRTIMER_MODE_REL_HARD);
+}
+
+/* Call with the block still clocked. Prints only what was recorded. */
+static void dagu_fr_stop(struct vfe_device *vfe)
+{
+	char line[DAGU_FR_NREG * 9 + 1];
+	unsigned int i, j;
+	int n;
+
+	if (!dagu_fr_init_done || dagu_fr_vfe != vfe)
+		return;
+	dagu_fr_on = false;
+	hrtimer_cancel(&dagu_fr_timer);
+	dev_info(vfe->camss->dev,
+		 "dagu fr ife%d polls=%u changes=%u period=%uus regs=dbg1,dbg0,td0-13,irq0,irq1,bus0,wmd4,wmd5,as4,as5\n",
+		 vfe->id, dagu_fr_polls, dagu_fr_n, dagu_fr_us);
+	for (i = 0; i < dagu_fr_n; i++) {
+		n = 0;
+		for (j = 0; j < DAGU_FR_NREG; j++)
+			n += scnprintf(line + n, sizeof(line) - n, " %08x",
+				       dagu_fr_buf[i].v[j]);
+		dev_info(vfe->camss->dev, "dagu fr %u%s\n",
+			 dagu_fr_buf[i].t_us, line);
+	}
+	dagu_fr_vfe = NULL;
+}
+
+/*
+ * Runtime register overrides, so a CLC hypothesis is a 15 s test
+ * instead of a flash. "phase:off=val,..." with phase init (after the
+ * PIX program, before the first RUP), go (pix_go), sof, eof.
+ * Only 0x2c and the CLC window 0x2000..0x9ffc are writable; bus,
+ * IRQ and RUP registers are refused.
+ */
+static char dagu_ovr[512];
+module_param_string(dagu_ovr, dagu_ovr, sizeof(dagu_ovr), 0644);
+MODULE_PARM_DESC(dagu_ovr, "front IFE1 overrides: phase:off=val,... phase=init|go|sof|eof");
+enum { DAGU_PH_INIT, DAGU_PH_GO, DAGU_PH_SOF, DAGU_PH_EOF };
+
+static void dagu_ovr_apply(struct vfe_device *vfe, int phase)
+{
+	static const char * const names[] = { "init", "go", "sof", "eof" };
+	char buf[sizeof(dagu_ovr)];
+	char *s = buf, *tok;
+	bool log = phase <= DAGU_PH_GO;
+
+	if (!dagu_ovr[0] || vfe->id != 1 || !dagu_front_pix)
+		return;
+	strscpy(buf, dagu_ovr, sizeof(buf));
+	while ((tok = strsep(&s, ", \n"))) {
+		char *colon = strchr(tok, ':'), *eq;
+		u32 off, val;
+
+		if (!colon)
+			continue;
+		*colon = 0;
+		if (strcmp(tok, names[phase]))
+			continue;
+		eq = strchr(colon + 1, '=');
+		if (!eq)
+			continue;
+		*eq = 0;
+		if (kstrtou32(colon + 1, 0, &off) || kstrtou32(eq + 1, 0, &val))
+			continue;
+		if ((off & 3) || !(off == 0x2c || (off >= 0x2000 && off < 0xa000))) {
+			dev_warn(vfe->camss->dev, "dagu ovr refuse 0x%x\n", off);
+			continue;
+		}
+		writel_relaxed(val, vfe->base + off);
+		if (log)
+			dev_info(vfe->camss->dev,
+				 "dagu ovr %s 0x%x=0x%x read=0x%x\n",
+				 names[phase], off, val,
+				 readl_relaxed(vfe->base + off));
+	}
+	wmb();
+}
+
+void dagu_csid_trace_report(struct device *dev);
+
+static enum hrtimer_restart dagu_front_rup_fn(struct hrtimer *timer)
+{
+	struct vfe_device *vfe = dagu_front_rup_vfe;
+
+	(void)timer;
+
+	if (!vfe || !vfe->base)
+		return HRTIMER_NORESTART;
+	/*
+	 * Packet-1 AHB replay logged "dagu front cdm pkt" on #612
+	 * and still halted at +3 ms. Do not write that program again.
+	 */
+	vfe->reg_update |= 0x41;
+	wmb();
+	writel_relaxed(vfe->reg_update, vfe->base + 0x34);
+	dev_info_ratelimited(vfe->camss->dev, "dagu front late rup\n");
+	return HRTIMER_NORESTART;
+}
 
 #define VFE_GLOBAL_RESET_CMD		(vfe_is_lite(vfe) ? 0x0c : 0x1c)
 #define	    GLOBAL_RESET_HW_AND_REG	(vfe_is_lite(vfe) ? BIT(1) : BIT(0))
@@ -468,6 +728,15 @@ static inline int bus_irq_mask_0_comp_done(struct vfe_device *vfe, int n)
  * is an empty window: POST EN=1 still never presents packer valid.
  */
 #define CLC_RNDCLAMP			0x4200
+/*
+ * 0x4400/0x4600 and 0x4800/0x4a00 are the FD (Face Detection) branch:
+ * MNDS Y/C and round clamp Y/C feeding bus WM8/9 (CAF cam_vfe480.h
+ * VFE_OUT_FD, max 1920x1080). Android Camera ID 1 runs them at
+ * 640x480 (H phase 0xc081999a = 2592/640, V 0xc0822222 = 1952/480,
+ * clamp 0x1df/0x27f) with WM8 IMAGE_CFG_0 0x01e00280. Linux has no
+ * FD port, so these stay off: see vfe_480_fd_off(). The names below
+ * are kept for the dump code only.
+ */
 #define CLC_CROP			0x4400
 #define CLC_CROP_C			0x4600
 /*
@@ -593,8 +862,14 @@ static void vfe_480_pack(struct vfe_device *vfe, u32 addr,
 		writel_relaxed(w[i], vfe->base + addr + i * 4);
 }
 
-static void vfe_480_crop(struct vfe_device *vfe, u32 base, u32 last_x,
-			 u32 last_y);
+
+/*
+ * 2026-10-23 device: per-frame GIC bank flip and per-frame Demux
+ * steady (bank / 0x00e24203 / 0x04df04df) both ran from this RUP.
+ * Each logged, each left /tmp/pix.nv12 at 8110080, one COMP_DONE,
+ * a second CAMIF SOF, then no epoch. Do not put either write back.
+ */
+
 
 /*
  * Live IFE CDM 2026-09-17 (1MB dmabuf, Display Full packet 2):
@@ -680,6 +955,14 @@ static void vfe_480_demux(struct vfe_device *vfe, u32 in_w, u32 in_h)
 		vfe_480_pack(vfe, 0x3058, front_3058, ARRAY_SIZE(front_3058));
 		vfe_480_pack(vfe, 0x3068, front_3068, ARRAY_SIZE(front_3068));
 		vfe_480_pack(vfe, 0x30ac, front_30ac, ARRAY_SIZE(front_30ac));
+		/*
+		 * ABF both-banks, LSC both-banks on pipe_h=736, and
+		 * copying this AHB into Demux bank 1 each logged and
+		 * each left 8110080, one COMP_DONE, second SOF
+		 * dbg0=0x2e00a20, viol=0. Do not write Demux bank 1
+		 * again. Do not leave 0x3058 at 1. Do not write
+		 * 0x04df04df. Do not invent the 0x3008 DMI.
+		 */
 	}
 }
 
@@ -721,6 +1004,68 @@ static void vfe_480_clc_dmi32(struct vfe_device *vfe, u32 base, u32 sel,
 	for (i = 0; i < n; i++)
 		writel_relaxed(lut[i], vfe->base + base + CLC_DMI_LUT);
 	wmb();
+}
+
+/*
+ * Front provider capture 2026-10-24, frame 0 at IOVA 0xdfdc0000.
+ * CDM length is bytes, so each table is that many words, not the
+ * old 4× word counts. Android's live IFE1 read on 2026-10-24
+ * had gamma=1 and wb=1 while preview was not black. #613 wrote
+ * the LUT first and MODULE=1 after, and Y was 0. The captured
+ * command writes MODULE, then the LUT. Lens shading and defect
+ * correction stay bypassed. Do not replay the packet-1 program.
+ */
+static void vfe_480_front_live_dmi(struct vfe_device *vfe)
+{
+	vfe_480_clc_dmi32(vfe, CLC_GIC, 1, dagu_front_abf1,
+			  ARRAY_SIZE(dagu_front_abf1));
+	vfe_480_clc_dmi32(vfe, CLC_GIC, 3, dagu_front_abf3,
+			  ARRAY_SIZE(dagu_front_abf3));
+	vfe_480_clc_dmi32(vfe, CLC_GIC, 4, dagu_front_abf4,
+			  ARRAY_SIZE(dagu_front_abf4));
+	writel_relaxed(0, vfe->base + CLC_GIC + CLC_DMI_CFG);
+
+	vfe_480_clc_dmi32(vfe, CLC_DEMUX_BASE, 1, dagu_front_dmx1,
+			  ARRAY_SIZE(dagu_front_dmx1));
+	vfe_480_clc_dmi32(vfe, CLC_DEMUX_BASE, 2, dagu_front_dmx2,
+			  ARRAY_SIZE(dagu_front_dmx2));
+	writel_relaxed(0, vfe->base + CLC_DEMUX_BASE + CLC_DMI_CFG);
+
+	vfe_480_clc_dmi32(vfe, CLC_PDPC30, 1, dagu_front_pdpc,
+			  ARRAY_SIZE(dagu_front_pdpc));
+	writel_relaxed(0, vfe->base + CLC_PDPC30 + CLC_DMI_CFG);
+
+	vfe_480_clc_dmi32(vfe, CLC_GTM, 1, dagu_front_lsc1,
+			  ARRAY_SIZE(dagu_front_lsc1));
+	vfe_480_clc_dmi32(vfe, CLC_GTM, 2, dagu_front_lsc2,
+			  ARRAY_SIZE(dagu_front_lsc2));
+	vfe_480_clc_dmi32(vfe, CLC_GTM, 3, dagu_front_lsc3,
+			  ARRAY_SIZE(dagu_front_lsc3));
+	writel_relaxed(0, vfe->base + CLC_GTM + CLC_DMI_CFG);
+
+	writel_relaxed(0, vfe->base + 0x3c58);
+	writel_relaxed(0, vfe->base + 0x3c5c);
+	writel_relaxed(0, vfe->base + 0x3c60);
+	wmb();
+	vfe_480_clc_dmi32(vfe, CLC_WB, 1, dagu_front_wb,
+			  ARRAY_SIZE(dagu_front_wb));
+	writel_relaxed(0, vfe->base + CLC_WB + CLC_DMI_CFG);
+
+	writel_relaxed(0, vfe->base + 0x3e58);
+	writel_relaxed(0, vfe->base + 0x3e5c);
+	writel_relaxed(0, vfe->base + 0x3e60);
+	wmb();
+	vfe_480_clc_dmi32(vfe, CLC_GAMMA, 1, dagu_front_g1,
+			  ARRAY_SIZE(dagu_front_g1));
+	vfe_480_clc_dmi32(vfe, CLC_GAMMA, 2, dagu_front_g2,
+			  ARRAY_SIZE(dagu_front_g2));
+	vfe_480_clc_dmi32(vfe, CLC_GAMMA, 3, dagu_front_g3,
+			  ARRAY_SIZE(dagu_front_g3));
+	writel_relaxed(0, vfe->base + CLC_GAMMA + CLC_DMI_CFG);
+	wmb();
+	dev_info(vfe->camss->dev, "dagu front dmi order gamma=0x%x wb=0x%x\n",
+		 readl_relaxed(vfe->base + CLC_GAMMA + CLC_MODULE_CFG),
+		 readl_relaxed(vfe->base + CLC_WB + CLC_MODULE_CFG));
 }
 
 static void vfe_480_gamma(struct vfe_device *vfe)
@@ -809,6 +1154,13 @@ static void vfe_480_gtm(struct vfe_device *vfe, u32 last_x, u32 last_y)
 	 * viol=0 img=0xc0 as0 Y=0 C=0xff4d3400 bus=0x80000000
 	 * camif irq1 0x1 0xc 0x2 0x1. Same stall as #441.
 	 * 0x3658 first-list LSC is not the identity stall. Keep.
+	 */
+	/*
+	 * last_x == 2591 && last_y == 975 is the pre-#388 pipe.
+	 * Pointing this enable at live last_y 735 logged
+	 * "dagu lsc both banks", gtm=0x1002001, and still left
+	 * 8110080 with the second SOF at dbg0=0x2e00a20.
+	 * Do not move this branch onto 735. Do not write LSC bank 1 again.
 	 */
 	if (last_x == 2591 && last_y == 975) {
 		static const u32 front_3668[LSC_CFG_N] = {
@@ -1070,6 +1422,21 @@ static void vfe_480_abf_bank2(struct vfe_device *vfe, u32 in_w, u32 in_h)
 		vfe_480_pack(vfe, 0x3458,
 			     (const u32[]){ 0, 0, 0x0000c101 }, 3);
 		vfe_480_pack(vfe, 0x3468, front_3468, ARRAY_SIZE(front_3468));
+		/*
+		 * Disabling GIC after this pair logged "gic off" and
+		 * still left 8110080, one COMP_DONE, second SOF
+		 * dbg0=0x2e00a20. Do not turn front GIC off.
+		 *
+		 * Writing the zero sels into both 0x3458 banks logged
+		 * "dagu abf both banks" and still left 8110080, irq
+		 * 0x1 0xc 0x2 0x1, second SOF dbg0=0x2e00a20.
+		 * Do not write ABF bank 1 again. Do not leave 0x3458 at 1.
+		 *
+		 * Front mod_abf40_aec_data (symbol 0x32c) has no
+		 * 0x36c AEC entry. The largest blob in that tree is
+		 * 96 bytes, so the noise/activity/dark tables are zero.
+		 * Do not invent a 65-float curve.
+		 */
 	} else {
 		vfe_480_pack(vfe, 0x3458, (const u32[]){ 0, 0, 0 }, 3);
 		{
@@ -1144,25 +1511,22 @@ static void vfe_480_rndclamp(struct vfe_device *vfe, u32 base,
 	}
 }
 
-static void vfe_480_crop(struct vfe_device *vfe, u32 base, u32 last_x, u32 last_y)
+/*
+ * Keep the FD branch off. #625 flight recorder: with the FD MNDS and
+ * FD clamp enabled and WM8/9 off, two top-debug modules (0xa0 nibbles
+ * 2 and 4) never went idle after the front EOF (0x55515155 through
+ * the 23 ms blank, Android 0x55555555). At the next SOF they held
+ * valid data with ready low, sixteen modules behind them backed up,
+ * and CAMIF stopped at dbg1 0x10218000: one frame, no error IRQ.
+ * MODULE_CFG=0 on the FD MNDS or on the FD clamp alone gave 90
+ * frames, dbg1 0x82d68008, blank state all 5 like Android.
+ */
+static void vfe_480_fd_off(struct vfe_device *vfe)
 {
-	u32 pixel = (last_x << 16) | 0;
-	u32 line = (last_y << 16) | 0;
-
-	/*
-	 * CamX Display Crop11 / MNDS CreateCmdList OR MODULE with 0x3
-	 * (EN + bit1 output). #322 wrote BIT(0) only: windows stuck,
-	 * packer dbg 0x2ea never valid. Same CLC 9-word +0x68 class.
-	 */
-	vfe_480_clc_enable(vfe, base, BIT(0) | BIT(1));
-	writel_relaxed(0, vfe->base + base + CROP_SPARE);
-	writel_relaxed(pixel, vfe->base + base + CROP_PIXEL);
-	writel_relaxed(line, vfe->base + base + CROP_LINE);
-	writel_relaxed(last_x << 16, vfe->base + base + CROP_H_STRIPE);
-	writel_relaxed(0, vfe->base + base + CROP_H_PAD);
-	writel_relaxed(line, vfe->base + base + CROP_V_SIZE);
-	writel_relaxed(0, vfe->base + base + CROP_V_PHASE);
-	writel_relaxed(last_y << 16, vfe->base + base + CROP_V_STRIPE);
+	writel_relaxed(0, vfe->base + CLC_CROP + CLC_MODULE_CFG);
+	writel_relaxed(0, vfe->base + CLC_CROP_C + CLC_MODULE_CFG);
+	writel_relaxed(0, vfe->base + CLC_RNDCLAMP_MID_Y + CLC_MODULE_CFG);
+	writel_relaxed(0, vfe->base + CLC_RNDCLAMP_MID_C + CLC_MODULE_CFG);
 }
 
 static void vfe_480_mnds(struct vfe_device *vfe, u32 base,
@@ -1228,16 +1592,6 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 {
 	u32 dest_w = out_w;
 	u32 dest_h = out_h;
-	static const u32 rear_crop_y[] = {
-		0x00000001, 0x00000600, 0x0fef0bf3, 0xc0cc0000,
-		0x00000000, 0xc0cc0000, 0x00000000, 0x00000000,
-		0x00000000,
-	};
-	static const u32 rear_crop_c[] = {
-		0x00000001, 0x00000600, 0x0fef0bf3, 0xc1980000,
-		0x00000000, 0xc1980000, 0x00000000, 0x00000000,
-		0x00000000,
-	};
 	static const u32 rear_mnds_y[] = {
 		0x00000001, 0x00000600, 0x0fef0bf3, 0xc043dbcf,
 		0x00000000, 0xc043e7db, 0x00000000, 0x00000000,
@@ -1283,26 +1637,6 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 	 * 0x00000001, 0x00000600, 0x0a1f079f, 0xc1033334
 	 * H_PAD 0xc0822222 / 0xc1044444
 	 */
-	static const u32 front_crop_y[] = {
-		0x00000001, 0x00000600, 0x0a1f079f, 0xc0200000,
-		0x00000000, 0xc0200000, 0x00000000, 0x00000000,
-		0x00000000,
-	};
-	static const u32 front_crop_c[] = {
-		0x00000001, 0x00000600, 0x0a1f079f, 0xc0400000,
-		0x00000000, 0xc0400000, 0x00000000, 0x00000000,
-		0x00000000,
-	};
-	static const u32 front_crop_y_disp[] = {
-		0x00000001, 0x00000600, 0x0a1f05bf, 0xc023d82c,
-		0x00000000, 0xc023d909, 0x00000000, 0x00000000,
-		0x00000000,
-	};
-	static const u32 front_crop_c_disp[] = {
-		0x00000001, 0x00000600, 0x0a1f05bf, 0xc047b058,
-		0x00000000, 0xc047b212, 0x00000000, 0x00000000,
-		0x00000000,
-	};
 	/*
 	 * MNDS MODULE stays 1. Display Full last 0x0a1f05bf executed
 	 * via front_mnds_*_disp. Identity last 0x0a1f079f + unity
@@ -1342,28 +1676,20 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 	static const u32 live_tap_ds4c[] = { 0x00b404eb, 0x00020781 };
 	static const u32 live_tap_ds16[] = { 0x00000f07, 0x09016c7d };
 	static const u32 live_tap_ds16c[] = { 0x0000010d, 0x000001df };
-	const u32 *crop_y, *crop_c, *mnds_y, *mnds_c;
+	const u32 *mnds_y, *mnds_c;
 
 	if (in_w == 4080 && in_h == 3060) {
-		crop_y = rear_crop_y;
-		crop_c = rear_crop_c;
 		mnds_y = rear_mnds_y;
 		mnds_c = rear_mnds_c;
 	} else if (in_w == 2592 && in_h == 1952) {
-		crop_y = front_crop_y_disp;
-		crop_c = front_crop_c_disp;
 		mnds_y = front_mnds_y_disp;
 		mnds_c = front_mnds_c_disp;
-		(void)front_crop_y;
-		(void)front_crop_c;
 		(void)front_mnds_y;
 		(void)front_mnds_c;
 	} else {
 		return;
 	}
 
-	vfe_480_pack(vfe, CLC_CROP + CLC_MODULE_CFG, crop_y, 9);
-	vfe_480_pack(vfe, CLC_CROP_C + CLC_MODULE_CFG, crop_c, 9);
 	vfe_480_pack(vfe, CLC_MNDS_Y + CLC_MODULE_CFG, mnds_y, 9);
 	vfe_480_pack(vfe, CLC_MNDS_C + CLC_MODULE_CFG, mnds_c, 9);
 	/*
@@ -1484,7 +1810,7 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		 * Do not retry 736→1320.
 		 * Identity 0x079f03cf / 0x03cf01e7 stays in comments.
 		 */
-		writel_relaxed(0x052705bf,
+		writel_relaxed(0x0527079f,
 			       vfe->base + CLC_MNDS_Y + MNDS_V_SIZE);
 		writel_relaxed(0x05270000,
 			       vfe->base + CLC_MNDS_Y + MNDS_V_STRIPE);
@@ -1495,7 +1821,7 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		 * chroma gap. Do not retry MNDS Y V_PHASE as the chroma gap.
 		 * #506 replaces it for V downscale.
 		 */
-		writel_relaxed(0x0023b0d2,
+		writel_relaxed(0x002f523a,
 			       vfe->base + CLC_MNDS_Y + MNDS_V_PHASE);
 		/*
 		 * #507: pair C V with Y pixel 1472. #403 KEEP
@@ -1509,11 +1835,11 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		 * contract. Do not retry 368→660. Do not retry C V
 		 * src as the second-frame cut.
 		 */
-		writel_relaxed(0x029302df,
+		writel_relaxed(0x029303cf,
 			       vfe->base + CLC_MNDS_C + MNDS_V_SIZE);
 		writel_relaxed(0x02930000,
 			       vfe->base + CLC_MNDS_C + MNDS_V_STRIPE);
-		writel_relaxed(0x0023b0d2,
+		writel_relaxed(0x002f523a,
 			       vfe->base + CLC_MNDS_C + MNDS_V_PHASE);
 		/*
 		 * #465 MNDS Y H_PHASE 0xc023d82c on #489:
@@ -1548,8 +1874,6 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		 * last_partial=336. Not the chroma gap. Keep.
 		 * Do not retry Crop Y V_PHASE as the chroma gap.
 		 */
-		writel_relaxed(0xc023d909,
-			       vfe->base + CLC_CROP + CROP_V_PHASE);
 		/*
 		 * #469 Crop Y V_STRIPE 0x02df0000: vfe_480_crop
 		 * last_y<<16 (pipe_h-1 = 735) before pack zeros
@@ -1560,8 +1884,6 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		 * UV 659.145 last_partial=336. Not the chroma gap.
 		 * Keep. Do not retry Crop Y V_STRIPE as the chroma gap.
 		 */
-		writel_relaxed(0x02df0000,
-			       vfe->base + CLC_CROP + CROP_V_STRIPE);
 		/*
 		 * #470 Crop C V_STRIPE 0x016f0000: chroma analog of
 		 * #469 KEEP (pipe_h/2-1 = 367)<<16. Pack zeros
@@ -1574,8 +1896,6 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		 * chroma gap. Keep.
 		 * Do not retry Crop C V_STRIPE as the chroma gap.
 		 */
-		writel_relaxed(0x016f0000,
-			       vfe->base + CLC_CROP_C + CROP_V_STRIPE);
 		/*
 		 * #471 Crop C V_PHASE 0xc047b212: heap Display Full
 		 * chroma 9-word word5 (H_PAD slot) into CROP_V_PHASE
@@ -1588,8 +1908,6 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		 * last_partial=336. Not the chroma gap. Keep.
 		 * Do not retry Crop C V_PHASE as the chroma gap.
 		 */
-		writel_relaxed(0xc047b212,
-			       vfe->base + CLC_CROP_C + CROP_V_PHASE);
 		/*
 		 * #472 Crop C V_SIZE 0x016f0000: chroma analog of
 		 * vfe_480_crop line (pipe_h/2-1)<<16 before pack
@@ -1604,8 +1922,6 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		 * chroma gap. Keep.
 		 * Do not retry Crop C V_SIZE as the chroma gap.
 		 */
-		writel_relaxed(0x016f0000,
-			       vfe->base + CLC_CROP_C + CROP_V_SIZE);
 		/*
 		 * #473 Crop Y V_SIZE 0x02df0000: analog of
 		 * vfe_480_crop line (pipe_h-1)<<16 before pack
@@ -1619,8 +1935,6 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		 * chroma gap. Keep.
 		 * Do not retry Crop Y V_SIZE as the chroma gap.
 		 */
-		writel_relaxed(0x02df0000,
-			       vfe->base + CLC_CROP + CROP_V_SIZE);
 		/*
 		 * #474 Crop C H_STRIPE 0x090f0000: Display Full
 		 * dest (2320-1)<<16 after pack zeros word4 / +0x70.
@@ -1634,8 +1948,6 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 		 * chroma gap. Keep.
 		 * Do not retry Crop C H_STRIPE as the chroma gap.
 		 */
-		writel_relaxed(0x090f0000,
-			       vfe->base + CLC_CROP_C + CROP_H_STRIPE);
 	}
 
 	/*
@@ -1656,28 +1968,7 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 	if (in_w == 2592 && in_h == 1952) {
 		vfe_480_clc_enable(vfe, CLC_RNDCLAMP, RNDCLAMP_MODULE_CFG);
 		vfe_480_pack(vfe, CLC_RNDCLAMP + 0x68,
-			     (const u32[]){ 0x000002df, 0x00000a1f }, 2);
-		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_Y, 0x0e01);
-		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x68,
-			     (const u32[]){ 0x00000527, 0x0000090f }, 2);
-		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x70,
-			     (const u32[]){ 0x00ff0000, 0x16, 0x00ff0000, 0x16,
-					    0, 0 },
-			     6);
-		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_C, 0x3e01);
-		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_C + 0x68,
-			     (const u32[]){ 0x00000293, 0x00000487 }, 2);
-	} else {
-		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_Y, 0x0e01);
-		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x68,
-			     (const u32[]){ 0x003c01a3, 0x0000027f }, 2);
-		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_Y + 0x70,
-			     (const u32[]){ 0x00ff0000, 0x16, 0x00ff0000, 0x16,
-					    0, 0 },
-			     6);
-		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_MID_C, 0x3e01);
-		vfe_480_pack(vfe, CLC_RNDCLAMP_MID_C + 0x68,
-			     (const u32[]){ 0x001e00d1, 0x0000013f }, 2);
+			     (const u32[]){ 0x000003cf, 0x00000a1f }, 2);
 	}
 	/*
 	 * Live CDM chroma round is odd (0x17 / 7): keep 10-bit for
@@ -1685,9 +1976,6 @@ static void vfe_480_live_display_cdm(struct vfe_device *vfe,
 	 * (#362 green). Y uses even (0x16 / 6) and 8-bit is correct.
 	 * #363: even round on C so 512→128 like Y.
 	 */
-	vfe_480_pack(vfe, CLC_RNDCLAMP_MID_C + 0x70,
-		     (const u32[]){ 0x00ff0000, 0x16, 0x00ff0000, 0x16, 0, 0 },
-		     6);
 
 	if (in_w == 2592 && in_h == 1952) {
 		vfe_480_clc_enable(vfe, CLC_RNDCLAMP_POST_Y, 0x0e01);
@@ -2069,6 +2357,17 @@ static void vfe_480_bus_common(struct vfe_device *vfe)
 	vfe_480_bus_dump(vfe, "clr");
 }
 
+static void dagu_front_irq_mask(struct vfe_device *vfe)
+{
+	if (!dagu_front_pix)
+		return;
+	writel(0x92800280, vfe->base + VFE_IRQ_MASK(0));
+	writel(0xc0047981, vfe->base + VFE_BUS_IRQ_MASK(0));
+	dev_info(vfe->camss->dev, "dagu front irq mask core=0x%x bus=0x%x\n",
+		 readl_relaxed(vfe->base + VFE_IRQ_MASK(0)),
+		 readl_relaxed(vfe->base + VFE_BUS_IRQ_MASK(0)));
+}
+
 static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 {
 	struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
@@ -2113,7 +2412,7 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 	 * Do not retry 0x05bf as the chroma gap.
 	 */
 	if (in_w == 2592 && in_h == 1952)
-		pipe_h = (0x05bf + 1) / 2;
+		pipe_h = (0x079f + 1) / 2;
 
 	/* Ungate CLC / NOC so demux→demosaic→MNDS actually clocks. */
 	writel_relaxed(0xffffffff, vfe->base + VFE_CORE_CGC_OVD_0);
@@ -2186,6 +2485,11 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 		core &= ~(BIT(CORE_CFG_0_DISP_DS4_R2PD) |
 			  BIT(CORE_CFG_0_DISP_DS16_R2PD));
 	writel_relaxed(core, vfe->base + VFE_CORE_CFG_0);
+	if (in_w == 2592 && in_h == 1952) {
+		writel_relaxed(dagu_core_cfg0, vfe->base + VFE_CORE_CFG_0);
+		dev_info(vfe->camss->dev, "dagu front core cfg0=0x%x\n",
+			 readl_relaxed(vfe->base + VFE_CORE_CFG_0));
+	}
 	if (0 && in_w == 2592 && in_h == 1952 && out_w == 2592 && out_h == 1952) {
 		vfe_480_pack(vfe, 0x010c, (const u32[]){ 0x44440001 }, 1);
 		vfe_480_pack(vfe, 0x9c60, (const u32[]){ 0x02000001 }, 1);
@@ -2268,16 +2572,11 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 	vfe_480_cc(vfe);
 	vfe_480_wb(vfe);
 	vfe_480_gamma(vfe);
+	if (in_w == 2592 && in_h == 1952)
+		vfe_480_front_live_dmi(vfe);
 	vfe_480_cst(vfe);
 	vfe_480_rndclamp(vfe, CLC_RNDCLAMP, in_w - 1, pipe_h - 1);
-	vfe_480_crop(vfe, CLC_CROP, in_w - 1, pipe_h - 1);
-	/* CamX Display Crop11 writes Y 0x4460 and C 0x4660. */
-	if (pipe_h / 2)
-		vfe_480_crop(vfe, CLC_CROP_C, in_w - 1, pipe_h / 2 - 1);
-	vfe_480_rndclamp(vfe, CLC_RNDCLAMP_MID_Y, in_w - 1, pipe_h - 1);
-	if (pipe_h / 2)
-		vfe_480_rndclamp(vfe, CLC_RNDCLAMP_MID_C, in_w - 1,
-				 pipe_h / 2 - 1);
+	vfe_480_fd_off(vfe);
 
 	vfe_480_mnds(vfe, CLC_MNDS_Y, in_w, pipe_h, out_w, out_h);
 	/* NV12 chroma is 4:2:0 of the 2ppc luma height. */
@@ -2320,10 +2619,25 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 	writel_relaxed(0xffffffff, vfe->base + CAMIF_PIXEL_SKIP);
 	writel_relaxed(0x00010001, vfe->base + CAMIF_PERIOD);
 	writel_relaxed(0xffffffff, vfe->base + CAMIF_IRQ_SUBSAMPLE);
+	/*
+	 * Camera ID 1 CDM writes skip/period 0. Doing that on the
+	 * front logged "dagu camif skip0" and still left 8110080,
+	 * one COMP_DONE. Second SOF dbg1=0x10218010 wmd=0x20a.
+	 * EOF dbg1=0x82d68008 matches a rear frame that continues.
+	 * Do not write skip 0 again. Do not write crop 0.
+	 */
+	dagu_front_pix = (in_w == 2592 && in_h == 1952);
+	if (dagu_front_pix) {
+		dagu_front_evt_n = 0;
+		dagu_front_evt_shown = 0;
+		dagu_reload_phase = 0;
+		dagu_rup_pending = false;
+	}
+	dagu_front_irq_mask(vfe);
 
 	epoch = in_h / 4;
 	if (in_w == 2592 && in_h == 1952)
-		epoch = (0x05bf + 1) / 4;
+		epoch = 0x1e7;
 	/*
 	 * CAF epoch = pixel_h/4 mid of the 2ppc debug counter.
 	 * in_h/4=488 is 66% of CSID 736 (#387). #389 used the
@@ -2358,6 +2672,7 @@ static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 	 * Do not retry H_STRIPE as the chroma gap.
 	 * Display Full epoch = (0x05bf + 1) / 4 = 368. #412 identity
 	 * epoch is in_h / 4 = 488. Do not retry epoch 368.
+	 * Android's live front read stayed 0x001401e7, one below 488.
 	 */
 	writel_relaxed((0x14 << 16) | epoch, vfe->base + CLC_CAMIF_EPOCH);
 	/*
@@ -2577,10 +2892,14 @@ static void vfe_480_wm_config(struct vfe_device *vfe, u8 wm,
 	}
 
 	writel_relaxed(0, vfe->base + VFE_BUS_WM_FRAMEDROP_PERIOD(wm));
-	writel_relaxed(plain ? 0xffffffff : 1,
+	writel_relaxed((plain && width == 2320 && !dagu_wm_pattern &&
+			(wm == DISP_Y_WM || wm == DISP_C_WM)) ? 1 :
+		       plain ? 0xffffffff : 1,
 		       vfe->base + VFE_BUS_WM_FRAMEDROP_PATTERN(wm));
 	writel_relaxed(0, vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PERIOD(wm));
-	writel_relaxed(plain ? 0xffffffff : 1,
+	writel_relaxed((plain && width == 2320 && !dagu_wm_pattern &&
+			(wm == DISP_Y_WM || wm == DISP_C_WM)) ? 1 :
+		       plain ? 0xffffffff : 1,
 		       vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PATTERN(wm));
 
 	/*
@@ -2650,6 +2969,98 @@ static void vfe_480_ds_go(struct vfe_device *vfe)
 		       vfe->base + VFE_BUS_WM_CFG(DISP_DS16_WM));
 }
 
+/* Android Camera ID 1 live 2026-10-24, stable in 12/12 reads. */
+static const u32 dagu_android_ds_regs[][2] = {
+	{ 0x5408, 0x00000307 }, { 0x540c, 0x09016c7d },
+	{ 0x5504, 0x0000079f }, { 0x5508, 0x00000a1f },
+	{ 0x5608, 0x00000307 },
+	{ 0x5704, 0x000003cf }, { 0x5708, 0x00000a1f },
+	{ 0x5868, 0x000001e7 }, { 0x586c, 0x00000287 },
+	{ 0x5870, 0x03ff0000 }, { 0x5874, 0x00000006 },
+	{ 0x5878, 0x03ff0000 }, { 0x587c, 0x00000006 },
+	{ 0x5860, 0x00000e01 },
+	{ 0x5a68, 0x000000f3 }, { 0x5a6c, 0x00000143 },
+	{ 0x5a70, 0x03ff0000 }, { 0x5a74, 0x00000007 },
+	{ 0x5a78, 0x03ff0000 }, { 0x5a7c, 0x00000007 },
+	{ 0x5a60, 0x00003e01 },
+	{ 0x5c08, 0x00000f07 }, { 0x5c0c, 0x09016c7d },
+	{ 0x5d04, 0x000001e7 }, { 0x5d08, 0x00000287 },
+	{ 0x5e08, 0x00000f07 },
+	{ 0x5f04, 0x000000f3 }, { 0x5f08, 0x00000287 },
+	{ 0x6068, 0x00000079 }, { 0x606c, 0x000000a1 },
+	{ 0x6070, 0x03ff0000 }, { 0x6074, 0x00000006 },
+	{ 0x6078, 0x03ff0000 }, { 0x607c, 0x00000006 },
+	{ 0x6060, 0x00000e01 },
+	{ 0x6268, 0x0000003c }, { 0x626c, 0x00000050 },
+	{ 0x6270, 0x03ff0000 }, { 0x6274, 0x00000007 },
+	{ 0x6278, 0x03ff0000 }, { 0x627c, 0x00000007 },
+	{ 0x6260, 0x00003e01 },
+};
+
+static void dagu_front_ds_wm(struct vfe_device *vfe, u8 wm, u32 cfg0,
+			     u32 stride, u32 incr)
+{
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(wm));
+	writel_relaxed(incr, vfe->base + VFE_BUS_WM_FRAME_INCR(wm));
+	writel_relaxed(cfg0, vfe->base + VFE_BUS_WM_IMAGE_CFG_0(wm));
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_IMAGE_CFG_1(wm));
+	writel_relaxed(stride, vfe->base + VFE_BUS_WM_IMAGE_CFG_2(wm));
+	writel_relaxed(PACKER_PLAIN_64, vfe->base + VFE_BUS_WM_PACKER_CFG(wm));
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_UBWC_MODE_CFG(wm));
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_SYSTEM_CACHE_CFG(wm));
+	writel_relaxed(3, vfe->base + VFE_BUS_WM_BURST_LIMIT(wm));
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_FRAMEDROP_PERIOD(wm));
+	writel_relaxed(1, vfe->base + VFE_BUS_WM_FRAMEDROP_PATTERN(wm));
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PERIOD(wm));
+	writel_relaxed(1, vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PATTERN(wm));
+}
+
+static void dagu_front_ds_program(struct vfe_device *vfe)
+{
+	unsigned int i;
+
+	if (!vfe_480_ds4_cpu || !vfe_480_ds16_cpu) {
+		dev_err(vfe->camss->dev, "dagu front ds: no buffers\n");
+		return;
+	}
+	dagu_front_ds_wm(vfe, DISP_DS4_WM, 0x00f40144, 0xb00, 0xb0000);
+	dagu_front_ds_wm(vfe, DISP_DS16_WM, 0x003d0051, 0x300, 0xc000);
+	for (i = 0; i < ARRAY_SIZE(dagu_android_ds_regs); i++)
+		writel_relaxed(dagu_android_ds_regs[i][1],
+			       vfe->base + dagu_android_ds_regs[i][0]);
+	wmb();
+	dev_info(vfe->camss->dev,
+		 "dagu front ds program n=%zu en5608=0x%x en5e08=0x%x c5868=0x%x/0x%x wm6=0x%x/0x%x/0x%x wm7=0x%x/0x%x/0x%x core=0x%x\n",
+		 ARRAY_SIZE(dagu_android_ds_regs),
+		 readl_relaxed(vfe->base + 0x5608),
+		 readl_relaxed(vfe->base + 0x5e08),
+		 readl_relaxed(vfe->base + 0x5868),
+		 readl_relaxed(vfe->base + 0x586c),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_CFG_0(DISP_DS4_WM)),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_CFG_2(DISP_DS4_WM)),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_PACKER_CFG(DISP_DS4_WM)),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_CFG_0(DISP_DS16_WM)),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_CFG_2(DISP_DS16_WM)),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_PACKER_CFG(DISP_DS16_WM)),
+		 readl_relaxed(vfe->base + VFE_CORE_CFG_0));
+}
+
+static void dagu_front_ds_feed(struct vfe_device *vfe)
+{
+	writel_relaxed(lower_32_bits(vfe_480_ds4_dma),
+		       vfe->base + VFE_BUS_WM_IMAGE_ADDR(DISP_DS4_WM));
+	writel_relaxed(lower_32_bits(vfe_480_ds16_dma),
+		       vfe->base + VFE_BUS_WM_IMAGE_ADDR(DISP_DS16_WM));
+	if (!(readl_relaxed(vfe->base + VFE_BUS_WM_CFG(DISP_DS4_WM)) &
+	      (1 << WM_CFG_EN))) {
+		wmb();
+		writel_relaxed(1 << WM_CFG_EN | MODE_QCOM_PLAIN << WM_CFG_MODE,
+			       vfe->base + VFE_BUS_WM_CFG(DISP_DS4_WM));
+		writel_relaxed(1 << WM_CFG_EN | MODE_QCOM_PLAIN << WM_CFG_MODE,
+			       vfe->base + VFE_BUS_WM_CFG(DISP_DS16_WM));
+	}
+}
+
 static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 {
 	struct v4l2_pix_format_mplane *pix =
@@ -2663,6 +3074,9 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 		 */
 		if (wm == DISP_Y_WM) {
 			vfe_480_pix_pipeline(vfe, line);
+			if (dagu_ds_mode && dagu_front_pix)
+				dagu_front_ds_program(vfe);
+			dagu_ovr_apply(vfe, DAGU_PH_INIT);
 			/*
 			 * #425 Camera ID 1 live BUS WM6 0xF40144
 			 * 324×244 / WM7 0x3D0051 81×61, dummy IOVA.
@@ -2749,10 +3163,100 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 			  bpl * pix->height, false);
 }
 
+static unsigned int dagu_last_written_row(u8 *base, unsigned int stride,
+					    unsigned int active, unsigned int rows,
+					    unsigned int off)
+{
+	unsigned int r, i, last = 0;
+
+	for (r = 0; r < rows; r++) {
+		u8 *row = base + off + (r * stride);
+
+		for (i = 0; i < active; i++) {
+			if (row[i] != 0xa5) {
+				last = r + 1;
+				break;
+			}
+		}
+	}
+	return last;
+}
+
+static void dagu_front_sentinel_one(struct vfe_device *vfe, struct camss_buffer *buf,
+				    int idx, unsigned int stride, unsigned int width,
+				    unsigned int height)
+{
+	struct vb2_buffer *vb = &buf->vb.vb2_buf;
+	void *vaddr = vb2_plane_vaddr(vb, 0);
+	unsigned int bytes = vb2_get_plane_payload(vb, 0);
+	unsigned int active = width < stride ? width : stride;
+	unsigned int y = 0, c = 0;
+
+	if (!vaddr || !bytes || !stride) {
+		dev_info(vfe->camss->dev,
+			 "dagu front sentinel i=%d empty bytes=%u\n", idx, bytes);
+		return;
+	}
+	invalidate_kernel_vmap_range(vaddr, bytes);
+	y = dagu_last_written_row(vaddr, stride, active, height, 0);
+	if (bytes > stride * height)
+		c = dagu_last_written_row(vaddr, stride, active, height / 2,
+					  stride * height);
+	dev_info(vfe->camss->dev,
+		 "dagu front sentinel i=%d y=%u/%u c=%u/%u bytes=%u addr=0x%llx\n",
+		 idx, y, height, c, height / 2, bytes,
+		 (unsigned long long)buf->addr[0]);
+}
+
+static void dagu_front_sentinel(struct vfe_device *vfe)
+{
+	struct vfe_line *line = &vfe->line[VFE_LINE_PIX];
+	struct vfe_output *output = &line->output;
+	struct v4l2_pix_format_mplane *pix = &line->video_out.active_fmt.fmt.pix_mp;
+	struct camss_buffer *held[8];
+	struct camss_buffer *pending;
+	unsigned int stride = pix->plane_fmt[0].bytesperline;
+	unsigned int width = pix->width;
+	unsigned int height = pix->height;
+	int n = 0, i;
+
+	if (!stride || !width || !height) {
+		dev_info(vfe->camss->dev, "dagu front sentinel no format\n");
+		return;
+	}
+	if (output->buf[0])
+		held[n++] = output->buf[0];
+	if (output->buf[1] && output->buf[1] != output->buf[0])
+		held[n++] = output->buf[1];
+	list_for_each_entry(pending, &output->pending_bufs, queue) {
+		if (n < 8)
+			held[n++] = pending;
+	}
+	if (!n) {
+		dev_info(vfe->camss->dev, "dagu front sentinel none\n");
+		return;
+	}
+	for (i = 0; i < n; i++)
+		dagu_front_sentinel_one(vfe, held[i], i, stride, width, height);
+}
+
 static void vfe_wm_stop(struct vfe_device *vfe, u8 wm)
 {
 	if (wm == DISP_Y_WM || wm == DISP_C_WM) {
 		if (wm == DISP_Y_WM) {
+			dagu_fr_stop(vfe);
+			dagu_front_sof_n = 0;
+			if (dagu_front_pix && vfe->id == 1) {
+				dagu_front_sentinel(vfe);
+				dagu_csid_trace_report(vfe->camss->dev);
+				dev_info(vfe->camss->dev,
+					 "dagu front evt total=%u shown=%u\n",
+					 dagu_front_evt_n, dagu_front_evt_shown);
+			}
+			if (dagu_front_rup_ready) {
+				hrtimer_cancel(&dagu_front_rup_timer);
+				hrtimer_cancel(&dagu_front_mid_timer);
+			}
 			dev_info(vfe->camss->dev,
 				 "dagu ife%d pix stop irq0=0x%x bus=0x%x viol=0x%x img=0x%x ccif=0x%x ovf=0x%x camif=0x%x/0x%x core=0x%x wm4=0x%x/0x%x wm5=0x%x/0x%x burst5=0x%x incr5=0x%x wm5cfg1=0x%x\n",
 				 vfe->id,
@@ -2924,8 +3428,10 @@ static void vfe_480_camif_go(struct vfe_device *vfe)
 	pat = vfe_480_pixel_pattern(
 		vfe->line[VFE_LINE_PIX].fmt[MSM_VFE_PAD_SINK].code);
 	cfg = CAMIF_EN | CAMIF_IFE_OUT_EN | (pat << CAMIF_PIXEL_PATTERN);
+	dagu_ovr_apply(vfe, DAGU_PH_GO);
 	vfe_480_clc_enable(vfe, CLC_CAMIF, cfg);
 	wmb();
+	dagu_fr_start(vfe);
 	dev_info(vfe->camss->dev,
 		 "dagu ife%d camif go camif=0x%x addr4/5=0x%x/0x%x cfg4/5=0x%x/0x%x as0=0x%x/0x%x as1=0x%x/0x%x as2=0x%x/0x%x as3=0x%x/0x%x wm6/7=0x%x/0x%x\n",
 		 vfe->id,
@@ -2954,7 +3460,15 @@ static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
 
 	if (wm != DISP_Y_WM && wm != DISP_C_WM)
 		wm = RDI_WM(wm);
+	if (wm == DISP_Y_WM && dagu_ds_mode && dagu_front_pix)
+		dagu_front_ds_feed(vfe);
 	writel_relaxed(addr, vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));
+	if (dagu_front_pix && dagu_reload_phase == 1 &&
+	    (wm == DISP_Y_WM || wm == DISP_C_WM))
+		dev_info(vfe->camss->dev,
+			 "dagu front reload wm=%u wrote=0x%x read=0x%x\n",
+			 wm, addr,
+			 readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm)));
 	if (wm != DISP_Y_WM && wm != DISP_C_WM)
 		return;
 	/*
@@ -2985,12 +3499,59 @@ static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
 		       vfe->base + VFE_BUS_WM_CFG(wm));
 }
 
+/*
+ * 2026-10-24 device: reloading the same front CAMIF crop
+ * 0xa1f0000/0x2df0000 plus skip/period on the buf_done RUP logged
+ * "camif rearm" and still left /tmp/pix.nv12 at 8110080, one
+ * COMP_DONE, camif debug 0x2e00a20. Do not put that reload back.
+ * Do not write crop 0. Do not write CAMIF EN.
+ * Holding the front buf_done RUP until CAMIF EOF logged
+ * "rup-at-eof cmd=0x41" and still left 8110080, one COMP_DONE,
+ * second SOF dbg0=0x2e00a20. Do not hold that RUP.
+ * Front CDM packet 1 demosaic 0x3868 = 0x06a90400 / 0x820
+ * logged "demosaic steady" on the buf_done RUP and still left
+ * 8110080, one COMP_DONE, second SOF dbg0=0x2e00a20.
+ * Do not put that steady pair back.
+ * GIC bank flip with the packet-0 0x3468 blob was falsified.
+ * Packet-1 blob (starts 0x07c107c1), bank left at 0, logged
+ * "gic steady" and still left 8110080, one COMP_DONE, second
+ * SOF dbg0=0x2e00a20. Do not put that blob back.
+ * Android writes 0x2660 = 0x02000101 in every CDM packet.
+ * Rewriting the live 0x2000101 on the buf_done RUP, without
+ * clearing it, logged "camif cmd rewrite" and still left
+ * 8110080, one COMP_DONE, second SOF dbg0=0x2e00a20.
+ * Do not rewrite that word. Do not write 0. Do not pulse EN.
+ *
+ * Front CDM packets after the first write 0x34 = 0x41 then 0x34 = 0x4.
+ * Pulsing that 0x4 after the PIX 0x41 on the 2592x1952 sink logged
+ * "front rup tail 0x4 after 0x41" once, on the only COMP_DONE.
+ * /tmp/pix.nv12 stayed 8110080. camif irq1 stayed 0x1 0xc 0x2 0x1.
+ * Stop stayed dbg0=0x2e00a20, as3 unconsumed. Do not write 0x4 again.
+ * Do not OR it into 0x45.
+ */
+/*
+ * Rewriting front MNDS V, CAMIF crop/epoch and Demux AHB before
+ * every PIX 0x41 logged "dagu front shadow refresh" on the init
+ * RUPs and on the COMP_DONE RUP. Still one 8110080, no second
+ * epoch. Do not refresh that shadow again. Do not write 0x4.
+ */
 static void vfe_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 {
 	if (line_id == VFE_LINE_PIX) {
 		vfe->reg_update |= REG_UPDATE_PIX;
+		if (dagu_front_pix && (dagu_rup_mode & 1) && dagu_in_comp_done) {
+			dagu_rup_pending = true;
+			return;
+		}
 		wmb();
 		writel_relaxed(vfe->reg_update, vfe->base + VFE_REG_UPDATE_CMD);
+		if (dagu_front_pix && dagu_reload_phase == 1) {
+			dev_info(vfe->camss->dev,
+				 "dagu front reload rup wrote=0x%x read=0x%x\n",
+				 vfe->reg_update,
+				 readl_relaxed(vfe->base + VFE_REG_UPDATE_CMD));
+			dagu_reload_phase = 2;
+		}
 		return;
 	}
 
@@ -3039,6 +3600,7 @@ static void vfe_enable_irq(struct vfe_device *vfe)
 				BUS_IRQ_MASK_0_COMP_DONE(vfe, DISP_COMP_GROUP);
 
 	writel(bus_irq_mask, vfe->base + VFE_BUS_IRQ_MASK(0));
+	dagu_front_irq_mask(vfe);
 }
 
 static void vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id);
@@ -3050,6 +3612,37 @@ static void vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
  *
  * Return IRQ_HANDLED on success
  */
+static enum hrtimer_restart dagu_front_mid_fn(struct hrtimer *timer)
+{
+	struct vfe_device *vfe = dagu_front_rup_vfe;
+
+	(void)timer;
+	if (!vfe || !vfe->base)
+		return HRTIMER_NORESTART;
+	dev_info(vfe->camss->dev,
+		 "dagu front mid n=%d dbg0=0x%x dbg1=0x%x hw=0x%x wmd4=0x%x wmd5=0x%x wmd6=0x%x wmd7=0x%x as2=0x%x/0x%x viol=0x%x img=0x%x irq0=0x%x bus=0x%x cmd=0x%x\n",
+		 dagu_mid_n,
+		 readl_relaxed(vfe->base + CAMIF_DEBUG_0),
+		 readl_relaxed(vfe->base + CLC_CAMIF + CLC_CAMIF_DEBUG_1),
+		 readl_relaxed(vfe->base + CLC_CAMIF + CLC_HW_STATUS),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_DEBUG(DISP_Y_WM)),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_DEBUG(DISP_C_WM)),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_DEBUG(DISP_DS4_WM)),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_DEBUG(DISP_DS16_WM)),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_ADDR_STATUS2(DISP_Y_WM)),
+		 readl_relaxed(vfe->base + VFE_BUS_WM_ADDR_STATUS2(DISP_C_WM)),
+		 readl_relaxed(vfe->base + VFE_VIOLATION_STATUS),
+		 readl_relaxed(vfe->base + VFE_BUS_IMAGE_SIZE_VIOLATION),
+		 readl_relaxed(vfe->base + VFE_IRQ_STATUS(0)),
+		 readl_relaxed(vfe->base + VFE_BUS_IRQ_STATUS(0)),
+		 readl_relaxed(vfe->base + 0x2660));
+	if (++dagu_mid_n == 1) {
+		hrtimer_forward_now(timer, ms_to_ktime(2));
+		return HRTIMER_RESTART;
+	}
+	return HRTIMER_NORESTART;
+}
+
 static irqreturn_t vfe_isr(int irq, void *dev)
 {
 	struct vfe_device *vfe = dev;
@@ -3057,6 +3650,37 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 	int i;
 
 	status = readl_relaxed(vfe->base + VFE_IRQ_STATUS(0));
+	if (dagu_front_pix && vfe->id == 1) {
+		u32 status1 = readl_relaxed(vfe->base + VFE_IRQ_STATUS(1));
+		u32 bus = readl_relaxed(vfe->base + VFE_BUS_IRQ_STATUS(0));
+
+		dagu_front_evt_n++;
+		if (dagu_front_evt_shown < 96) {
+			dagu_front_evt_shown++;
+			dev_info(vfe->camss->dev,
+				 "dagu front evt us=%llu n=%u status0=0x%x status1=0x%x bus=0x%x dbg0=0x%x dbg1=0x%x wm4=0x%x wmd4=0x%x wmd5=0x%x as2=0x%x/0x%x hw=0x%x img=0x%x\n",
+				 ktime_get_ns() / 1000, dagu_front_evt_n, status, status1, bus,
+				 readl_relaxed(vfe->base + CAMIF_DEBUG_0),
+				 readl_relaxed(vfe->base + CAMIF_DEBUG_1),
+				 readl_relaxed(vfe->base + VFE_BUS_WM_IMAGE_ADDR(DISP_Y_WM)),
+				 readl_relaxed(vfe->base + VFE_BUS_WM_DEBUG(DISP_Y_WM)),
+				 readl_relaxed(vfe->base + VFE_BUS_WM_DEBUG(DISP_C_WM)),
+				 readl_relaxed(vfe->base + VFE_BUS_WM_ADDR_STATUS2(DISP_Y_WM)),
+				 readl_relaxed(vfe->base + VFE_BUS_WM_ADDR_STATUS2(DISP_C_WM)),
+				 readl_relaxed(vfe->base + CLC_CAMIF + CLC_HW_STATUS),
+				 readl_relaxed(vfe->base + VFE_BUS_IMAGE_SIZE_VIOLATION));
+		}
+	}
+	if (dagu_front_pix &&
+	    (status & (BIT(31) | BIT(29) | BIT(25) | BIT(12) | BIT(11)))) {
+		static int top_n;
+
+		if (top_n < 6) {
+			top_n++;
+			dev_info(vfe->camss->dev, "dagu front top irq0=0x%x\n",
+				 status);
+		}
+	}
 	writel_relaxed(status, vfe->base + VFE_IRQ_CLEAR(0));
 
 	if (!vfe_is_lite(vfe)) {
@@ -3065,8 +3689,69 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 		writel_relaxed(status1, vfe->base + VFE_IRQ_CLEAR(1));
 		if (status1 & IRQ_MASK_1_CAMIF)
 			dev_info_ratelimited(vfe->camss->dev,
-					     "dagu ife%d camif irq1=0x%x\n",
-					     vfe->id, status1);
+					     "dagu ife%d camif irq1=0x%x dbg0=0x%x dbg1=0x%x hw=0x%x mnds=0x%x wmd=0x%x/0x%x\n",
+					     vfe->id, status1,
+					     readl_relaxed(vfe->base + CAMIF_DEBUG_0),
+					     readl_relaxed(vfe->base + CLC_CAMIF + CLC_CAMIF_DEBUG_1),
+					     readl_relaxed(vfe->base + CLC_CAMIF + CLC_HW_STATUS),
+					     readl_relaxed(vfe->base + CLC_MNDS_Y + MNDS_SPARE),
+					     readl_relaxed(vfe->base + VFE_BUS_WM_DEBUG(DISP_Y_WM)),
+					     readl_relaxed(vfe->base + VFE_BUS_WM_DEBUG_1(DISP_Y_WM)));
+		if ((status1 & BIT(1)) && dagu_front_pix && vfe->id == 1)
+			dagu_ovr_apply(vfe, DAGU_PH_EOF);
+		if ((status1 & BIT(0)) && dagu_front_pix && vfe->id == 1)
+			dagu_ovr_apply(vfe, DAGU_PH_SOF);
+		if ((status1 & BIT(1)) && dagu_front_pix) {
+			if (!dagu_front_rup_ready) {
+				hrtimer_setup(&dagu_front_rup_timer, dagu_front_rup_fn,
+					      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+				hrtimer_setup(&dagu_front_mid_timer, dagu_front_mid_fn,
+					      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+				dagu_front_rup_ready = true;
+			}
+			dagu_front_rup_vfe = vfe;
+			if (dagu_rup_pending) {
+				dagu_rup_pending = false;
+				wmb();
+				writel_relaxed(vfe->reg_update,
+					       vfe->base + VFE_REG_UPDATE_CMD);
+				dev_info(vfe->camss->dev,
+					 "dagu front eof rup wrote=0x%x\n",
+					 vfe->reg_update);
+			}
+			if (dagu_wm5_rearm) {
+				u32 d0 = readl_relaxed(vfe->base +
+						       VFE_BUS_WM_DEBUG(DISP_C_WM));
+				u32 cfg0 = readl_relaxed(vfe->base +
+							 VFE_BUS_WM_IMAGE_CFG_0(DISP_C_WM));
+				u32 incr = readl_relaxed(vfe->base +
+							 VFE_BUS_WM_FRAME_INCR(DISP_C_WM));
+
+				writel_relaxed(cfg0, vfe->base +
+					       VFE_BUS_WM_IMAGE_CFG_0(DISP_C_WM));
+				writel_relaxed(incr, vfe->base +
+					       VFE_BUS_WM_FRAME_INCR(DISP_C_WM));
+				wmb();
+				writel_relaxed(1 << WM_CFG_EN |
+					       MODE_QCOM_PLAIN << WM_CFG_MODE,
+					       vfe->base + VFE_BUS_WM_CFG(DISP_C_WM));
+				dev_info(vfe->camss->dev,
+					 "dagu front wm5 rearm dbg 0x%x -> 0x%x\n", d0,
+					 readl_relaxed(vfe->base +
+						       VFE_BUS_WM_DEBUG(DISP_C_WM)));
+			}
+			if (!(dagu_rup_mode & 2))
+				hrtimer_start(&dagu_front_rup_timer, ms_to_ktime(16),
+					      HRTIMER_MODE_REL);
+		}
+		if ((status1 & BIT(0)) && dagu_front_pix) {
+			dagu_front_sof_n++;
+			if (dagu_front_sof_n == 2 && dagu_front_rup_ready) {
+				dagu_mid_n = 0;
+				hrtimer_start(&dagu_front_mid_timer, ms_to_ktime(1),
+					      HRTIMER_MODE_REL);
+			}
+		}
 	}
 
 	writel_relaxed(IRQ_CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
@@ -3135,7 +3820,15 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 					     readl_relaxed(vfe->base + VFE_BUS_WM_ADDR_STATUS3(DISP_Y_WM)),
 					     readl_relaxed(vfe->base + VFE_BUS_WM_ADDR_STATUS3(DISP_C_WM)));
 			vfe_isr_reg_update(vfe, VFE_LINE_PIX);
+			if (dagu_front_pix && vfe->id == 1 && dagu_reload_phase == 0)
+				dagu_reload_phase = 1;
+			dagu_in_comp_done = true;
 			vfe_buf_done(vfe, DISP_Y_WM);
+			dagu_in_comp_done = false;
+			if (dagu_front_pix && vfe->id == 1 && dagu_reload_phase == 1) {
+				dev_info(vfe->camss->dev, "dagu front reload none\n");
+				dagu_reload_phase = 2;
+			}
 		}
 
 		for (i = 0; i < MSM_VFE_IMAGE_MASTERS_NUM; i++) {

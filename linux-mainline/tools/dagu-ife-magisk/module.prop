@@ -1,0 +1,6 @@
+id=dagu_ife_rd
+name=Dagu IFE register read
+version=1
+versionCode=1
+author=dagu
+description=Reads IFE1 debug registers on demand. Does not load at boot.

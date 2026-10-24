@@ -7,7 +7,9 @@
  * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  * Copyright (C) 2015-2018 Linaro Ltd.
  */
+#include <linux/cacheflush.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <media/media-entity.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-device.h>
@@ -188,6 +190,24 @@ static int video_buf_prepare(struct vb2_buffer *vb)
 			return -EINVAL;
 
 		vb2_set_plane_payload(vb, i, format->plane_fmt[i].sizeimage);
+	}
+
+	/*
+	 * Front PIX only. 0xA5 stays where the write master did not
+	 * store a byte, so a stopped frame shows the last written row.
+	 */
+	if (!strcmp(video->vdev.name, "msm_vfe1_video3")) {
+		unsigned int n = vb2_get_plane_payload(vb, 0);
+		void *vaddr = vb2_plane_vaddr(vb, 0);
+
+		/*
+		 * Write the bytes out before the capture map invalidates
+		 * the cache. Unwritten rows stay 0xA5 in RAM.
+		 */
+		if (vaddr && n) {
+			memset(vaddr, 0xa5, n);
+			flush_kernel_vmap_range(vaddr, n);
+		}
 	}
 
 	vbuf->field = V4L2_FIELD_NONE;

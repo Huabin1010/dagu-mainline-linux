@@ -9,6 +9,7 @@
  */
 
 #include <linux/cacheflush.h>
+#include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
 #include <linux/hrtimer.h>
 #include <linux/interrupt.h>
@@ -16,6 +17,10 @@
 #include <linux/iopoll.h>
 #include <linux/math64.h>
 #include <linux/moduleparam.h>
+#include <linux/sizes.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/uaccess.h>
 #include <media/v4l2-mediabus.h>
 
 #include "camss.h"
@@ -126,10 +131,10 @@ static ktime_t dagu_fr_t0;
 static struct hrtimer dagu_fr_timer;
 static bool dagu_fr_init_done;
 static struct vfe_device *dagu_fr_vfe;
-static unsigned int dagu_fr_us = 20;
+static unsigned int dagu_fr_us;
 module_param(dagu_fr_us, uint, 0644);
 MODULE_PARM_DESC(dagu_fr_us, "flight recorder period in us, 0 = off");
-static unsigned int dagu_fr_ms = 120;
+static unsigned int dagu_fr_ms = 2000;
 module_param(dagu_fr_ms, uint, 0644);
 MODULE_PARM_DESC(dagu_fr_ms, "flight recorder window after pix_go");
 
@@ -255,6 +260,303 @@ static void dagu_ovr_apply(struct vfe_device *vfe, int phase)
 				 readl_relaxed(vfe->base + off));
 	}
 	wmb();
+}
+
+/*
+ * debugfs IQ program interface (/sys/kernel/debug/dagu_ife1/).
+ *
+ *   prog_front, prog_rear  text program, applied to IFE1 PIX at init
+ *                          (after the driver program, before the first
+ *                          RUP) and, for "@sof" lines, at every SOF.
+ *   live                   one-shot program applied at the next SOF;
+ *                          it latches at the following PIX RUP. 3A uses
+ *                          this for gains, matrices and LUTs.
+ *   dmird                  "BASE BANK N" reads N DMI words at the next
+ *                          SOF; reading the file returns them in hex.
+ *
+ * Program lines:
+ *   [@sof] w OFF VAL               AHB write
+ *   [@sof] dmi BASE BANK V0 V1 ... DMI upload: BANK -> BASE+0x08, data
+ *                                  -> BASE+0x0c, then 0 -> BASE+0x08
+ * Only 0x2c and the CLC window 0x2000..0x9ffc are writable.
+ */
+#define DAGU_OP_W	0
+#define DAGU_PROG_MAX	32768
+#define DAGU_LIVE_MAX	8192
+struct dagu_op {
+	u32 off;
+	u32 val;
+	u8 sof;
+};
+struct dagu_prog {
+	struct dagu_op *ops;
+	unsigned int n, max;
+	char *text;
+	size_t text_len;
+};
+static struct dagu_prog dagu_prog_front, dagu_prog_rear, dagu_prog_live;
+static bool dagu_live_pending;
+static DEFINE_SPINLOCK(dagu_prog_lock);
+static u32 dagu_dmird_base, dagu_dmird_bank, dagu_dmird_n;
+static bool dagu_dmird_pending;
+static u32 *dagu_dmird_buf;
+static unsigned int dagu_dmird_got;
+static struct dentry *dagu_dbg_dir;
+
+static bool dagu_off_ok(u32 off)
+{
+	return !(off & 3) && (off == 0x2c || (off >= 0x2000 && off < 0xa000));
+}
+
+/* Parse text into ops (process context). Returns op count or -errno. */
+static int dagu_prog_parse(char *text, struct dagu_op *ops, unsigned int max)
+{
+	unsigned int n = 0;
+	char *line, *s = text;
+
+	while ((line = strsep(&s, "\n"))) {
+		char *tok, *p = line;
+		bool sof = false;
+		u32 a, b, v;
+
+		tok = strsep(&p, " \t");
+		while (tok && !*tok)
+			tok = strsep(&p, " \t");
+		if (!tok || tok[0] == '#')
+			continue;
+		if (!strcmp(tok, "@sof")) {
+			sof = true;
+			tok = strsep(&p, " \t");
+		}
+		if (!tok)
+			continue;
+		if (!strcmp(tok, "w")) {
+			if (kstrtou32(strsep(&p, " \t") ?: "", 0, &a) ||
+			    kstrtou32(strsep(&p, " \t") ?: "", 0, &v) || !dagu_off_ok(a))
+				return -EINVAL;
+			if (n >= max)
+				return -ENOSPC;
+			ops[n++] = (struct dagu_op){ a, v, sof };
+		} else if (!strcmp(tok, "dmi")) {
+			if (kstrtou32(strsep(&p, " \t") ?: "", 0, &a) ||
+			    kstrtou32(strsep(&p, " \t") ?: "", 0, &b) ||
+			    !dagu_off_ok(a + 8) || !dagu_off_ok(a + 0xc))
+				return -EINVAL;
+			if (n >= max)
+				return -ENOSPC;
+			ops[n++] = (struct dagu_op){ a + 8, b, sof };
+			while ((tok = strsep(&p, " \t"))) {
+				if (!*tok)
+					continue;
+				if (kstrtou32(tok, 0, &v))
+					return -EINVAL;
+				if (n >= max)
+					return -ENOSPC;
+				ops[n++] = (struct dagu_op){ a + 0xc, v, sof };
+			}
+			if (n >= max)
+				return -ENOSPC;
+			ops[n++] = (struct dagu_op){ a + 8, 0, sof };
+		} else {
+			return -EINVAL;
+		}
+	}
+	return n;
+}
+
+static void dagu_prog_run(struct vfe_device *vfe, struct dagu_prog *pg, bool sof)
+{
+	unsigned int i;
+
+	for (i = 0; i < pg->n; i++) {
+		if (pg->ops[i].sof != sof)
+			continue;
+		writel_relaxed(pg->ops[i].val, vfe->base + pg->ops[i].off);
+		/* DMI select and data are ordered against each other. */
+		if ((pg->ops[i].off & 0xff) == 0x08)
+			wmb();
+	}
+	wmb();
+}
+
+/* init: after the driver program. sof: from the CAMIF SOF IRQ. */
+static void dagu_prog_apply(struct vfe_device *vfe, bool sof)
+{
+	struct dagu_prog *pg = dagu_front_pix ? &dagu_prog_front : &dagu_prog_rear;
+	unsigned long flags;
+	unsigned int i;
+
+	if (vfe->id != 1)
+		return;
+	spin_lock_irqsave(&dagu_prog_lock, flags);
+	if (pg->ops)
+		dagu_prog_run(vfe, pg, sof);
+	if (sof && dagu_live_pending && dagu_prog_live.ops) {
+		/* live lines are one-shot: run them all now */
+		for (i = 0; i < dagu_prog_live.n; i++) {
+			writel_relaxed(dagu_prog_live.ops[i].val,
+				       vfe->base + dagu_prog_live.ops[i].off);
+			if ((dagu_prog_live.ops[i].off & 0xff) == 0x08)
+				wmb();
+		}
+		wmb();
+		dagu_live_pending = false;
+	}
+	if (sof && dagu_dmird_pending && dagu_dmird_buf) {
+		writel_relaxed(dagu_dmird_bank, vfe->base + dagu_dmird_base + 8);
+		wmb();
+		for (i = 0; i < dagu_dmird_n; i++)
+			dagu_dmird_buf[i] = readl_relaxed(vfe->base +
+							  dagu_dmird_base + 0xc);
+		writel_relaxed(0, vfe->base + dagu_dmird_base + 8);
+		wmb();
+		dagu_dmird_got = dagu_dmird_n;
+		dagu_dmird_pending = false;
+	}
+	spin_unlock_irqrestore(&dagu_prog_lock, flags);
+}
+
+static ssize_t dagu_prog_write(struct file *f, const char __user *ubuf,
+			       size_t len, loff_t *ppos)
+{
+	struct dagu_prog *pg = file_inode(f)->i_private;
+	struct dagu_op *ops, *old_ops;
+	char *text, *work, *old_text;
+	unsigned long flags;
+	int n;
+
+	if (len > SZ_1M)
+		return -EFBIG;
+	text = kvmalloc(len + 1, GFP_KERNEL);
+	work = kvmalloc(len + 1, GFP_KERNEL);
+	ops = kvmalloc_array(pg->max, sizeof(*ops), GFP_KERNEL);
+	if (!text || !work || !ops) {
+		n = -ENOMEM;
+		goto err;
+	}
+	if (copy_from_user(text, ubuf, len)) {
+		n = -EFAULT;
+		goto err;
+	}
+	text[len] = 0;
+	memcpy(work, text, len + 1);
+	n = dagu_prog_parse(work, ops, pg->max);
+	kvfree(work);
+	work = NULL;
+	if (n < 0)
+		goto err;
+	spin_lock_irqsave(&dagu_prog_lock, flags);
+	old_ops = pg->ops;
+	old_text = pg->text;
+	pg->ops = ops;
+	pg->n = n;
+	pg->text = text;
+	pg->text_len = len;
+	if (pg == &dagu_prog_live)
+		dagu_live_pending = n > 0;
+	spin_unlock_irqrestore(&dagu_prog_lock, flags);
+	kvfree(old_ops);
+	kvfree(old_text);
+	return len;
+err:
+	kvfree(text);
+	kvfree(work);
+	kvfree(ops);
+	return n;
+}
+
+static ssize_t dagu_prog_read(struct file *f, char __user *ubuf, size_t len,
+			      loff_t *ppos)
+{
+	struct dagu_prog *pg = file_inode(f)->i_private;
+	char hdr[64];
+	int h;
+
+	if (*ppos == 0 && !pg->text) {
+		h = scnprintf(hdr, sizeof(hdr), "# empty\n");
+		return simple_read_from_buffer(ubuf, len, ppos, hdr, h);
+	}
+	return simple_read_from_buffer(ubuf, len, ppos, pg->text, pg->text_len);
+}
+
+static const struct file_operations dagu_prog_fops = {
+	.owner = THIS_MODULE,
+	.write = dagu_prog_write,
+	.read = dagu_prog_read,
+	.llseek = default_llseek,
+};
+
+static ssize_t dagu_dmird_write(struct file *f, const char __user *ubuf,
+				size_t len, loff_t *ppos)
+{
+	char buf[64];
+	u32 base, bank, n;
+	unsigned long flags;
+
+	if (len >= sizeof(buf) || copy_from_user(buf, ubuf, len))
+		return -EINVAL;
+	buf[len] = 0;
+	if (sscanf(buf, "%i %i %i", &base, &bank, &n) != 3 ||
+	    !dagu_off_ok(base + 8) || !n || n > 4096)
+		return -EINVAL;
+	if (!dagu_dmird_buf)
+		dagu_dmird_buf = kvcalloc(4096, sizeof(u32), GFP_KERNEL);
+	if (!dagu_dmird_buf)
+		return -ENOMEM;
+	spin_lock_irqsave(&dagu_prog_lock, flags);
+	dagu_dmird_base = base;
+	dagu_dmird_bank = bank;
+	dagu_dmird_n = n;
+	dagu_dmird_got = 0;
+	dagu_dmird_pending = true;
+	spin_unlock_irqrestore(&dagu_prog_lock, flags);
+	return len;
+}
+
+static ssize_t dagu_dmird_read(struct file *f, char __user *ubuf, size_t len,
+			       loff_t *ppos)
+{
+	unsigned int i, n = dagu_dmird_got;
+	ssize_t ret;
+	char *out;
+	int o = 0;
+
+	out = kvmalloc(n * 9 + 64, GFP_KERNEL);
+	if (!out)
+		return -ENOMEM;
+	o += scnprintf(out + o, 64, "# base=0x%x bank=%u n=%u%s\n",
+		       dagu_dmird_base, dagu_dmird_bank, n,
+		       dagu_dmird_pending ? " pending" : "");
+	for (i = 0; i < n; i++)
+		o += scnprintf(out + o, 10, "%08x%c", dagu_dmird_buf[i],
+			       (i % 8 == 7) ? '\n' : ' ');
+	ret = simple_read_from_buffer(ubuf, len, ppos, out, o);
+	kvfree(out);
+	return ret;
+}
+
+static const struct file_operations dagu_dmird_fops = {
+	.owner = THIS_MODULE,
+	.write = dagu_dmird_write,
+	.read = dagu_dmird_read,
+	.llseek = default_llseek,
+};
+
+static void dagu_dbg_init(void)
+{
+	if (dagu_dbg_dir)
+		return;
+	dagu_prog_front.max = DAGU_PROG_MAX;
+	dagu_prog_rear.max = DAGU_PROG_MAX;
+	dagu_prog_live.max = DAGU_LIVE_MAX;
+	dagu_dbg_dir = debugfs_create_dir("dagu_ife1", NULL);
+	debugfs_create_file("prog_front", 0600, dagu_dbg_dir, &dagu_prog_front,
+			    &dagu_prog_fops);
+	debugfs_create_file("prog_rear", 0600, dagu_dbg_dir, &dagu_prog_rear,
+			    &dagu_prog_fops);
+	debugfs_create_file("live", 0600, dagu_dbg_dir, &dagu_prog_live,
+			    &dagu_prog_fops);
+	debugfs_create_file("dmird", 0600, dagu_dbg_dir, NULL, &dagu_dmird_fops);
 }
 
 void dagu_csid_trace_report(struct device *dev);
@@ -2368,6 +2670,246 @@ static void dagu_front_irq_mask(struct vfe_device *vfe)
 		 readl_relaxed(vfe->base + VFE_BUS_IRQ_MASK(0)));
 }
 
+/*
+ * Deterministic DISP program (#628). Every block on the IFE1 PIX path
+ * is either written from the stream formats or switched off, so one
+ * stream no longer inherits the previous one's registers. Semantics
+ * measured on dagu with sensor colour bars / solid levels (see
+ * docs/dagu-ife-disp-pipeline.md):
+ *
+ *  MNDS +0x68 in size, +0x6c H phase, +0x74 V phase (Q21 | 0xc0000000);
+ *       chroma phases are twice the luma ones; the other words are 0.
+ *  DMI  per module: +0x08 address, +0x0c LUT select, +0x14 data.
+ *  Gamma 64 segments over the 12-bit input (idx = in >> 6), stored in
+ *       8-bit output units: the LUT value reaches the NV12 luma 1:1.
+ *  CST  Y coefficients Q10, Cb/Cr Q12 (13-bit signed); inputs G,B,R.
+ *  CC   rows by input channel in G,B,R order, Q7.
+ *  Demux gain 0x04 per channel takes the 10-bit sensor to the 12-bit
+ *       pipe the gamma indexes; black 64 is already removed there.
+ */
+static unsigned int dagu_disp_new = 1;
+module_param(dagu_disp_new, uint, 0644);
+MODULE_PARM_DESC(dagu_disp_new, "1 = deterministic DISP program, 0 = legacy");
+/* Bayer order as the IFE sees it; -1 = from the mbus code. Front bars
+ * decode as RGGB (pattern 0) while imx596 reports SBGGR10. */
+static int dagu_pattern_override = -1;
+
+static const u32 vfe_480_gamma_srgb[64] = {
+	0x08800, 0x03c22, 0x03031, 0x0283d, 0x02047, 0x01c4f, 0x01c56, 0x0185d,
+	0x01863, 0x01469, 0x0146e, 0x01473, 0x01078, 0x0147c, 0x01081, 0x01085,
+	0x01089, 0x0108d, 0x00c91, 0x01094, 0x00c98, 0x00c9b, 0x0109e, 0x00ca2,
+	0x00ca5, 0x00ca8, 0x00cab, 0x00cae, 0x008b1, 0x00cb3, 0x00cb6, 0x00cb9,
+	0x008bc, 0x00cbe, 0x008c1, 0x00cc3, 0x008c6, 0x008c8, 0x00cca, 0x008cd,
+	0x008cf, 0x00cd1, 0x008d4, 0x008d6, 0x008d8, 0x008da, 0x00cdc, 0x008df,
+	0x008e1, 0x008e3, 0x008e5, 0x008e7, 0x008e9, 0x008eb, 0x008ed, 0x004ef,
+	0x008f0, 0x008f2, 0x008f4, 0x008f6, 0x008f8, 0x004fa, 0x008fb, 0x008fd,
+};
+
+/* BT.601 full range (the NV12 node reports full-range 601). */
+static const u32 vfe_480_cst_601_full[12] = {
+	0x00750259, 0x00000132, 0x00000000, 0x03ff0000,
+	0x07fe1ab3, 0x00001d4d, 0x02000000, 0x03ff0000,
+	0x1eb3194d, 0x000007fe, 0x02000000, 0x03ff0000,
+};
+
+/* CLC blocks that are not on the linear DISP path. */
+static const u16 vfe_480_disp_off[] = {
+	0x2200, 0x2400, 0x2800, 0x2a00, 0x2c00, 0x2e00, 0x3200,
+	0x3600, 0x3c00, 0x4200, 0x4400, 0x4600, 0x4800, 0x4a00, 0x5800,
+	0x5a00, 0x6000, 0x6200, 0x7e00, 0x8000, 0x8200, 0x8400, 0x8600,
+	0x8800, 0x8a00, 0x8e00, 0x9c00,
+};
+
+/*
+ * 0x3400 (MODULE 0xc101, three DMI LUTs) removes the sensor black and
+ * filters the Bayer noise: with it off a 10-bit code 64 (sensor black)
+ * leaves the pipe at sRGB ~70 and every dark pixel sits on that veil;
+ * with it on code 64 lands at ~9. Words are the HyperOS live values.
+ */
+static const u32 vfe_480_bnr_front[46] = {
+	0x03000300, 0x03000300, 0x00636363, 0x00636363, 0x00000000, 0x01000100,
+	0x01000100, 0x00030403, 0x3c303af0, 0x00282a00, 0x00000329, 0x028f0000,
+	0x0a3c05c2, 0x01000100, 0x01000100, 0x00000000, 0x00000000, 0x00000000,
+	0x01000100, 0x01000100, 0x00000000, 0x00000000, 0x01000000, 0x0ccc0200,
+	0x00cd00cd, 0x00cd00cd, 0x00000000, 0x00000000, 0x00000000, 0x00cd00cd,
+	0x00cd00cd, 0x00000000, 0x00000000, 0x00000800, 0x00010001, 0x0020c080,
+	0x020b007d, 0x017e00ab, 0x00bb015e, 0x20040408, 0x01000100, 0x01000100,
+	0x00000000, 0x00000000, 0x000003c0, 0x0000087f,
+};
+static const u32 vfe_480_bnr_rear[46] = {
+	0x03800380, 0x03800380, 0x00636363, 0x00636363, 0x00000000, 0x01000100,
+	0x01000100, 0x00030403, 0x3a063808, 0x00633864, 0x0000029a, 0x028f0000,
+	0x0a3c05c2, 0x01000100, 0x01000100, 0x00000000, 0x00000000, 0x00000000,
+	0x01000100, 0x01000100, 0x00000000, 0x00000000, 0x01000000, 0x0ccc0200,
+	0x004d004d, 0x004d004d, 0x00000000, 0x00000000, 0x00000000, 0x004d004d,
+	0x004d004d, 0x00000000, 0x00000000, 0x00000800, 0x00010001, 0x0020c080,
+	0x01a6009b, 0x01d5008c, 0x011d00e6, 0x20040408, 0x01000100, 0x01000100,
+	0x00000000, 0x00000000, 0x000003c0, 0x0000087f,
+};
+
+static void vfe_480_dmi_load(struct vfe_device *vfe, u32 base, u32 sel,
+			     const u32 *lut, unsigned int n)
+{
+	unsigned int i;
+
+	writel_relaxed(sel, vfe->base + base + 0x0c);
+	writel_relaxed(0, vfe->base + base + 0x08);
+	wmb();
+	for (i = 0; i < n; i++)
+		writel_relaxed(lut[i], vfe->base + base + 0x14);
+	wmb();
+	writel_relaxed(0, vfe->base + base + 0x0c);
+}
+
+static void vfe_480_disp_mnds(struct vfe_device *vfe, u32 base, u32 in_w,
+			      u32 in_h, u32 out_w, u32 out_h)
+{
+	u32 o;
+
+	writel_relaxed(1, vfe->base + base + 0x60);
+	/* Filter config word; 0 here breaks the horizontal resampler. */
+	writel_relaxed(0x600, vfe->base + base + 0x64);
+	writel_relaxed(((in_w - 1) << 16) | (in_h - 1), vfe->base + base + 0x68);
+	writel_relaxed(0xc0000000 | (u32)div_u64((u64)in_w << 21, out_w),
+		       vfe->base + base + 0x6c);
+	writel_relaxed(0, vfe->base + base + 0x70);
+	writel_relaxed(0xc0000000 | (u32)div_u64((u64)in_h << 21, out_h),
+		       vfe->base + base + 0x74);
+	for (o = 0x78; o <= 0x84; o += 4)
+		writel_relaxed(0, vfe->base + base + o);
+}
+
+static void vfe_480_disp_clamp(struct vfe_device *vfe, u32 base, u32 cfg,
+			       u32 w, u32 h)
+{
+	writel_relaxed(cfg, vfe->base + base + 0x60);
+	writel_relaxed(0, vfe->base + base + 0x64);
+	writel_relaxed(h - 1, vfe->base + base + 0x68);
+	writel_relaxed(w - 1, vfe->base + base + 0x6c);
+	writel_relaxed(0x03ff0000, vfe->base + base + 0x70);
+	writel_relaxed(6, vfe->base + base + 0x74);
+	writel_relaxed(0x03ff0000, vfe->base + base + 0x78);
+	writel_relaxed(6, vfe->base + base + 0x7c);
+	writel_relaxed(0, vfe->base + base + 0x80);
+	writel_relaxed(0, vfe->base + base + 0x84);
+}
+
+static void vfe_480_disp_program(struct vfe_device *vfe, struct vfe_line *line)
+{
+	struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
+	struct v4l2_pix_format_mplane *pix =
+		&line->video_out.active_fmt.fmt.pix_mp;
+	u32 in_w = sink->width, in_h = sink->height;
+	u32 out_w = pix->width, out_h = pix->height;
+	u32 crop_w = in_w, crop_h = in_h, x0 = 0, y0 = 0;
+	u32 core, i;
+	bool front = in_w == 2592 && in_h == 1952;
+
+	if (!in_w || !in_h || !out_w || !out_h)
+		return;
+	/* Keep the aspect: centre-crop the sensor frame to the output. */
+	if ((u64)in_w * out_h > (u64)in_h * out_w)
+		crop_w = (u32)div_u64((u64)in_h * out_w, out_h) & ~3u;
+	else
+		crop_h = (u32)div_u64((u64)in_w * out_h, out_w) & ~3u;
+	x0 = ((in_w - crop_w) / 2) & ~3u;
+	y0 = ((in_h - crop_h) / 2) & ~3u;
+
+	dagu_front_pix = front;
+	dagu_pattern_override = front ? 0 : -1;
+	if (front) {
+		dagu_front_evt_n = 0;
+		dagu_front_evt_shown = 0;
+		dagu_reload_phase = 0;
+		dagu_rup_pending = false;
+	}
+
+	writel_relaxed(0xffffffff, vfe->base + VFE_CORE_CGC_OVD_0);
+	writel_relaxed(0xffffffff, vfe->base + VFE_CORE_CGC_OVD_1);
+	writel_relaxed(0xffffffff, vfe->base + VFE_AHB_CGC_OVD);
+	writel_relaxed(0xffffffff, vfe->base + VFE_NOC_CGC_OVD);
+	writel_relaxed(0, vfe->base + VFE_BUS_PWR_ISO_CFG);
+	vfe_480_bus_common(vfe);
+	vfe_480_camnoc_ife_qos(vfe);
+	core = 1 << CORE_CFG_0_OPERATING_MODE;
+	core |= BIT(CORE_CFG_0_VID_DS4_R2PD) | BIT(CORE_CFG_0_VID_DS16_R2PD);
+	core |= BIT(CORE_CFG_0_DISP_DS4_R2PD) | BIT(CORE_CFG_0_DISP_DS16_R2PD);
+	writel_relaxed(core, vfe->base + VFE_CORE_CFG_0);
+	writel_relaxed(1, vfe->base + VFE_TOP_DEBUG_CFG);
+	writel_relaxed(1, vfe->base + VFE_DIAGNOSTIC_HW);
+
+	for (i = 0; i < ARRAY_SIZE(vfe_480_disp_off); i++)
+		writel_relaxed(0, vfe->base + vfe_480_disp_off[i] + CLC_MODULE_CFG);
+	/* DS4 / DS16 Y/C: no WM6/7 on the linear path. */
+	writel_relaxed(0, vfe->base + 0x5408);
+	writel_relaxed(0, vfe->base + 0x5608);
+	writel_relaxed(0, vfe->base + 0x5c08);
+	writel_relaxed(0, vfe->base + 0x5e08);
+
+	/* CAMIF window (lines in 2ppc pairs), keep-all skip, epoch mid. */
+	writel_relaxed(0, vfe->base + CAMIF_SPARE);
+	writel_relaxed(((x0 + crop_w - 1) << 16) | x0,
+		       vfe->base + CAMIF_CROP_WIDTH);
+	writel_relaxed((((y0 + crop_h) / 2 - 1) << 16) | (y0 / 2),
+		       vfe->base + CAMIF_CROP_HEIGHT);
+	writel_relaxed(0xffffffff, vfe->base + CAMIF_LINE_SKIP);
+	writel_relaxed(0xffffffff, vfe->base + CAMIF_PIXEL_SKIP);
+	writel_relaxed(0x00010001, vfe->base + CAMIF_PERIOD);
+	writel_relaxed(0xffffffff, vfe->base + CAMIF_IRQ_SUBSAMPLE);
+	writel_relaxed((0x14 << 16) | (crop_h / 4), vfe->base + CLC_CAMIF_EPOCH);
+
+	/* Demux: per-sensor live words, then 4x to the 12-bit pipe. */
+	vfe_480_demux(vfe, in_w, in_h);
+	for (i = 0; i < 4; i++)
+		writel_relaxed(0x04040404, vfe->base + 0x3094 + 4 * i);
+
+	/* Black level + Bayer noise filter (0x3400). */
+	vfe_480_dmi_load(vfe, 0x3400, 1, dagu_front_abf1, ARRAY_SIZE(dagu_front_abf1));
+	vfe_480_dmi_load(vfe, 0x3400, 3, dagu_front_abf3, ARRAY_SIZE(dagu_front_abf3));
+	vfe_480_dmi_load(vfe, 0x3400, 4, dagu_front_abf4, ARRAY_SIZE(dagu_front_abf4));
+	vfe_480_pack(vfe, 0x3468, front ? vfe_480_bnr_front : vfe_480_bnr_rear, 46);
+	writel_relaxed(0, vfe->base + 0x3458);
+	writel_relaxed(0, vfe->base + 0x345c);
+	vfe_480_clc_enable(vfe, 0x3400, 0xc101);
+
+	/* Demosaic + WB (B<<16|G, R; Q10). AWB rewrites these via live. */
+	vfe_480_pack(vfe, CLC_DEMOSAIC + DEMOSAIC_WB,
+		     (const u32[]){ (0x600 << 16) | 0x400, 0x600, 0, 0 }, 4);
+	vfe_480_clc_enable(vfe, CLC_DEMOSAIC, DEMOSAIC_COMPACT_CFG);
+	vfe_480_pack(vfe, CLC_DEMOSAIC_INTERP,
+		     (const u32[]){ 0x80, 0x00800066 }, 2);
+
+	/* CC identity (G,B,R rows, Q7). */
+	vfe_480_pack(vfe, CLC_CC + CLC_CC_MATRIX,
+		     (const u32[]){ 0x80, 0, 0x800000, 0, 0, 0x80, 0, 0, 0 }, 9);
+	writel_relaxed(0, vfe->base + CLC_CC + CLC_CC_SPARE);
+	vfe_480_clc_enable(vfe, CLC_CC, BIT(0));
+
+	/* Gamma sRGB, the same curve on all three LUTs. */
+	for (i = 1; i <= 3; i++)
+		vfe_480_dmi_load(vfe, CLC_GAMMA, i, vfe_480_gamma_srgb,
+				 ARRAY_SIZE(vfe_480_gamma_srgb));
+	writel_relaxed(0, vfe->base + CLC_GAMMA + 0x58);
+	writel_relaxed(0, vfe->base + CLC_GAMMA + 0x5c);
+	vfe_480_clc_enable(vfe, CLC_GAMMA, 1);
+
+	vfe_480_pack(vfe, CLC_CST + 0x68, vfe_480_cst_601_full,
+		     ARRAY_SIZE(vfe_480_cst_601_full));
+	vfe_480_clc_enable(vfe, CLC_CST, 1);
+
+	vfe_480_disp_mnds(vfe, CLC_MNDS_Y, crop_w, crop_h, out_w, out_h);
+	vfe_480_disp_mnds(vfe, CLC_MNDS_C, crop_w, crop_h, out_w / 2, out_h / 2);
+	vfe_480_disp_clamp(vfe, CLC_RNDCLAMP_POST_Y, 0xe01, out_w, out_h);
+	vfe_480_disp_clamp(vfe, CLC_RNDCLAMP_POST_C, 0x3e01, out_w / 2, out_h / 2);
+	wmb();
+
+	dagu_front_irq_mask(vfe);
+	dev_info(vfe->camss->dev,
+		 "dagu ife%d disp in %ux%u crop %ux%u@%u,%u out %ux%u pattern=%d\n",
+		 vfe->id, in_w, in_h, crop_w, crop_h, x0, y0, out_w, out_h,
+		 dagu_pattern_override);
+}
+
 static void vfe_480_pix_pipeline(struct vfe_device *vfe, struct vfe_line *line)
 {
 	struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
@@ -3073,10 +3615,14 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 		 * demosaic / MNDS) hangs CAMNOC on this IFE.
 		 */
 		if (wm == DISP_Y_WM) {
-			vfe_480_pix_pipeline(vfe, line);
+			if (dagu_disp_new)
+				vfe_480_disp_program(vfe, line);
+			else
+				vfe_480_pix_pipeline(vfe, line);
 			if (dagu_ds_mode && dagu_front_pix)
 				dagu_front_ds_program(vfe);
 			dagu_ovr_apply(vfe, DAGU_PH_INIT);
+			dagu_prog_apply(vfe, false);
 			/*
 			 * #425 Camera ID 1 live BUS WM6 0xF40144
 			 * 324×244 / WM7 0x3D0051 81×61, dummy IOVA.
@@ -3427,6 +3973,8 @@ static void vfe_480_camif_go(struct vfe_device *vfe)
 	 */
 	pat = vfe_480_pixel_pattern(
 		vfe->line[VFE_LINE_PIX].fmt[MSM_VFE_PAD_SINK].code);
+	if (dagu_disp_new && dagu_pattern_override >= 0)
+		pat = dagu_pattern_override;
 	cfg = CAMIF_EN | CAMIF_IFE_OUT_EN | (pat << CAMIF_PIXEL_PATTERN);
 	dagu_ovr_apply(vfe, DAGU_PH_GO);
 	vfe_480_clc_enable(vfe, CLC_CAMIF, cfg);
@@ -3701,6 +4249,8 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 			dagu_ovr_apply(vfe, DAGU_PH_EOF);
 		if ((status1 & BIT(0)) && dagu_front_pix && vfe->id == 1)
 			dagu_ovr_apply(vfe, DAGU_PH_SOF);
+		if ((status1 & BIT(0)) && vfe->id == 1)
+			dagu_prog_apply(vfe, true);
 		if ((status1 & BIT(1)) && dagu_front_pix) {
 			if (!dagu_front_rup_ready) {
 				hrtimer_setup(&dagu_front_rup_timer, dagu_front_rup_fn,
@@ -4072,6 +4622,7 @@ static void vfe_subdev_init(struct device *dev, struct vfe_device *vfe)
 {
 	vfe->video_ops = vfe_video_ops_480;
 	vfe_480_ds_alloc(dev);
+	dagu_dbg_init();
 	if (!vfe_480_camnoc) {
 		vfe_480_camnoc = devm_ioremap(dev, CAMNOC_PHYS, CAMNOC_SIZE);
 		if (!vfe_480_camnoc)

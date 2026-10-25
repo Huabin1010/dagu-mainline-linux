@@ -128,6 +128,8 @@ python3 linux-mainline/scripts/fb-usb.py getvar unlocked   # 必须是 yes
 | 充电 | 和原厂一样由电源芯片判断充满和回充（截止电流 230 mA，4.40 V 回充） |
 | 休眠 | 合上保护套或按电源键进浅休眠，可以用 Wi-Fi 魔术包远程唤醒 |
 | 关机 | 关机时显示滚动的系统日志，文件系统写完后才黑屏 |
+| 浏览器 | 预装适配过的 Chromium（硬件解码、Wayland、中文输入），在 Dock 第一位 |
+| 系统更新 | 我们改过的包（Chromium、mutter/gnome-shell、PipeWire、Mesa、libcamera、BlueZ、设置面板）已锁定版本，`apt upgrade` 不会把它们换成官方版本 |
 
 ## 8. 已经装过 Ubuntu，只升级
 

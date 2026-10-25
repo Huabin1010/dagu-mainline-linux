@@ -126,6 +126,8 @@ The system ships with the settings we use every day:
 | Charging | The charger IC decides full and recharge, as on stock (230 mA termination, 4.40 V recharge) |
 | Suspend | Closing the cover or pressing power suspends; a Wi-Fi magic packet wakes it |
 | Shutdown | The system log scrolls while shutting down; the screen goes dark after the filesystem is read-only |
+| Browser | The adapted Chromium (hardware decode, Wayland, Chinese input) is preinstalled and first in the dock |
+| Updates | The packages we patched (Chromium, mutter/gnome-shell, PipeWire, Mesa, libcamera, BlueZ, Settings) are held, so `apt upgrade` does not replace them with the archive builds |
 
 ## 8. Ubuntu is already installed: upgrade only
 

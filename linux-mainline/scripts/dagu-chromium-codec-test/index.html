@@ -1,0 +1,209 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>dagu Chromium codec test</title>
+<style>
+  html, body { margin: 0; background: #000; color: #0f0; font: 14px monospace; }
+  video { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: contain; }
+  #log { position: fixed; left: 0; bottom: 0; background: #000a; white-space: pre; z-index: 2; }
+  #status { position: fixed; left: 0; top: 0; right: 0; z-index: 2; padding: 12px 16px;
+            background: #000c; color: #fff; font: bold 28px sans-serif; }
+</style>
+<div id="status">dagu 编解码测试：等待开始</div>
+<div id="log"></div>
+<script>
+'use strict';
+const log = (s) => { document.getElementById('log').textContent += s + '\n'; };
+const status = (s) => { document.getElementById('status').textContent = 'dagu 编解码测试：' + s; };
+
+function frameToCanvas(src, w, h) {
+  const c = new OffscreenCanvas(w, h);
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(src, 0, 0, w, h);
+  return g.getImageData(0, 0, w, h).data;
+}
+
+// PSNR over R, G and B of two RGBA buffers.
+function psnr(a, b) {
+  let se = 0, n = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    for (let k = 0; k < 3; k++) {
+      const d = a[i + k] - b[i + k];
+      se += d * d;
+    }
+    n += 3;
+  }
+  const mse = se / n;
+  return mse === 0 ? Infinity : 10 * Math.log10(255 * 255 / mse);
+}
+
+function loadImage(url) {
+  return new Promise((ok, bad) => {
+    const im = new Image();
+    im.onload = () => ok(im);
+    im.onerror = () => bad(new Error('no reference ' + url));
+    im.src = url;
+  });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Drop the player now. A detached <video> keeps its decoder and its 4K
+// frame pool (~300 MB) until garbage collection, and a run of 4K clips
+// then pushes the tablet into swap.
+function release(v) {
+  v.pause();
+  v.removeAttribute('src');
+  v.load();
+  v.remove();
+}
+
+// Every wait in a test is bounded so a stuck pipeline reports where it
+// stopped instead of hanging the harness.
+function within(ms, what, p) {
+  window.stage = what;
+  return Promise.race([p, new Promise((_, bad) =>
+    setTimeout(() => bad(new Error(what + ' timeout')), ms))]);
+}
+
+// Play `file` for `playMs`, keep playing `holdMs` more (the harness takes
+// its screenshot then, outside the measured window), then seek to `t` and
+// compare that frame with the ffmpeg reference PNG.
+window.playTest = async (file, ref, t, playMs, holdMs = 0) => {
+  const v = document.createElement('video');
+  v.muted = true;
+  v.loop = true;
+  v.playsInline = true;
+  v.src = file;
+  document.body.prepend(v);
+  const res = { file };
+  status('播放 ' + file);
+  try {
+    await within(15000, 'load', new Promise((ok, bad) => {
+      v.onloadeddata = ok;
+      v.onerror = () => bad(new Error('media error ' + (v.error && v.error.code) +
+                                      ' ' + (v.error && v.error.message)));
+    }));
+    res.width = v.videoWidth;
+    res.height = v.videoHeight;
+    // Start like autoplay does, at HAVE_ENOUGH_DATA. play() at
+    // loadeddata starts the clock with one frame buffered and the first
+    // ~200 ms are a network stall, not decoding.
+    if (v.readyState < HTMLMediaElement.HAVE_ENOUGH_DATA) {
+      await within(15000, 'buffer', new Promise((ok) => {
+        v.oncanplaythrough = ok;
+      }));
+    }
+    const tPlay = performance.now();
+    const firstFrame = new Promise((ok) => v.requestVideoFrameCallback(() => ok(performance.now())));
+    await within(10000, 'play', v.play());
+    const qStart = v.getVideoPlaybackQuality();
+    window.stage = 'starting';
+    res.startupMs = Math.round((await within(5000, 'first frame', firstFrame)) - tPlay);
+    // The first second pays for allocating and importing the frame pool
+    // (about 1 GB for 4K 10-bit); report it apart from steady playback.
+    await sleep(Math.max(0, 1000 - (performance.now() - tPlay)));
+    const q0 = v.getVideoPlaybackQuality();
+    res.startupDropped = q0.droppedVideoFrames - qStart.droppedVideoFrames;
+    const t0 = performance.now();
+    window.stage = 'playing';
+    await sleep(playMs);
+    const q1 = v.getVideoPlaybackQuality();
+    const sec = (performance.now() - t0) / 1000;
+    res.presented = q1.totalVideoFrames - q0.totalVideoFrames;
+    res.dropped = q1.droppedVideoFrames - q0.droppedVideoFrames;
+    res.fps = res.presented / sec;
+    if (holdMs) {
+      window.stage = 'screenshot';
+      await sleep(holdMs);
+    }
+    v.pause();
+    v.currentTime = t;
+    await within(10000, 'seek', new Promise((ok) => { v.onseeked = ok; }));
+    // The seeked frame is already current; requestVideoFrameCallback()
+    // would only fire for the next one. Let one paint go by.
+    await within(5000, 'paint', new Promise((ok) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => ok()))));
+    const im = await within(10000, 'reference', loadImage(ref));
+    window.stage = 'compare';
+    const a = frameToCanvas(v, v.videoWidth, v.videoHeight);
+    const b = frameToCanvas(im, v.videoWidth, v.videoHeight);
+    res.psnr = psnr(a, b);
+  } catch (e) {
+    res.error = String(e);
+  }
+  release(v);
+  log(JSON.stringify(res));
+  return res;
+};
+
+// WebCodecs: encode `n` frames drawn from a reference image with a moving
+// bar, require hardware, decode the chunks back and compare frame 0.
+window.encTest = async (codec, w, h, ref) => {
+  const res = { codec, w, h };
+  status('WebCodecs 硬件编码 ' + codec + ' ' + w + 'x' + h);
+  const cfg = { codec, width: w, height: h, framerate: 30, bitrate: w * h * 4,
+                hardwareAcceleration: 'prefer-hardware', latencyMode: 'quality' };
+  if (codec.startsWith('avc1')) cfg.avc = { format: 'annexb' };
+  if (codec.startsWith('hvc1') || codec.startsWith('hev1')) cfg.hevc = { format: 'annexb' };
+  try {
+    const sup = await VideoEncoder.isConfigSupported(cfg);
+    res.supported = sup.supported;
+    if (!sup.supported) return res;
+    const im = await loadImage(ref);
+    const canvas = new OffscreenCanvas(w, h);
+    const g = canvas.getContext('2d', { willReadFrequently: true });
+    const chunks = [];
+    let decCfg = null;
+    const enc = new VideoEncoder({
+      output: (c, md) => {
+        if (md && md.decoderConfig) decCfg = md.decoderConfig;
+        chunks.push(c);
+      },
+      error: (e) => { res.error = String(e); },
+    });
+    enc.configure(cfg);
+    const n = 60;
+    const t0 = performance.now();
+    let src0 = null;
+    for (let i = 0; i < n; i++) {
+      g.drawImage(im, 0, 0, w, h);
+      g.fillStyle = '#fff';
+      g.fillRect((i * 37) % (w - 64), 0, 64, h);
+      if (i === 0) src0 = g.getImageData(0, 0, w, h).data;
+      const f = new VideoFrame(canvas, { timestamp: i * 33333, duration: 33333 });
+      enc.encode(f, { keyFrame: i === 0 });
+      f.close();
+    }
+    await enc.flush();
+    res.encodeFps = n / ((performance.now() - t0) / 1000);
+    res.chunks = chunks.length;
+    res.bytes = chunks.reduce((s, c) => s + c.byteLength, 0);
+    enc.close();
+    if (!decCfg) decCfg = { codec };
+    decCfg.hardwareAcceleration = 'prefer-hardware';
+    const dsup = await VideoDecoder.isConfigSupported(decCfg);
+    res.decodeSupported = dsup.supported;
+    let first = null, decoded = 0;
+    const dec = new VideoDecoder({
+      output: (f) => {
+        if (!first) first = frameToCanvas(f, w, h);
+        decoded++;
+        f.close();
+      },
+      error: (e) => { res.decodeError = String(e); },
+    });
+    dec.configure(decCfg);
+    for (const c of chunks) dec.decode(c);
+    await dec.flush();
+    dec.close();
+    res.decoded = decoded;
+    if (first) res.psnr = psnr(first, src0);
+  } catch (e) {
+    res.error = String(e);
+  }
+  log(JSON.stringify(res));
+  return res;
+};
+window.done = (summary) => status('完成：' + summary);
+window.ready = true;
+</script>

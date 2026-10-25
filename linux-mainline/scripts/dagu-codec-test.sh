@@ -43,7 +43,7 @@ frames() {
 dec_fps() { # file element
 	gst-launch-1.0 -v filesrc location="$1" ! parsebin ! "$2" ! \
 		fpsdisplaysink video-sink=fakevideosink text-overlay=false sync=false \
-		fps-update-interval=200 2>/dev/null |
+		fps-update-interval=50 2>/dev/null |
 		sed -n 's/.*average: \([0-9.]*\).*/\1/p' | tail -1 | cut -d. -f1
 }
 dims() {
@@ -96,7 +96,13 @@ dec_test "HEVC Main 4K60" hevc-4k60.mp4 v4l2h265dec
 dec_test "HEVC Main10 4K60" hevc10-4k60.mp4 v4l2h265dec
 dec_test "VP9 4K60" vp9-4k60.webm v4l2vp9dec
 dec_test "VP8 1080p30" vp8-1080p.webm v4l2vp8dec
-dec_test "MPEG-2 1080p30" mpeg2-1080p.ts v4l2mpeg2dec
+# MPEG-2: Venus on SM8250 does not offer it (kernel hides the broken
+# firmware path); playback must pick the software decoder and be exact.
+if gst-inspect-1.0 v4l2mpeg2dec >/dev/null 2>&1; then
+	bad "MPEG-2: v4l2mpeg2dec is still registered (corrupt hardware path)"
+else
+	dec_test "MPEG-2 1080p30 (software)" mpeg2-1080p.ts avdec_mpeg2video
+fi
 
 # ---- hardware encode: source is a software decode of the clip ----
 enc_test() { # label src element parser caps extension

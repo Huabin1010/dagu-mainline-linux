@@ -2965,6 +2965,43 @@ if missing:
     raise SystemExit("hci_sync.c missing: " + ", ".join(missing))
 PY
 
+python3 - "$KERNEL_SRC/net/bluetooth/hci_sync.c" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: passive scan off before the LIAC slice"
+if marker not in text:
+    old = """\tmemset(&cp, 0, sizeof(cp));
+\tmemcpy(&cp.lap, liac, sizeof(cp.lap));
+\tcp.length = 0x02;
+\tbt_dev_info(hdev, "dagu: limited inquiry before LE scan");
+"""
+    new = """\t/* dagu: passive scan off before the LIAC slice. A bonded LE
+\t * mouse that is asleep keeps the accept-list scan running. Inquiry
+\t * Complete then sees HCI_LE_SCAN, takes the upstream branch and
+\t * stops discovery, so the LE slice and general inquiry never run
+\t * and Settings only gets 2.56 s of LIAC every 8 s. The LE slice
+\t * turns scanning back on in active mode.
+\t */
+\tif (hci_dev_test_flag(hdev, HCI_LE_SCAN)) {
+\t\tint err = hci_scan_disable_sync(hdev);
+
+\t\tif (err)
+\t\t\treturn err;
+\t}
+
+\tmemset(&cp, 0, sizeof(cp));
+\tmemcpy(&cp.lap, liac, sizeof(cp.lap));
+\tcp.length = 0x02;
+\tbt_dev_info(hdev, "dagu: limited inquiry before LE scan");
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: LIAC slice needle missing")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
 python3 - "$KERNEL_SRC/drivers/soc/qcom/qcom-geni-se.c" <<'PY'
 from pathlib import Path
 import sys

@@ -1387,6 +1387,91 @@ path.write_text(text)
 print(f"patched {path}: {marker}")
 PY
 
+# MGMT Start/Stop Discovery set the discovery state after queueing the
+# cmd_sync work. That work does not take hdev->lock. When there is
+# nothing to stop it finishes first (56 us on the tablet), sets
+# DISCOVERY_STOPPED and answers Success; then the caller writes
+# DISCOVERY_STOPPING over it. Nothing moves it back, so every later
+# Start Discovery is Busy and GNOME Settings lists no devices. Set the
+# state before queueing and undo it if queueing fails.
+python3 - "$KERNEL_SRC/net/bluetooth/mgmt.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: discovery state before queueing"
+if marker not in text:
+    start_old = """	err = hci_cmd_sync_queue(hdev, start_discovery_sync, cmd,
+				 start_discovery_complete);
+	if (err < 0) {
+		mgmt_pending_remove(cmd);
+		goto failed;
+	}
+
+	hci_discovery_set_state(hdev, DISCOVERY_STARTING);
+"""
+    start_new = """	/* dagu: discovery state before queueing. The work runs without
+	 * hdev->lock and its completion sets the next state.
+	 */
+	hci_discovery_set_state(hdev, DISCOVERY_STARTING);
+
+	err = hci_cmd_sync_queue(hdev, start_discovery_sync, cmd,
+				 start_discovery_complete);
+	if (err < 0) {
+		hci_discovery_set_state(hdev, DISCOVERY_STOPPED);
+		mgmt_pending_remove(cmd);
+		goto failed;
+	}
+"""
+    if text.count(start_old) != 2:
+        raise SystemExit(f"{path}: expected 2 start-discovery queue sites, found {text.count(start_old)}")
+    text = text.replace(start_old, start_new)
+
+    stop_old = """	err = hci_cmd_sync_queue(hdev, stop_discovery_sync, cmd,
+				 stop_discovery_complete);
+	if (err < 0) {
+		mgmt_pending_remove(cmd);
+		goto unlock;
+	}
+
+	hci_discovery_set_state(hdev, DISCOVERY_STOPPING);
+"""
+    stop_new = """	/* dagu: discovery state before queueing. With nothing to cancel
+	 * the work can finish and set DISCOVERY_STOPPED before this line
+	 * would run.
+	 */
+	old_state = hdev->discovery.state;
+	hci_discovery_set_state(hdev, DISCOVERY_STOPPING);
+
+	err = hci_cmd_sync_queue(hdev, stop_discovery_sync, cmd,
+				 stop_discovery_complete);
+	if (err < 0) {
+		hci_discovery_set_state(hdev, old_state);
+		mgmt_pending_remove(cmd);
+		goto unlock;
+	}
+"""
+    if stop_old not in text:
+        raise SystemExit(f"{path}: stop-discovery queue site not found")
+    text = text.replace(stop_old, stop_new, 1)
+
+    decl_old = """	struct mgmt_cp_stop_discovery *mgmt_cp = data;
+	struct mgmt_pending_cmd *cmd;
+	int err;
+"""
+    decl_new = """	struct mgmt_cp_stop_discovery *mgmt_cp = data;
+	struct mgmt_pending_cmd *cmd;
+	int old_state;
+	int err;
+"""
+    if decl_old not in text:
+        raise SystemExit(f"{path}: stop_discovery locals not found")
+    text = text.replace(decl_old, decl_new, 1)
+    path.write_text(text)
+    print(f"patched {path}: {marker}")
+PY
+
 # QCA6390 VDD_ASD (RF antenna switch). The binding already lists
 # vddasd-supply and WCN6750 uses it, but the QCA6390 pwrseq never
 # requested it. Stock dagu powers it from PM8150 L16 whenever BT is on

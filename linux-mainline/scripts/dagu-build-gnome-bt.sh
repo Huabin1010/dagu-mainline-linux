@@ -65,8 +65,19 @@ UI_DEB=$(ls -1 "$WORKDIR"/libgnome-bluetooth-ui-3.0-*.deb 2>/dev/null | head -n1
 CLIENT_DEB=$(ls -1 "$WORKDIR"/libgnome-bluetooth-3.0-1*.deb 2>/dev/null | head -n1)
 [ -n "$UI_DEB" ]
 [ -n "$CLIENT_DEB" ]
-dpkg -i "$CLIENT_DEB" "$UI_DEB" "$WORKDIR"/gnome-bluetooth-sendto_*.deb 2>/dev/null \
-	|| dpkg -i "$CLIENT_DEB" "$UI_DEB"
+# Replace sendto only where it is already installed. On a fresh rootfs it
+# is not, and dpkg -i of it alone left it unconfigured (Depends:
+# bluez-obexd), so every later apt-get in the image build failed with
+# "Unmet dependencies".
+DEBS="$CLIENT_DEB $UI_DEB"
+SENDTO_DEB=$(ls -1 "$WORKDIR"/gnome-bluetooth-sendto_*.deb 2>/dev/null | head -n1)
+if [ -n "$SENDTO_DEB" ] &&
+	dpkg-query -W -f='${Status}' gnome-bluetooth-sendto 2>/dev/null |
+		grep -q 'ok installed'; then
+	DEBS="$DEBS $SENDTO_DEB"
+fi
+# shellcheck disable=SC2086
+dpkg -i $DEBS
 apt-mark hold libgnome-bluetooth-3.0-13 2>/dev/null || true
 apt-mark hold libgnome-bluetooth-ui-3.0-13 2>/dev/null || true
 apt-mark hold libgnome-bluetooth-3.0-dev 2>/dev/null || true

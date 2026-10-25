@@ -62,11 +62,11 @@
 | GPU Adreno 650 / Turnip | **已通** | GMU + Mesa。主 fb UBWC。Chrome 一线 `dagu-chromium-native.sh`（`QCOM_COMPRESSED`，禁止 `libdagu-linear-mod.so`）。hangcheck `00800005` 仍会偶发 recover |
 | CPU 调频 + 温度 | **已通** | EPSS LUT，stress-ng 8/8 |
 | 触控 Himax | **已通** | QUP0 SE4 **GENI SPI FIFO**（`990000.spi` `proto=1 skip_wrap=1`）。gpio `himax_spi` 保持 disabled。禁止 GPI/SE DMA |
-| Wi‑Fi QCA6390 | **已通** | ath11k，iperf 约 600–665 Mbps |
+| Wi‑Fi QCA6390 | **已通** | ath11k，iperf 约 600–665 Mbps。插电关省电（网关 RTT 2.4 ms / 抖动 0.2 ms），电池开省电（7.4 ms / 5.5 ms）：`dagu-wifi-powersave` |
 | 扬声器 CS35L41 | **已通** | ADSP `running`。GENI I2C SE1/SE3。四颗 Halo `CAL_SET_STATUS=2` + Fast Use Case `*-music.txt`。card 0 `Xiaomi-dagu-CS35L41-WCD9385`。禁止 softvol |
 | 麦克风 | **已通** | 安卓 speaker-mic：AMIC5 / ADC4 INP5。UCM HiFi Mic，`hw:0,1`。喇叭 440 Hz 回录 |
-| 后摄 s5kjn1 | **已通（预览）** | live D-PHY 4-lane RAW10 4080×3060，SoftISP skip 4×4 → 1020×764 @~30fps。桌面 `/dev/video21` |
-| 前摄 imx596 | **已通（预览）** | D-PHY 4-lane RAW10 2592×1952，SoftISP skip 2×2 → 1296×976 @~30fps。桌面 `/dev/video20`。硬件 PIX 未过门：`dagu-front-camera-pipeline-status.md` |
+| 后摄 s5kjn1 | **已通（硬件 ISP 预览）** | IFE1 PIX 出 NV12 1280×960，生产者裁中间 16:9、打包 YUYV 1280×720 @30fps，3A（自动曝光/白平衡）在 CPU。桌面 `/dev/video21`。2026-10-25 实测生产者占一颗小核 8.7%，打开到首帧约 0.45 s。SoftISP 只在硬件通路起不来时兜底（`DAGU_CAMERA_SOFTISP=1` 强制） |
+| 前摄 imx596 | **已通（硬件 ISP 预览）** | 同上走 IFE1 PIX NV12 1280×960 → `/dev/video20` YUYV 1280×720 @30fps。生产者占一颗小核 12.2% |
 | CAMSS RDI / SMMU | **已通** | CSIPHY→CSID→VFE RDI 出 RAW。CSID TPG 也曾出完整 1 帧（约 15.6 MB） |
 | CAMSS（Camera Subsystem，相机子系统） IFE（Image Front End，图像前端） PIX（Pixel path，像素通路） | **部分** | `#500` 后置复测 **9331200 = 3×3110400**，`r0114=0x300`。前置 `#501`：紧包 2320 末行 4K 停写（4591616）；步长 4096 交出 **一整帧 8110080**，UV（chroma，色度）mean 128，末行满。30s 仍 1 帧。禁止 `ALIGN_UP FRAME_INCR`。产品预览继续 SoftISP（Software Image Signal Processor，软件图像信号处理器）。后置图 `dagu-ife-pipeline-status.md`；前置图 `dagu-ife-front-pipeline-status.md` |
 | 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6。`#333` `hci0` UP RUNNING PSCAN，HCI 5.2。BLE HOG + 经典 HID（`ClassicBondedOnly=false`）。`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。A2DP 走 Q6 `SLIMBUS_7_RX`（`hw:0,3`），见 `dagu-adsp-voice.md` |
@@ -80,7 +80,7 @@
 | 马达 | **DT 已写** | `#333` `pm8xxx_vib_ffmemless` 已 probe；未专项震感 |
 | 闪光灯 | **DT 已写** | `white:flash` max=255；脚本可点 torch |
 | 磁吸键盘 | **已通** | Nanosic GENI `&i2c2` `2-004c`。`#335` `Xiaomi Keyboard` `0018:15D9:00A3` `ID_BUS=i2c`，MCU `XM2022-152-0721B`。点 Shift → `dagu-fcitx5-shift-tap`（禁止 keyd grab 15d9:00a3）。`0x22` 保活后 400ms 内的空 `0x05` 不注入（GENI 残渣假 KEY_UP） |
-| IMU / 光线传感器 | **已通** | `&slpi` PAS + hexagonrpcd persist 转换过门。SEE `accel suid` 25 Hz 非零，`event11` 有字节，lux 非空。禁止 AP I2C 猜 IMU。见 `dagu-dsp-pipeline-status.md` |
+| IMU / 光线传感器 | **回退** | 9-17 曾通（SEE `accel suid` 25 Hz、lux 13.1）。2026-10-25 复查：SLPI 每次开机只读 `socinfo/hw_platform`，`sensors/config/*.json` 和 `persist-registry` 的访问时间都停在 10-05；SUID 查询对 accel/gyro/ambient_light/proximity 只回类型名、没有实例，`dagu-ssc` 不出样，iio-sensor-proxy 没有设备。禁止 AP I2C 猜 IMU。见 `dagu-dsp-pipeline-status.md` |
 | 视频编解码 Venus | **已通** | `/dev/video14` 解码 + `/dev/video15` 编码。1080p + **4K60 HEVC** `DMA_DRM`/`NV12` 上 Mutter。日常 `gst-play-1.0 --videosink=waylandsink`。mpv 仍 `v4l2m2m-copy`。**禁止**开 SM8250 ICC |
 | CDSP | **已通** | `&cdsp` PAS running，`/dev/fastrpc-cdsp`，`dagu-cdsp-rpc` GET_DSP_INFO + INIT_ATTACH。禁止 WebNN |
 | 蓝牙音频 / 耳机口 | **软件已通** | 板子无 3.5mm。A2DP 拓扑 `SLIMBUS_7_RX` 已接 Q6。听感要配对耳机。禁止 HCI SBC 软编 |

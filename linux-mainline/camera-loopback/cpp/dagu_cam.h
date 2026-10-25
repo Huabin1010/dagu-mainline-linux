@@ -33,6 +33,14 @@ int dagu_pipe_running(int slot);
 int dagu_hw_start(int slot, const char *loopback_dev);
 int dagu_loop_open(int slot, const char *dev, unsigned w, unsigned h);
 int dagu_loop_fd(int slot);
+/* Watch: subscribe a hold fd to v4l2loopback's client-usage event. The
+ * driver queues it on the first CAPTURE STREAMON and the last
+ * STREAMOFF. 0 on success. */
+int dagu_usage_subscribe(int fd);
+/* Watch: sleep up to timeout_ms on POLLPRI of the hold fds (-1 entries
+ * are skipped) and drain their events. 1 if a client-usage event
+ * arrived, 0 on timeout. */
+int dagu_usage_wait(const int *fds, int n, int timeout_ms);
 
 #ifdef __cplusplus
 }

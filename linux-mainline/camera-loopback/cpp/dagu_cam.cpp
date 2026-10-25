@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <mutex>
+#include <poll.h>
 #include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -192,6 +193,60 @@ int dagu_stamp_loopback(const char *dev, unsigned w, unsigned h)
 	s_ctrl(fd, 0x0098f901, 1); /* sustain_framerate */
 	log("%s stamped %ux%u YUYV hold-fd=%d", dev, w, h, fd);
 	return fd;
+}
+
+/* V4L2_EVENT_PRI_CLIENT_USAGE in v4l2loopback.c: private start +
+ * V4L2LOOPBACK_EVENT_OFFSET (0x08E00000) + 1. */
+#define DAGU_EVENT_CLIENT_USAGE (V4L2_EVENT_PRIVATE_START + 0x08E00000 + 1)
+
+int dagu_usage_subscribe(int fd)
+{
+	struct v4l2_event_subscription sub = {};
+
+	sub.type = DAGU_EVENT_CLIENT_USAGE;
+	if (ioctl(fd, VIDIOC_SUBSCRIBE_EVENT, &sub) < 0) {
+		log("fd %d client-usage subscribe: %m", fd);
+		return -1;
+	}
+	return 0;
+}
+
+int dagu_usage_wait(const int *fds, int n, int timeout_ms)
+{
+	struct pollfd pfd[2];
+	int m = 0;
+	int got = 0;
+
+	for (int i = 0; i < n && m < 2; i++) {
+		if (fds[i] < 0)
+			continue;
+		pfd[m].fd = fds[i];
+		pfd[m].events = POLLPRI;
+		pfd[m].revents = 0;
+		m++;
+	}
+	if (!m) {
+		usleep(timeout_ms * 1000);
+		return 0;
+	}
+	if (poll(pfd, m, timeout_ms) <= 0)
+		return 0;
+	for (int i = 0; i < m; i++) {
+		struct v4l2_event ev;
+
+		if (!(pfd[i].revents & POLLPRI))
+			continue;
+		/* The hold fd is blocking, so DQEVENT would sleep once the
+		 * queue is empty. POLLPRI says one is there; pending says
+		 * how many follow it. */
+		do {
+			if (ioctl(pfd[i].fd, VIDIOC_DQEVENT, &ev) < 0)
+				break;
+			if (ev.type == DAGU_EVENT_CLIENT_USAGE)
+				got = 1;
+		} while (ev.pending > 0);
+	}
+	return got;
 }
 
 int dagu_clear_cloexec(int fd)

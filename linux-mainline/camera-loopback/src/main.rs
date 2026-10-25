@@ -43,6 +43,8 @@ extern "C" {
     fn dagu_pipe_stop(slot: i32);
     fn dagu_pipe_running(slot: i32) -> i32;
     fn dagu_hw_start(slot: i32, loopback_dev: *const c_char) -> i32;
+    fn dagu_usage_subscribe(fd: i32) -> i32;
+    fn dagu_usage_wait(fds: *const i32, n: i32, timeout_ms: i32) -> i32;
 }
 
 fn cstr(s: &str) -> CString {
@@ -156,6 +158,10 @@ fn stamp_hold(dev: &str, w: u32, h: u32) -> Option<File> {
         eprintln!("dagu-camera-loopback: stamp {dev} failed");
         None
     } else {
+        /* The first CAPTURE STREAMON wakes watch through this fd. */
+        unsafe {
+            let _ = dagu_usage_subscribe(fd);
+        }
         /* SAFETY: dagu_stamp_loopback returns a new open fd or -1. */
         Some(unsafe { File::from_raw_fd(fd) })
     }
@@ -334,8 +340,21 @@ fn watch() -> ! {
         prev_rear = want_rear;
         /* Do not walk /proc/self/task every tick: idle watch was ~25% CPU
          * and the fd scan races Cursor's thousands of fds. SoftISP child
-         * pins itself. */
-        thread::sleep(Duration::from_millis(if hw { 250 } else { 400 }));
+         * pins itself.
+         *
+         * Sleep on the hold fds instead of a bare timer. A new app was
+         * only seen after the 2 s pid cache refresh plus a 400 ms tick,
+         * so the preview stayed gray for up to 2.4 s (0.93 s measured).
+         * The loopback queues a client-usage event on the first CAPTURE
+         * STREAMON and the last STREAMOFF; refresh the cache on it. */
+        let fds: [i32; 2] = [
+            hold_fds[0].as_ref().map_or(-1, |f| f.as_raw_fd()),
+            hold_fds[1].as_ref().map_or(-1, |f| f.as_raw_fd()),
+        ];
+        let tick = if hw { 250 } else { 400 };
+        if unsafe { dagu_usage_wait(fds.as_ptr(), 2, tick) } == 1 {
+            pid_cache_at = Instant::now() - Duration::from_secs(8);
+        }
     }
 }
 

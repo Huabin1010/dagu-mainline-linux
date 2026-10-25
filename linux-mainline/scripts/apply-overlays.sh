@@ -3002,6 +3002,48 @@ if marker not in text:
     print(f"patched {path}: {marker}")
 PY
 
+# QCA6390 VDD_ASD (RF antenna switch). The binding already lists
+# vddasd-supply and WCN6750 uses it, but the QCA6390 pwrseq never
+# requested it. Stock dagu powers it from PM8150 L16 whenever BT is on
+# (qca,bt-vdd-asd-supply). Boards without the property get a dummy.
+python3 - "$KERNEL_SRC/drivers/power/sequencing/pwrseq-qcom-wcn.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "dagu: QCA6390 VDD_ASD"
+if marker not in text:
+    old = """static const char *const pwrseq_qca6390_vregs[] = {
+	"vddio",
+	"vddaon",
+	"vddpmu",
+	"vddrfa0p95",
+	"vddrfa1p3",
+	"vddrfa1p9",
+	"vddpcie1p3",
+	"vddpcie1p9",
+};
+"""
+    new = """static const char *const pwrseq_qca6390_vregs[] = {
+	"vddio",
+	"vddaon",
+	"vddpmu",
+	"vddrfa0p95",
+	"vddrfa1p3",
+	"vddrfa1p9",
+	"vddpcie1p3",
+	"vddpcie1p9",
+	/* dagu: QCA6390 VDD_ASD feeds the RF antenna switch */
+	"vddasd",
+};
+"""
+    if old not in text:
+        raise SystemExit(f"{path}: pwrseq_qca6390_vregs not found")
+    path.write_text(text.replace(old, new, 1))
+    print(f"patched {path}: {marker}")
+PY
+
 python3 - "$KERNEL_SRC/drivers/soc/qcom/qcom-geni-se.c" <<'PY'
 from pathlib import Path
 import sys

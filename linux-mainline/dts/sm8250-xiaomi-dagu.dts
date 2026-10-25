@@ -1070,6 +1070,29 @@
 /* L81A dual-DPHY 4-lane (not elish NT36523 CPHY — that SErrors). */
 &apps_rsc {
 	regulators-0 {
+		/*
+		 * dagu-sm8250.dtsi runs pm8150_s5 at 2.0 V for both
+		 * vdd-wlan-rfa1 and qca,bt-vdd-rfa1 (kona default is 1.9 V).
+		 * This is the PMU VDD_RFA_1P9 input.
+		 */
+		vreg_s5a_1p9: smps5 {
+			regulator-min-microvolt = <2000000>;
+			regulator-max-microvolt = <2040000>;
+		};
+
+		/*
+		 * QCA6390 VDD_ASD (antenna switch). Stock DT:
+		 * qca,bt-vdd-asd-supply = <&pm8150_l16>, 3.024-3.304 V,
+		 * 10 mA. elish-common calls L16 unused, so nothing ever
+		 * voted it on and the BT antenna switch sat unpowered.
+		 */
+		vreg_l16a_3p0: ldo16 {
+			regulator-name = "vreg_l16a_3p0";
+			regulator-min-microvolt = <3024000>;
+			regulator-max-microvolt = <3304000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
 		vreg_l7a_1p83: ldo7 {
 			regulator-name = "vreg_l7a_1p83";
 			regulator-min-microvolt = <1832000>;
@@ -1839,6 +1862,8 @@
 &spi4 { status = "disabled"; };
 
 &{/qca6390-pmu} {
+	/* Stock qca,bt-vdd-asd-supply; see vreg_l16a_3p0. */
+	vddasd-supply = <&vreg_l16a_3p0>;
 	status = "okay";
 };
 

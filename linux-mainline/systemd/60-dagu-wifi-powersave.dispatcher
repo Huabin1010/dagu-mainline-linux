@@ -1,0 +1,8 @@
+#!/bin/sh
+# NetworkManager writes wifi.powersave on every activation. Re-apply the
+# charger rule after it (dagu-wifi-powersave).
+[ "$2" = up ] || exit 0
+case "$DEVICE_IFACE" in
+wl*) exec /usr/local/sbin/dagu-wifi-powersave ;;
+esac
+exit 0

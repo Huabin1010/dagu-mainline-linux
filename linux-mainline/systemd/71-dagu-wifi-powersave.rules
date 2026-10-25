@@ -1,0 +1,4 @@
+# Wi-Fi power save off on the charger, on on battery. See
+# /usr/local/sbin/dagu-wifi-powersave. iw only needs netlink, which udevd
+# allows, and returns in a few ms.
+ACTION=="change", SUBSYSTEM=="power_supply", ENV{POWER_SUPPLY_TYPE}=="USB|Mains", RUN+="/usr/local/sbin/dagu-wifi-powersave"

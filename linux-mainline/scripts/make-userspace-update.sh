@@ -41,6 +41,28 @@ install -m644 "$ROOT/systemd/20-dagu-wifi-wowlan.conf" \
 	"$STAGE/files/etc/NetworkManager/conf.d/20-dagu-wifi-wowlan.conf"
 install -m755 "$ROOT/scripts/dagu-wifi-wowlan-apply.sh" \
 	"$STAGE/files/usr/local/sbin/dagu-wifi-wowlan-apply"
+# Wi-Fi power save follows the charger.
+mkdir -p "$STAGE/files/etc/udev/rules.d" "$STAGE/files/etc/NetworkManager/dispatcher.d"
+install -m755 "$ROOT/scripts/dagu-wifi-powersave.sh" \
+	"$STAGE/files/usr/local/sbin/dagu-wifi-powersave"
+install -m644 "$ROOT/systemd/71-dagu-wifi-powersave.rules" \
+	"$STAGE/files/etc/udev/rules.d/71-dagu-wifi-powersave.rules"
+install -m755 "$ROOT/systemd/60-dagu-wifi-powersave.dispatcher" \
+	"$STAGE/files/etc/NetworkManager/dispatcher.d/60-dagu-wifi-powersave"
+# Bluetooth helper: own unit after bluetoothd, not udev RUN/ExecStartPost.
+install -m755 "$ROOT/scripts/dagu-bt-hid-host.sh" \
+	"$STAGE/files/usr/local/sbin/dagu-bt-hid-host.sh"
+sed -n '/^cat >\/etc\/systemd\/system\/dagu-bt-hid-host.service <<.EOF.$/,/^EOF$/p' \
+	"$ROOT/scripts/rootfs-desktop-setup.sh" | sed '1d;$d' \
+	>"$STAGE/files/etc/systemd/system/dagu-bt-hid-host.service"
+sed -n '/^cat >\/etc\/udev\/rules.d\/90-dagu-bt-hid-host.rules <<.EOF.$/,/^EOF$/p' \
+	"$ROOT/scripts/rootfs-desktop-setup.sh" | sed '1d;$d' \
+	>"$STAGE/files/etc/udev/rules.d/90-dagu-bt-hid-host.rules"
+grep -q 'WantedBy=bluetooth.service' "$STAGE/files/etc/systemd/system/dagu-bt-hid-host.service" &&
+	grep -q 'ACTION=="change"' "$STAGE/files/etc/udev/rules.d/90-dagu-bt-hid-host.rules" || {
+	echo "dagu-bt-hid-host unit/rule extract failed" >&2
+	exit 1
+}
 # Upstream QCA6390 amss/m3 (stage-firmware.sh). The kernel loads them from
 # the boot ramdisk; the rootfs copy is what a Wi-Fi restart reloads.
 FWQ="$ROOT/firmware/dagu/lib/firmware/ath11k/QCA6390/hw2.0"
@@ -73,7 +95,12 @@ cp -a "$here/files/." /
 systemctl disable --now dagu-offmode-daemon.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/dagu-offmode-daemon.service \
 	/etc/systemd/system/multi-user.target.wants/dagu-offmode-daemon.service
+# The helper as ExecStartPost held bluetooth.service for 19.6 s.
+rm -f /etc/systemd/system/bluetooth.service.d/dagu-hid-host.conf
 systemctl daemon-reload
+systemctl enable dagu-bt-hid-host.service >/dev/null 2>&1 || true
+udevadm control --reload || true
+/usr/local/sbin/dagu-wifi-powersave || true
 # Mark the booted A/B slot successful on every boot. Without it ABL's
 # retry counter (7 per set_active) runs out and the tablet stops in fastboot.
 systemctl enable --now dagu-boot-success.service

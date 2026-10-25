@@ -80,6 +80,13 @@ install -m 644 "$ROOT/systemd/dagu-boot-success.service" \
 mkdir -p "$ROOTFS/etc/systemd/system/multi-user.target.wants"
 ln -sfn /etc/systemd/system/dagu-boot-success.service \
 	"$ROOTFS/etc/systemd/system/multi-user.target.wants/dagu-boot-success.service"
+# Wi-Fi power save off on the charger (2.4 ms vs 7.4 ms gateway RTT).
+install -D -m 755 "$ROOT/scripts/dagu-wifi-powersave.sh" \
+	"$ROOTFS/usr/local/sbin/dagu-wifi-powersave"
+install -D -m 644 "$ROOT/systemd/71-dagu-wifi-powersave.rules" \
+	"$ROOTFS/etc/udev/rules.d/71-dagu-wifi-powersave.rules"
+install -D -m 755 "$ROOT/systemd/60-dagu-wifi-powersave.dispatcher" \
+	"$ROOTFS/etc/NetworkManager/dispatcher.d/60-dagu-wifi-powersave"
 # Last shutdown step: record a still-writable /, then darken the panel.
 install -D -m 755 "$ROOT/systemd/dagu-shutdown-final" \
 	"$ROOTFS/usr/lib/systemd/system-shutdown/dagu-shutdown-final"

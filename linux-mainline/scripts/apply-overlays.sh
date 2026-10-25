@@ -10394,3 +10394,42 @@ for name, old, new in edits:
     p.write_text(t.replace(old, new, 1))
     print(f"patched {p}: {marker}")
 PY
+
+# venus: no MPEG-2 decoder on Iris2 (SM8250). This firmware's split-mode
+# MPEG-2 output is wrong in 128 px column bands (alternate rows carry the
+# pixels 128 px to the right, every 320 px): 8.8 dB against ffmpeg on a
+# 1080p testsrc2 clip, and the 1792 compose only hid one band. Linear
+# DPB-only mode is rejected by the firmware. Software MPEG-2 at 1080p30
+# costs about a quarter of one core and is exact, so do not advertise it.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1]) / "drivers/media/platform/qcom/venus/vdec.c"
+t = p.read_text()
+marker = "dagu: no MPEG-2 decoder on Iris2"
+if marker not in t:
+    anchor = "static const struct venus_format *\nfind_format(struct venus_inst *inst, u32 pixfmt, u32 type)\n"
+    helper = f"""/* {marker}: output is corrupt; software decode is exact. */
+static bool vdec_codec_ok(struct venus_inst *inst, u32 pixfmt)
+{{
+	if (pixfmt == V4L2_PIX_FMT_MPEG2 &&
+	    (IS_IRIS2(inst->core) || IS_IRIS2_1(inst->core)))
+		return false;
+	return venus_helper_check_codec(inst, pixfmt);
+}}
+
+"""
+    if anchor not in t:
+        raise SystemExit(f"{p}: find_format anchor missing")
+    t = t.replace(anchor, helper + anchor, 1)
+    old1 = "\t    !venus_helper_check_codec(inst, fmt[i].pixfmt))\n\t\treturn NULL;\n"
+    new1 = "\t    !vdec_codec_ok(inst, fmt[i].pixfmt))\n\t\treturn NULL;\n"
+    old2 = "\t\t\tvalid = venus_helper_check_codec(inst, fmt[i].pixfmt);\n"
+    new2 = "\t\t\tvalid = vdec_codec_ok(inst, fmt[i].pixfmt);\n"
+    for old, new in ((old1, new1), (old2, new2)):
+        if old not in t:
+            raise SystemExit(f"{p}: check_codec needle missing")
+        t = t.replace(old, new, 1)
+    p.write_text(t)
+    print(f"patched {p}: {marker}")
+PY

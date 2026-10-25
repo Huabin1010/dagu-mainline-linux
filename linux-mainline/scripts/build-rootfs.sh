@@ -13,11 +13,14 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 command -v debootstrap >/dev/null || apt-get install -y debootstrap
-if ! command -v qemu-aarch64 >/dev/null && ! command -v qemu-aarch64-static >/dev/null; then
-	apt-get install -y qemu-user qemu-user-binfmt || \
-	apt-get install -y qemu-user-hwe qemu-user-binfmt-hwe
+# An arm64 builder (the tablet itself) runs the chroot natively.
+if [[ "$(uname -m)" != aarch64 ]]; then
+	if ! command -v qemu-aarch64 >/dev/null && ! command -v qemu-aarch64-static >/dev/null; then
+		apt-get install -y qemu-user qemu-user-binfmt || \
+		apt-get install -y qemu-user-hwe qemu-user-binfmt-hwe
+	fi
+	update-binfmts --enable qemu-aarch64 >/dev/null 2>&1 || true
 fi
-update-binfmts --enable qemu-aarch64 >/dev/null 2>&1 || true
 
 chroot_mount() {
 	mkdir -p "$ROOTFS/proc" "$ROOTFS/sys" "$ROOTFS/dev/pts"

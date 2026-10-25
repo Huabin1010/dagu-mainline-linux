@@ -7,15 +7,24 @@
 # Device-initiated HID (K380): GNOME Connect must not outgoing-page;
 # bluetoothd waits for the keypress while this script keeps PSCAN.
 # Do not StopDiscovery and do not kill gnome-control-center.
-# btmgmt/bluetoothctl can block on a down mgmt socket; cap each call so
-# bluetooth.service ExecStartPost cannot time out the daemon.
+# btmgmt/bluetoothctl can block on a down mgmt socket; cap each call.
+#
+# btmgmt reads commands from stdin through epoll. systemd and udev give
+# a service /dev/null, epoll refuses that fd, and btmgmt then waits
+# until timeout without sending anything. Every call here timed out
+# (10 x 1 s + 3 x 2 s), so connectable was never set and PSCAN stayed
+# off. An empty pipe is pollable and reads as EOF.
 set -eu
 
-bt() { timeout 2 btmgmt --index 0 "$@" >/dev/null 2>&1 || true; }
+bt() { : | timeout 2 btmgmt --index 0 "$@" >/dev/null 2>&1 || true; }
 
+# bluetoothd sends Set Connectable off as soon as Set Powered completes
+# (QCA firmware download, about 1.4 s). Anything written before that is
+# overwritten, so wait for "powered" in the current settings.
 i=0
-while [ "$i" -lt 10 ]; do
-	if timeout 1 btmgmt info >/dev/null 2>&1; then
+while [ "$i" -lt 20 ]; do
+	if : | timeout 1 btmgmt --index 0 info 2>/dev/null |
+		grep -q 'current settings: powered'; then
 		break
 	fi
 	i=$((i + 1))

@@ -184,10 +184,13 @@ fi
 cat >/usr/local/sbin/dagu-bt-hid-host.sh <<'EOF'
 #!/bin/sh
 set -eu
-bt() { timeout 2 btmgmt --index 0 "$@" >/dev/null 2>&1 || true; }
+# btmgmt cannot epoll a /dev/null stdin and hangs; give it an empty pipe.
+bt() { : | timeout 2 btmgmt --index 0 "$@" >/dev/null 2>&1 || true; }
+# bluetoothd writes Connectable off when Set Powered completes; wait for it.
 i=0
-while [ "$i" -lt 10 ]; do
-	timeout 1 btmgmt info >/dev/null 2>&1 && break
+while [ "$i" -lt 20 ]; do
+	: | timeout 1 btmgmt --index 0 info 2>/dev/null |
+		grep -q 'current settings: powered' && break
 	i=$((i + 1))
 	sleep 0.3
 done
@@ -204,11 +207,10 @@ timeout 3 bluetoothctl devices Paired 2>/dev/null | awk '{print $2}' | while rea
 done
 EOF
 chmod 755 /usr/local/sbin/dagu-bt-hid-host.sh
-mkdir -p /etc/systemd/system/bluetooth.service.d
-cat >/etc/systemd/system/bluetooth.service.d/dagu-hid-host.conf <<'EOF'
-[Service]
-ExecStartPost=/usr/local/sbin/dagu-bt-hid-host.sh
-EOF
+# Not ExecStartPost: the script then holds bluetooth.service in
+# "activating" (19.6 s while btmgmt hung on /dev/null). Run it as its
+# own unit after bluetoothd instead.
+rm -f /etc/systemd/system/bluetooth.service.d/dagu-hid-host.conf
 cat >/etc/systemd/system/dagu-bt-hid-host.service <<'EOF'
 [Unit]
 Description=dagu Bluetooth HID host pairable/PSCAN after QCA setup
@@ -216,7 +218,10 @@ After=bluetooth.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/dagu-bt-hid-host.sh
+[Install]
+WantedBy=bluetooth.service
 EOF
+systemctl enable dagu-bt-hid-host.service >/dev/null 2>&1 || true
 cat >/etc/systemd/system/dagu-bt-hid-host.timer <<'EOF'
 [Unit]
 Description=Re-apply dagu Bluetooth HID host after HCI UP race
@@ -228,8 +233,13 @@ Unit=dagu-bt-hid-host.service
 WantedBy=timers.target
 EOF
 systemctl enable dagu-bt-hid-host.timer >/dev/null 2>&1 || true
+# Add is covered by WantedBy=bluetooth.service. On change, queue the
+# unit; do not run the script from udev. udevd has no
+# AF_BLUETOOTH and bluetoothd is not up yet, so the script only ran into
+# its timeouts. hci0 and its rfkill child stay unprocessed meanwhile, and
+# bluetooth.target (and bluetoothd) started 24 s late.
 cat >/etc/udev/rules.d/90-dagu-bt-hid-host.rules <<'EOF'
-ACTION!="remove", SUBSYSTEM=="bluetooth", KERNEL=="hci[0-9]*", RUN+="/usr/local/sbin/dagu-bt-hid-host.sh"
+ACTION=="change", SUBSYSTEM=="bluetooth", KERNEL=="hci[0-9]*", RUN+="/usr/bin/systemctl --no-block start dagu-bt-hid-host.service"
 EOF
 
 

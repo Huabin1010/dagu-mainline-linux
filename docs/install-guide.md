@@ -4,7 +4,7 @@
 
 Follow this page from the top and the tablet ends up with a complete Ubuntu 26.04 GNOME desktop on mainline Linux 7.0. The display, touch, folio keyboard, Wi-Fi, Bluetooth, speakers, microphone, both cameras, hardware video decode, charging and suspend all work.
 
-This page matches Release **v0.1.6**. To upgrade a tablet that already runs Ubuntu, skip to [section 8](#8-ubuntu-is-already-installed-upgrade-only).
+This page matches Release **v0.1.7**. To upgrade a tablet that already runs Ubuntu, skip to [section 8](#8-ubuntu-is-already-installed-upgrade-only).
 
 ## 1. Read this first
 
@@ -42,11 +42,11 @@ Do **not** flash these images with Google platform-tools 37 `fastboot`. It hangs
 
 ## 3. Download and verify
 
-From the repository (without `gh`, download the assets from the [Release page](https://github.com/Huabin1010/dagu-mainline-linux/releases/tag/v0.1.6) into `linux-mainline/out/`):
+From the repository (without `gh`, download the assets from the [Release page](https://github.com/Huabin1010/dagu-mainline-linux/releases/tag/v0.1.7) into `linux-mainline/out/`):
 
 ```bash
 mkdir -p linux-mainline/out
-gh release download v0.1.6 --repo Huabin1010/dagu-mainline-linux --dir linux-mainline/out
+gh release download v0.1.7 --repo Huabin1010/dagu-mainline-linux --dir linux-mainline/out
 cd linux-mainline/out
 sha256sum -c SHA256SUMS
 sha256sum -c rootfs-desktop.SHA256SUMS
@@ -62,7 +62,7 @@ Both checks must print `OK`. If one fails, download again; do not flash.
 | `vendor_boot-dagu.img` | `vendor_boot_b` |
 | `dtbo-stub.img` | `dtbo_b` |
 | `vbmeta-disabled.img` | `vbmeta_b` (verified boot off) |
-| `dagu-userspace-v0.1.6.tar.gz` | Upgrade package for an installed system (section 8) |
+| `dagu-userspace-v0.1.7.tar.gz` | Upgrade package for an installed system (section 8) |
 | `SHA256SUMS`, `rootfs-desktop.SHA256SUMS` | Checksums |
 
 ## 4. Enter fastboot and check the device
@@ -120,13 +120,13 @@ The system ships with the settings we use every day:
 | Area | Default |
 |------|---------|
 | Wi-Fi | Power save off on the charger (about 2.4 ms to the router), on on battery |
-| Bluetooth | Ready about 9 s after boot; discovery alternates classic and LE scanning; bonded mice and keyboards reconnect on their own |
+| Bluetooth | Stock BlueZ settings. Classic keyboards (PIN typed on the keyboard) and BLE mice pair from Settings with one tap and are usable right away; bonded devices reconnect when you press a key or move the mouse |
 | Storage | Daily TRIM keeps the UFS WriteBooster cache available |
 | Cameras | Hardware ISP; the picture appears about 0.5 s after an app opens the camera, 30 fps |
 | Charging | The charger IC decides full and recharge, as on stock (230 mA termination, 4.40 V recharge) |
 | Suspend | Closing the cover or pressing power suspends; a Wi-Fi magic packet wakes it |
 | Shutdown | The system log scrolls while shutting down; the screen goes dark after the filesystem is read-only |
-| Browser | The adapted Chromium (hardware decode, Wayland, Chinese input) is preinstalled and first in the dock |
+| Browser | The adapted Chromium (hardware decode and WebCodecs hardware encode, Wayland, Chinese input) is preinstalled and first in the dock |
 | Updates | The packages we patched (Chromium, mutter/gnome-shell, PipeWire, Mesa, libcamera, BlueZ, Settings) are held, so `apt upgrade` does not replace them with the archive builds |
 
 ## 8. Ubuntu is already installed: upgrade only
@@ -142,14 +142,14 @@ Do **not** flash the rootfs again on a tablet that already runs Ubuntu (it wipes
 2. After boot, copy the upgrade package to the tablet and install it:
 
    ```bash
-   scp linux-mainline/out/dagu-userspace-v0.1.6.tar.gz dagu@<tablet-ip>:
+   scp linux-mainline/out/dagu-userspace-v0.1.7.tar.gz dagu@<tablet-ip>:
    ssh dagu@<tablet-ip>
-   tar xzf dagu-userspace-v0.1.6.tar.gz
-   sudo ./dagu-userspace-v0.1.6/install.sh
+   tar xzf dagu-userspace-v0.1.7.tar.gz
+   sudo ./dagu-userspace-v0.1.7/install.sh
    sudo reboot
    ```
 
-On the tablet, `uname -v` should then show `#645`.
+On the tablet, `uname -v` should then show `#654`.
 
 ## 9. Status
 
@@ -158,7 +158,6 @@ Working: display (120 Hz), touch, folio keyboard, Wi-Fi, Bluetooth (mice, keyboa
 Known issues:
 
 - **Accelerometer and light sensor are not available yet**, so there is no auto-rotate and no auto-brightness. The sensor DSP reads one platform file after boot and never reads the sensor configuration; the cause is still being investigated.
-- Some Bluetooth mice drop the very first connection after about 3 s. The system reconnects on its own and the mouse works from then on.
 - mpv decodes in hardware but copies frames back to memory, so it uses more CPU than the browser.
 - The Wi-Fi and Bluetooth MAC addresses in the released kernel are fixed. With two of these tablets on one network, build your own kernel with each tablet's MACs ([flash guide](flash-guide.md)).
 

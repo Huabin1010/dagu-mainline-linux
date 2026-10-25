@@ -25,20 +25,18 @@ Windows on ARM / edk2-msm 移植在 [`port/dagu/`](port/dagu/) 和 [`docs/uefi-p
 **完整安装教程（从安卓到 Ubuntu 桌面）：** [简体中文](docs/zh-CN/install-guide.md) · [English](docs/install-guide.md)
 **刷机指南：** [简体中文](docs/zh-CN/flash-guide.md) · [English](docs/flash-guide.md)
 **Rootfs / 桌面镜像：** [简体中文](docs/zh-CN/rootfs-guide.md) · [English](docs/rootfs-guide.md)
-**最新镜像：** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases)（`v0.1.6`）
+**最新镜像：** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases)（`v0.1.7`）
 
-## 最近更新（`v0.1.6`）
+## 最近更新（`v0.1.7`）
 
-相对 `v0.1.5`（2026-10-24）。内核 `#645`。
+相对 `v0.1.6`（2026-10-25）。内核 `#654`。
 
-- **蓝牙：** 开机约 9 秒就能用（以前约 33 秒）；配对过的低功耗设备不在身边时，搜索不会再 2.56 秒就停；设备可连接状态真正生效。
-- **Wi-Fi：** 插电时关闭省电，到路由器的延迟从平均 7.4 ms 降到 2.4 ms，抖动从 5.5 ms 降到 0.2 ms；用电池时仍省电。
-- **相机：** 打开应用到出画面约 0.5 秒（以前约 1.3 秒）；打包和自动曝光/白平衡改用 NEON 和浮点，前摄生产者 CPU 从 21.9% 降到 12.2%，后摄从 12.8% 降到 8.7%。相机驱动不再每秒往内核日志打 15 行。
-- **闪存：** 每天 TRIM，UFS 写入加速缓存不再长期为 0，顺序写 1.2 GB/s。
-- **充电：** 和原厂一样由电源芯片判断充满（截止 230 mA）和回充（4.40 V），不再在 100% 附近每 6 秒开关一次、插着线也用电池供电。
-- **新镜像：** `rootfs-desktop.ext4.zst` 用当前脚本重新构建，带 V4L2 Chromium、fcitx5 中文输入、横屏 1.25 缩放和扬声器自启。
+- **蓝牙配对和安卓一样：** 罗技 K380（在键盘上输 PIN）和低功耗蓝牙鼠标在 GNOME 设置里点一下就配上，马上能用。QCA6390 的天线开关电源（VDD_ASD，PM8150 L16）现在会打开，以前寻呼别的设备 10 次失败 10 次；修了一个让搜索一直回 Busy（设置里一个设备都没有）的内核竞争；BlueZ 在绑定完成后才开始 GATT，鼠标不用再等 30 秒。之前的蓝牙绕法全部撤掉，BlueZ 用默认配置。记录：[`dagu-bluetooth-pairing-2026-10.md`](linux-mainline/docs/dagu-bluetooth-pairing-2026-10.md)。
+- **视频：** H.264 硬解硬编支持到 5.2 级（4K60）；Chromium WebCodecs 硬件编码（H.264、HEVC、VP8）；暂停后跳转不再卡住；4K60 稳态 60 fps，第一秒之后丢帧不超过 1%；IOMMU 改为延迟失效，去掉了开播时那 300 ms 的卡顿。MPEG-2 因为芯片硬解输出有错，走软解。编解码测试 GStreamer 12/12、Chromium 11/11。记录：[`dagu-codec-fixes-2026-10.md`](linux-mainline/docs/dagu-codec-fixes-2026-10.md)。
+- **稳定性：** 视频编码器空闲一段时间后不再把固件弄崩；固件恢复不了时也不会再无限重试、中断刷屏把平板卡死。
+- **新镜像：** `rootfs-desktop.ext4.zst` 带新的 Chromium 和 BlueZ；升级包也会在已装系统上装好这两个。
 
-全新安装按 [完整安装教程](docs/zh-CN/install-guide.md)。已装好的系统：只刷 B 槽启动链，再在平板上解开 `dagu-userspace-v0.1.6.tar.gz` 运行 `sudo ./install.sh`。预构建账号 `dagu` / `dagu`（第一次进桌面请改掉）。
+全新安装按 [完整安装教程](docs/zh-CN/install-guide.md)。已装好的系统：只刷 B 槽启动链，再在平板上解开 `dagu-userspace-v0.1.7.tar.gz` 运行 `sudo ./install.sh`。预构建账号 `dagu` / `dagu`（第一次进桌面请改掉）。
 
 已知问题：重力和光线传感器暂不可用（没有自动旋转和自动亮度）。
 

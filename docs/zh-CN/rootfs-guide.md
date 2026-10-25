@@ -81,7 +81,7 @@ ROOT_PASSWORD='your-secret' ./linux-mainline/scripts/build-rootfs-desktop.sh
 ./linux-mainline/scripts/flash-boot.sh flash-b
 ```
 
-`build-rootfs-desktop.sh` 会：Ubuntu 26.04 minbase → `rootfs-desktop-setup.sh`（GNOME、GDM、ALSA UCM、平板会话）→ 打无洞 ext4（大小由 `SIZE` 决定，v0.1.6 镜像为 10 GiB；无洞，避免 journal 被 sparse 跳过）→ zstd。**不要**把 `ROOT_PASSWORD` 或 `out/root-password` 提交进 git。公开预构建请设 `SKIP_HOST_SSH_KEY=1`（脚本默认已是）。
+`build-rootfs-desktop.sh` 会：Ubuntu 26.04 minbase → `rootfs-desktop-setup.sh`（GNOME、GDM、ALSA UCM、平板会话）→ 打无洞 ext4（大小由 `SIZE` 决定，v0.1.7 镜像为 10 GiB；无洞，避免 journal 被 sparse 跳过）→ zstd。**不要**把 `ROOT_PASSWORD` 或 `out/root-password` 提交进 git。公开预构建请设 `SKIP_HOST_SSH_KEY=1`（脚本默认已是）。
 
 ### 只要控制台（没有 GNOME）
 

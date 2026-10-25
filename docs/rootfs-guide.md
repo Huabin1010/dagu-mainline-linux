@@ -81,7 +81,7 @@ ROOT_PASSWORD='your-secret' ./linux-mainline/scripts/build-rootfs-desktop.sh
 ./linux-mainline/scripts/flash-boot.sh flash-b
 ```
 
-`build-rootfs-desktop.sh` does Ubuntu 26.04 minbase → `rootfs-desktop-setup.sh` (GNOME, GDM, ALSA UCM, tablet session) → hole-free ext4 (`SIZE`; 10 GiB for the v0.1.6 image) (so sparse flash cannot skip the journal) → zstd. Do **not** commit `ROOT_PASSWORD` or `out/root-password`. Public images keep `SKIP_HOST_SSH_KEY=1` (the script default).
+`build-rootfs-desktop.sh` does Ubuntu 26.04 minbase → `rootfs-desktop-setup.sh` (GNOME, GDM, ALSA UCM, tablet session) → hole-free ext4 (`SIZE`; 10 GiB for the v0.1.7 image) (so sparse flash cannot skip the journal) → zstd. Do **not** commit `ROOT_PASSWORD` or `out/root-password`. Public images keep `SKIP_HOST_SSH_KEY=1` (the script default).
 
 ### Console only (no GNOME)
 

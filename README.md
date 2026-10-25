@@ -25,20 +25,18 @@ An unfinished Windows-on-ARM / edk2-msm port lives under [`port/dagu/`](port/dag
 **Full install (Android to Ubuntu desktop):** [English](docs/install-guide.md) · [简体中文](docs/zh-CN/install-guide.md)
 **Flash tutorial:** [English](docs/flash-guide.md) · [简体中文](docs/zh-CN/flash-guide.md)
 **Rootfs / desktop image:** [English](docs/rootfs-guide.md) · [简体中文](docs/zh-CN/rootfs-guide.md)
-**Latest images:** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases) (`v0.1.6`)
+**Latest images:** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases) (`v0.1.7`)
 
-## Recent updates (`v0.1.6`)
+## Recent updates (`v0.1.7`)
 
-Since `v0.1.5` (2026-10-24). Kernel `#645`.
+Since `v0.1.6` (2026-10-25). Kernel `#654`.
 
-- **Bluetooth:** ready about 9 s after boot (was about 33 s). Discovery no longer stops after 2.56 s while a bonded LE device is away, and the adapter really is connectable.
-- **Wi-Fi:** power save is off on the charger: router latency 2.4 ms average and 0.2 ms jitter, down from 7.4 ms and 5.5 ms. Battery keeps power save.
-- **Cameras:** the picture appears about 0.5 s after an app opens the camera (was about 1.3 s). NEON packing and float 3A cut the producer from 21.9% to 12.2% of a little core (front) and 12.8% to 8.7% (rear). The camera driver no longer logs 15 lines a second.
-- **Storage:** daily TRIM keeps the UFS WriteBooster buffer available (it sat at 0 for days); sequential write 1.2 GB/s.
-- **Charging:** the SMB5 decides full (230 mA termination) and recharge (4.40 V) as on stock. It no longer toggles every 6 s near 100% or runs the tablet from the battery with the cable in.
-- **New image:** `rootfs-desktop.ext4.zst` is rebuilt from the current scripts, with V4L2 Chromium, fcitx5 Chinese input, landscape at 1.25 and speakers on at login.
+- **Bluetooth pairs like Android:** a Logitech K380 (PIN typed on the keyboard) and a BLE mouse pair from GNOME Settings with one tap and work right away. The QCA6390 antenna switch supply (VDD_ASD, PM8150 L16) is now powered; before, paging another device failed 10 out of 10 times. A kernel race that left discovery Busy (Settings listed nothing) is fixed, and BlueZ starts GATT after bonding so the mouse no longer waits 30 s. All earlier Bluetooth workarounds are removed and BlueZ runs on its default settings. Write-up: [`dagu-bluetooth-pairing-2026-10.md`](linux-mainline/docs/dagu-bluetooth-pairing-2026-10.md).
+- **Video:** hardware H.264 up to level 5.2 (4K60) decode and encode; Chromium WebCodecs hardware encode (H.264, HEVC, VP8); seeking while paused no longer stalls; 4K60 holds 60 fps with at most 1% dropped frames after the first second, and lazy IOMMU invalidation removes the 300 ms stall that dropped frames at start-up. MPEG-2 runs in software because the SoC decoder output is corrupt. Codec tests pass 12/12 (GStreamer) and 11/11 (Chromium). Write-up: [`dagu-codec-fixes-2026-10.md`](linux-mainline/docs/dagu-codec-fixes-2026-10.md).
+- **Stability:** the video encoder no longer crashes its firmware after sitting idle, and a firmware that cannot recover no longer floods interrupts until the tablet hangs.
+- **New image:** `rootfs-desktop.ext4.zst` carries the new Chromium and BlueZ builds. The upgrade package installs both on an existing system.
 
-New installs: follow the [full install guide](docs/install-guide.md). Installed systems: flash the slot B boot chain, then unpack `dagu-userspace-v0.1.6.tar.gz` on the tablet and run `sudo ./install.sh`. Prebuilt login `dagu` / `dagu` (change it on first login).
+New installs: follow the [full install guide](docs/install-guide.md). Installed systems: flash the slot B boot chain, then unpack `dagu-userspace-v0.1.7.tar.gz` on the tablet and run `sudo ./install.sh`. Prebuilt login `dagu` / `dagu` (change it on first login).
 
 Known issue: the accelerometer and light sensor are not available yet (no auto-rotate, no auto-brightness).
 

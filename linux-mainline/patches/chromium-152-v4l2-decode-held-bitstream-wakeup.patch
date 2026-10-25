@@ -1,0 +1,97 @@
+# Chromium 152 V4L2 stateful decoder: wake up when Venus returns an OUTPUT
+# buffer while bitstream is held back before CAPTURE streams.
+#
+# Applies to linux-mainline/out/chromium-v4l2-src/official-152 on top of
+# the dagu "Holding bitstream until capture is streaming" change.
+#
+# During that window the next access unit can only be queued once the
+# previous OUTPUT buffer completes, and nothing polled for it: a seek
+# while paused sometimes stuck at readyState=1 (about once every three
+# 20-seek runs). Poll for POLLOUT in that window. After the fix 140 seeks
+# across 7 formats had no stall.
+--- a/media/gpu/v4l2/v4l2_stateful_video_decoder.cc
++++ b/media/gpu/v4l2/v4l2_stateful_video_decoder.cc
+@@ -145,14 +145,23 @@
+ // TODO(mcasas): Add an error callback too.
+ void WaitOnceForEvents(int device_fd,
+                        int wake_event,
++                       bool wait_for_output_done,
+                        base::OnceClosure dequeue_callback,
+-                       base::OnceClosure resolution_change_callback) {
++                       base::OnceClosure resolution_change_callback,
++                       base::OnceClosure output_done_callback) {
+   VLOGF(5) << "Going to poll()";
+ 
+   // POLLERR, POLLHUP, or POLLNVAL are always return-able and anyway ignored
+   // when set in pollfd.events.
+   // https://www.kernel.org/doc/html/v5.15/userspace-api/media/v4l/func-poll.html
+-  struct pollfd pollfds[] = {{.fd = device_fd, .events = POLLIN | POLLPRI},
++  // dagu: while bitstream is held back until CAPTURE streams (see
++  // TryAndEnqueueOUTPUTQueueBuffers()), the next OUTPUT buffer can only be
++  // queued once Venus returns the previous one, and nothing else wakes us
++  // for that: the pipeline has used up its decode requests. Also wait for
++  // POLLOUT (an OUTPUT buffer is done) in that window.
++  const short device_events = static_cast<short>(
++      POLLIN | POLLPRI | (wait_for_output_done ? POLLOUT : 0));
++  struct pollfd pollfds[] = {{.fd = device_fd, .events = device_events},
+                              {.fd = wake_event, .events = POLLIN}};
+   constexpr int kInfiniteTimeout = -1;
+   if (HANDLE_EINTR(poll(pollfds, std::size(pollfds), kInfiniteTimeout)) <
+@@ -163,6 +172,12 @@
+ 
+   const auto events_from_device = pollfds[0].revents;
+   const auto other_events = pollfds[1].revents;
++  if (wait_for_output_done && (events_from_device & POLLOUT)) {
++    std::move(output_done_callback).Run();
++    if (!(events_from_device & (POLLIN | POLLPRI))) {
++      return;
++    }
++  }
+   // At least Qualcomm Venus likes to bundle events.
+   const auto pollin_or_pollpri_event = events_from_device & (POLLIN | POLLPRI);
+   if (pollin_or_pollpri_event) {
+@@ -1062,11 +1077,30 @@
+   //   background SingleThreadTaskRunner so that the FDs monitored by poll() are
+   //   guaranteed to stay alive until poll() returns, thus avoiding unspecified
+   //   behavior.
++  const bool wait_for_output_done =
++      OUTPUT_queue_ && OUTPUT_queue_->QueuedBuffersCount() > 0 &&
++      (!CAPTURE_queue_ || !CAPTURE_queue_->IsStreaming());
++  auto output_done_callback = base::BindPostTaskToCurrentDefault(
++      base::BindOnce(&V4L2StatefulVideoDecoder::OnOUTPUTBufferDone,
++                     weak_ptr_factory_for_events_.GetWeakPtr()));
+   cancelable_task_tracker_.PostTask(
+       event_task_runner_.get(), FROM_HERE,
+       base::BindOnce(&WaitOnceForEvents, device_fd_.get(), wake_event_.get(),
+-                     std::move(dequeue_callback),
+-                     std::move(resolution_change_callback)));
++                     wait_for_output_done, std::move(dequeue_callback),
++                     std::move(resolution_change_callback),
++                     std::move(output_done_callback)));
++}
++
++void V4L2StatefulVideoDecoder::OnOUTPUTBufferDone() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  if (!IsInitialized() || !event_task_runner_) {
++    return;
++  }
++  // Recovers the returned OUTPUT buffer and feeds the next held one.
++  if (!TryAndEnqueueOUTPUTQueueBuffers()) {
++    return;
++  }
++  RearmCAPTUREQueueMonitoring();
+ }
+ 
+ void V4L2StatefulVideoDecoder::TryAndDequeueCAPTUREQueueBuffers() {
+--- a/media/gpu/v4l2/v4l2_stateful_video_decoder.h
++++ b/media/gpu/v4l2/v4l2_stateful_video_decoder.h
+@@ -104,6 +104,9 @@
+   // callbacks pointing to TryAndDequeueCAPTUREQueueBuffers() (for data
+   // available) and InitializeCAPTUREQueue() (for re/configuration events).
+   void RearmCAPTUREQueueMonitoring();
++  // Called (on |sequence_checker_|) when an OUTPUT buffer completes while
++  // bitstream is held back before CAPTURE streams.
++  void OnOUTPUTBufferDone();
+   // Dequeues all the available |CAPTURE_queue_| buffers and sends their
+   // associated VideoFrames to |output_cb_|. If all goes well, it will
+   // RearmCAPTUREQueueMonitoring().

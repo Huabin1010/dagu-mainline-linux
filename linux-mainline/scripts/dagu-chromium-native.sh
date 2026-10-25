@@ -74,7 +74,10 @@ export CHROME_DESKTOP="${CHROME_DESKTOP:-org.chromium.Chromium.desktop}"
 if [ -f /run/user/1001/dagu-identity ]; then
 	export DAGU_CHROME_PANEL_ROTATE="${DAGU_CHROME_PANEL_ROTATE:-270}"
 fi
-ENABLE_FEAT="WaylandTextInputV3,WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj,AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,AcceleratedVideoEncoder,AcceleratedVideoEncodeLinux,MediaRecorderHEVCSupport"
+# ChromeOSHWVBREncoding: V4L2Device only advertises VBR when this is on
+# (default off on ARM). Venus does VBR, and WebCodecs/MediaRecorder
+# default to VBR, so without it every hardware encode config is refused.
+ENABLE_FEAT="WaylandTextInputV3,WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj,AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,AcceleratedVideoEncoder,AcceleratedVideoEncodeLinux,ChromeOSHWVBREncoding,MediaRecorderHEVCSupport"
 DISABLE_FEAT="Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation,Translate,TranslateUI"
 ANGLE="gles"
 if [ "$OVERLAY" = "1" ]; then

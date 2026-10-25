@@ -411,7 +411,10 @@ fi
 CHROME_BIN=/usr/bin/chromium
 [ -x "$CHROME_BIN" ] || CHROME_BIN=/usr/lib/chromium/chromium
 export CHROME_DESKTOP="${CHROME_DESKTOP:-org.chromium.Chromium.desktop}"
-ENABLE_FEAT="WaylandTextInputV3,WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj,AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,AcceleratedVideoEncoder,AcceleratedVideoEncodeLinux,MediaRecorderHEVCSupport"
+# ChromeOSHWVBREncoding: V4L2Device only advertises VBR when this is on
+# (default off on ARM). Venus does VBR, and WebCodecs/MediaRecorder
+# default to VBR, so without it every hardware encode config is refused.
+ENABLE_FEAT="WaylandTextInputV3,WaylandFractionalScaleV1,WaylandLinuxDrmSyncobj,AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,AcceleratedVideoEncoder,AcceleratedVideoEncodeLinux,ChromeOSHWVBREncoding,MediaRecorderHEVCSupport"
 DISABLE_FEAT="Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,WaylandOverlayDelegation"
 ANGLE="gles"
 if [ "$OVERLAY" = "1" ]; then

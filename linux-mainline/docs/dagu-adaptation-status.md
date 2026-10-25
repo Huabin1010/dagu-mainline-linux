@@ -81,7 +81,7 @@
 | 闪光灯 | **DT 已写** | `white:flash` max=255；脚本可点 torch |
 | 磁吸键盘 | **已通** | Nanosic GENI `&i2c2` `2-004c`。`#335` `Xiaomi Keyboard` `0018:15D9:00A3` `ID_BUS=i2c`，MCU `XM2022-152-0721B`。点 Shift → `dagu-fcitx5-shift-tap`（禁止 keyd grab 15d9:00a3）。`0x22` 保活后 400ms 内的空 `0x05` 不注入（GENI 残渣假 KEY_UP） |
 | IMU / 光线传感器 | **回退** | 9-17 曾通（SEE `accel suid` 25 Hz、lux 13.1）。2026-10-25 复查：SLPI 每次开机只读 `socinfo/hw_platform`，`sensors/config/*.json` 和 `persist-registry` 的访问时间都停在 10-05；SUID 查询对 accel/gyro/ambient_light/proximity 只回类型名、没有实例，`dagu-ssc` 不出样，iio-sensor-proxy 没有设备。禁止 AP I2C 猜 IMU。见 `dagu-dsp-pipeline-status.md` |
-| 视频编解码 Venus | **已通** | `/dev/video14` 解码 + `/dev/video15` 编码。1080p + **4K60 HEVC** `DMA_DRM`/`NV12` 上 Mutter。日常 `gst-play-1.0 --videosink=waylandsink`。mpv 仍 `v4l2m2m-copy`。**禁止**开 SM8250 ICC |
+| 视频编解码 Venus | **已通** | `/dev/video14` 解码 + `/dev/video15` 编码。1080p + **4K60 HEVC** `DMA_DRM`/`NV12` 上 Mutter。硬解 H.264（到 L5.2）/ HEVC / HEVC Main10 / VP9 / VP8；MPEG-2 硬件输出有列带错位，已隐藏，走软解（精确）；AV1 SoC 无硬件，dav1d 软解。验收：`dagu-codec-test`（GStreamer 12/12）+ `dagu-chromium-codec-test`（Chromium 播放 6 项 + WebCodecs 硬编 5 项，11/11，4K60 稳态 60 fps、丢帧 ≤1%）。Venus 内存走 `iommu.strict=0`（4K 10-bit 释放约 1 GB 映射不再卡 GPU 主线程 300 ms）。日常 `gst-play-1.0 --videosink=waylandsink`。mpv 仍 `v4l2m2m-copy`。**禁止**开 SM8250 ICC |
 | CDSP | **已通** | `&cdsp` PAS running，`/dev/fastrpc-cdsp`，`dagu-cdsp-rpc` GET_DSP_INFO + INIT_ATTACH。禁止 WebNN |
 | 蓝牙音频 / 耳机口 | **软件已通** | 板子无 3.5mm。A2DP 拓扑 `SLIMBUS_7_RX` 已接 Q6。听感要配对耳机。禁止 HCI SBC 软编 |
 | S2Idle | **电源键可唤醒** | `mem_sleep=[s2idle]`，`echo mem` 睡约 65 min，`success=1`。DPU UBWC、Venus 节点、ADSP 都在，无 hangcheck/SSR。远程无 RTC/USB 唤不醒。见 `linux-mainline/docs/dagu-audio-s2idle.md` |

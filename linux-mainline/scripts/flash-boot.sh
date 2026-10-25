@@ -39,9 +39,15 @@ flash-b)
 	python3 "$FBUSB" flash vendor_boot_b "$VBOOT"
 	python3 "$FBUSB" flash boot_b "$BOOTIMG"
 	python3 "$FBUSB" set-active b
+	# 2026-10-25: twice, a reboot sent right after these writes booted
+	# the previous boot_b (read back on the tablet), although every write
+	# said OKAY. Every flash given a few seconds before reboot stuck.
+	# Not root-caused (ABL reboot vs UFS write cache is the suspect).
+	sleep 5
 	echo "==> reboot (timeout: ABL drops USB, no OKAY)"
 	timeout 3 python3 "$FBUSB" reboot || echo "reboot cmd sent (no OKAY is ok)"
 	echo "Host: ./scripts/usb-connect.sh"
+	echo "Check on the tablet: uname -v matches out/kernel/.version"
 	echo "Brick recovery: ../scripts/flash-boot-legacy.sh restore-a"
 	;;
 flash)

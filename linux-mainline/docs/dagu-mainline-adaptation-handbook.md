@@ -726,7 +726,11 @@ WCD9385 模拟麦 5（偏置 3）→ ADC4 INP5 → TX DEC0 → TX_CODEC_DMA_TX_3
   - 传感器：冻结进程时打断 `hexagonrpcd` 等反向调用的 ioctl，SLPI 的 `sensor_process` 每次醒来都崩溃重启。`fastrpc.c` 的用户等待改成 `TASK_INTERRUPTIBLE | TASK_FREEZABLE`，进程原地冻结。
 - 电源键唤醒只认按下沿（`pm8941-pwrkey` 补丁）：按下就开始休眠，按得久一点，松开沿会落在唤醒中断布防之后。合盖霍尔 GPIO110 只在打开时唤醒（`wakeup-event-action = EV_ACT_DEASSERTED`），GPIO121 不唤醒。
 - 实测（#633/#634）：内核恢复约 240 毫秒，唤醒到面板亮约 470 毫秒；按电源到熄屏约 140 毫秒。
-- 开机白灰花屏：引导程序的开机画面还在扫描、背光亮着，内核约 0.2 秒复位显示子系统核心，视频流停了，屏幕控制芯片显示行缓冲噪点，一直到约 2.2 秒面板驱动关背光。现在 `msm_mdss.c` 补丁等 `dagu,splash-backlights` 里的 KTZ8866 绑定后再复位；KTZ8866 probe 先关灯；面板 probe 就置 `bl_settling`，第一帧稳定后才亮。
+- 开机白屏：引导程序的开机画面还在扫描、背光亮着时，内核动了显示通路两次。
+  - 0.17 秒显示时钟控制器 probe：`disp_cc_mdss_mdp_clk_src` 用 `clk_rcg2_shared_ops` 注册，初始化时把显示处理器核心时钟停到 19.2 MHz 晶振上，每帧欠载（MDP `INTR_STATUS` 0x14000000）。一直白到约 2.1 秒背光芯片关灯。现在用 `clk_rcg2_shared_no_init_park_ops` 保留引导程序的时钟，第一次 modeset 时 DPU 再设成 460 MHz。
+  - 约 0.2 秒 `msm_mdss_init()` 复位显示子系统核心，视频流停，屏幕控制芯片显示行缓冲噪点。现在 `msm_mdss.c` 补丁等 `dagu,splash-backlights` 里的 KTZ8866 绑定后再复位；KTZ8866 probe 先关灯；面板 probe 就置 `bl_settling`，第一帧稳定后才亮。
+  - 只改第二处（#632–#634）反而更糟：欠载白屏从 0.17 秒一直亮到 2.1 秒。用早期定时器每 2 毫秒采 `INTF_1` 帧计数和欠载位定位（#635–#639，已删）。
+  - 现在（#640）：开机画面保持到 2.1 秒，黑约 1.4 秒，3.5 秒出控制台。
 
 ## 17. 无线网络和蓝牙
 

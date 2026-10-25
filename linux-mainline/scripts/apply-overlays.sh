@@ -416,6 +416,41 @@ grep -q 'dagu: ABL leaves EN_SNK/SRC_CRUDE_SENSOR' \
 	exit 1
 }
 
+# Cold-boot white screen. Registering disp_cc_mdss_mdp_clk_src with
+# clk_rcg2_shared_ops parks it on XO (19.2 MHz) at dispcc probe (0.17 s),
+# beneath ABL's live 120 Hz splash pipeline. From the next frame INTF1/2
+# underrun every frame (MDP INTR_STATUS 0x14000000) and the panel shows
+# white with the LEDs lit until the KTZ probe darkens them at ~2.1 s. Keep
+# the bootloader's MDP clock at registration (no_init_park), as newer
+# Qualcomm clock drivers do for clocks a bootloader leaves running. DPU
+# sets its own rate at the first modeset.
+python3 - "$KERNEL_SRC" <<'PY2'
+from pathlib import Path
+import re
+import sys
+
+f = Path(sys.argv[1]) / "drivers/clk/qcom/dispcc-sm8250.c"
+text = f.read_text()
+marker = "dagu: keep ABL's MDP clock at registration"
+if marker in text:
+    raise SystemExit(0)
+m = re.search(r"(static struct clk_rcg2 disp_cc_mdss_mdp_clk_src = \{.*?)"
+              r"\t\t\.ops = &clk_rcg2_shared_ops,\n", text, re.S)
+if not m:
+    raise SystemExit(f"{f}: disp_cc_mdss_mdp_clk_src shared ops not found")
+new = (m.group(1) +
+       "\t\t/* dagu: keep ABL's MDP clock at registration; parking it on\n"
+       "\t\t * XO underruns the live splash and the panel goes white. */\n"
+       "\t\t.ops = &clk_rcg2_shared_no_init_park_ops,\n")
+f.write_text(text[:m.start()] + new + text[m.end():])
+print(f"patched {f}: {marker}")
+PY2
+grep -q "dagu: keep ABL's MDP clock at registration" \
+	"$KERNEL_SRC/drivers/clk/qcom/dispcc-sm8250.c" || {
+	echo "dispcc MDP clock no-park missing" >&2
+	exit 1
+}
+
 # Cold-boot white/grey flash. ABL leaves its splash scanning out with the
 # KTZ LEDs lit. msm_mdss_init() resets the MDSS core at ~0.2 s, which
 # stops the DSI video; the L81A TDDI then shows line-buffer noise until

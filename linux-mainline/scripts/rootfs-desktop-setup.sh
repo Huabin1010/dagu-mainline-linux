@@ -42,7 +42,22 @@ apt-get install -y --no-install-recommends \
 	ibus ibus-gtk3 ibus-gtk4 ibus-libpinyin \
 	bluez systemd-timesyncd pci.ids \
 	iio-sensor-proxy \
-	g++ make pkg-config rustc libcamera-dev
+	g++ make pkg-config rustc libcamera-dev \
+	locales language-pack-zh-hans language-pack-gnome-zh-hans \
+	fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3 fcitx5-frontend-gtk4 \
+	fcitx5-frontend-qt5 fcitx5-frontend-qt6 fcitx5-config-qt
+
+# The builds the tablet runs (build-rootfs-desktop.sh stages them from
+# out/dagu-pinned): V4L2 Chromium, dagu libmutter + its gnome-shell,
+# PipeWire with the patched spa-v4l2, patched libgallium / libcamera IPA.
+# Held so a routine apt upgrade cannot swap them for the archive builds.
+if ls /tmp/dagu-pinned/*.deb >/dev/null 2>&1; then
+	apt-get install -y --no-install-recommends --allow-downgrades \
+		/tmp/dagu-pinned/*.deb
+	for deb in /tmp/dagu-pinned/*.deb; do
+		apt-mark hold "$(dpkg-deb -f "$deb" Package)" >/dev/null
+	done
+fi
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -349,20 +364,9 @@ cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
 </driconf>
 EOF
 
-# Browser and GPU userspace the tablet runs, when the image build stages
-# them (build-rootfs-desktop.sh copies out/chromium-v4l2 and the dagu Mesa
-# build). Without these the image has no browser at all: Ubuntu's
-# Chromium/Firefox are snaps and snapd does not run in this chroot.
-if ls /tmp/dagu-chromium/chromium*_arm64.deb >/dev/null 2>&1; then
-	apt-get install -y --no-install-recommends /tmp/dagu-chromium/chromium*_arm64.deb
-	apt-mark hold chromium chromium-common chromium-sandbox >/dev/null 2>&1 || true
-	# The V4L2 (Venus decode/encode) build of the same version.
-	if [ -f /tmp/dagu-chromium/chromium ] &&
-		[ "$(head -c 4 /tmp/dagu-chromium/chromium)" = "$(printf '\177ELF')" ]; then
-		install -m755 /tmp/dagu-chromium/chromium /usr/lib/chromium/chromium
-	fi
-	apt-get clean
-fi
+# V4L2 Chromium itself comes from /tmp/dagu-pinned (installed with the
+# base packages). Ubuntu's Chromium/Firefox are snaps; without the pinned
+# debs the image has no browser.
 if [ -f /tmp/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
 	install -D -m644 /tmp/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so \
 		/usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so
@@ -469,10 +473,15 @@ EOF
 		chown dagu:dagu /home/dagu/.local/share/applications/chromium.desktop \
 			/home/dagu/.local/share/applications/org.chromium.Chromium.desktop
 		# GNOME 50 looks up Icon= by app_id when the window maps.
+		# No ls|head here: with pipefail, ls of the missing .svg ended
+		# the whole image build the first time Chromium was present.
 		for dir in /usr/share/icons/hicolor/*/apps; do
-			[ -e "$dir/chromium.png" ] || [ -e "$dir/chromium.svg" ] || continue
-			src=$(ls "$dir"/chromium.png "$dir"/chromium.svg 2>/dev/null | head -1)
-			[ -n "$src" ] && ln -sfn "$(basename "$src")" "$dir/org.chromium.Chromium.${src##*.}"
+			for ext in png svg; do
+				if [ -e "$dir/chromium.$ext" ]; then
+					ln -sfn "chromium.$ext" "$dir/org.chromium.Chromium.$ext"
+					break
+				fi
+			done
 		done
 	fi
 	# HTML5 opens V4L2 Chromium. Official google-chrome is not installed.
@@ -2061,10 +2070,7 @@ printf 'Asia/Shanghai\n' >/etc/timezone
 # Chinese desktop with fcitx5, as the tablet runs. GTK_IM_MODULE stays
 # empty so GTK uses Wayland text-input-v3 (the folio keyboard and the
 # on-screen keyboard both go through it); Qt/SDL/X11 use the fcitx module.
-apt-get install -y --no-install-recommends \
-	locales language-pack-zh-hans language-pack-gnome-zh-hans \
-	fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3 fcitx5-frontend-gtk4 \
-	fcitx5-frontend-qt5 fcitx5-frontend-qt6 fcitx5-config-qt
+# (fcitx5 and the zh_CN language packs are in the base package list.)
 locale-gen zh_CN.UTF-8 en_US.UTF-8 >/dev/null
 printf 'LANG=zh_CN.UTF-8\nLANGUAGE=zh_CN:zh\n' >/etc/default/locale
 mkdir -p /etc/environment.d
@@ -2793,6 +2799,51 @@ is_elf /usr/local/sbin/dagu-cdsp-rpc || {
 	echo "rootfs-desktop-setup: missing dagu-cdsp-rpc" >&2
 	exit 1
 }
+# hexagonrpcd + HexagonFS tree, staged by build-rootfs-desktop.sh. The
+# sensor registry is per device (factory calibration), so it is not in the
+# image: dagu-sns-registry-import copies it from this tablet's own persist
+# partition on first boot.
+if [ -f /tmp/dagu-dsp/dagu-dsp-userspace.tar ]; then
+	tar -C / -xf /tmp/dagu-dsp/dagu-dsp-userspace.tar
+	ldconfig
+fi
+cat >/usr/local/sbin/dagu-sns-registry-import <<'EOF'
+#!/bin/sh
+# Copy the SLPI sensor registry (calibration) from Android persist into
+# HexagonFS once. persist is mounted read-only and left untouched.
+set -eu
+T=/usr/share/qcom/sm8250/Xiaomi/dagu/sensors/persist-registry
+[ -d "$T" ] || exit 0
+[ -n "$(ls -A "$T/registry" 2>/dev/null)" ] && exit 0
+P=/dev/disk/by-partlabel/persist
+[ -e "$P" ] || exit 0
+M=$(mktemp -d)
+trap 'umount "$M" 2>/dev/null || true; rmdir "$M"' EXIT
+mount -o ro,noload "$P" "$M" 2>/dev/null || mount -o ro "$P" "$M"
+S="$M/sensors/registry"
+[ -d "$S/registry" ] || exit 0
+mkdir -p "$T/registry" /usr/share/qcom/sm8250/Xiaomi/dagu/sensors/registry
+cp -a "$S/registry/." "$T/registry/"
+cp -a "$S/registry/." /usr/share/qcom/sm8250/Xiaomi/dagu/sensors/registry/
+[ -f "$S/sns_reg_version" ] && cp -a "$S/sns_reg_version" "$T/"
+chown -R root:root /usr/share/qcom/sm8250/Xiaomi/dagu/sensors
+command -v setfacl >/dev/null && setfacl -R -b /usr/share/qcom/sm8250/Xiaomi/dagu/sensors || true
+echo "dagu-sns-registry-import: $(ls "$T/registry" | wc -l) registry files from persist"
+EOF
+chmod 755 /usr/local/sbin/dagu-sns-registry-import
+cat >/etc/systemd/system/dagu-sns-registry-import.service <<'EOF'
+[Unit]
+Description=dagu: import the SLPI sensor registry from persist (first boot)
+Before=hexagonrpcd-sdsp.service
+After=local-fs.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dagu-sns-registry-import
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/dagu-sns-registry-import.service \
+	/etc/systemd/system/multi-user.target.wants/dagu-sns-registry-import.service
 if is_elf /usr/local/bin/hexagonrpcd; then
 cat >/etc/systemd/system/hexagonrpcd-sdsp.service <<'EOF'
 [Unit]

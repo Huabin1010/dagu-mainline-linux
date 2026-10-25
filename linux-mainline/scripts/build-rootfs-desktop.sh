@@ -113,17 +113,27 @@ if [[ -f "$ROOT/out/libmutter-18.so.0.0.0-dagu" ]]; then
 	install -m 644 "$ROOT/out/libmutter-18.so.0.0.0-dagu" \
 		"$ROOTFS/usr/local/lib/dagu-mutter/libmutter-18.so.0.0.0"
 fi
-# Optional prebuilt inputs: V4L2 Chromium (the XtraDeb debs plus the V4L2
-# chromium binary of the same version) and the dagu Mesa libgallium that
-# dagu-chromium-native puts on LD_LIBRARY_PATH.
-CHROMIUM_DIR="${CHROMIUM_DIR:-$ROOT/out/chromium-v4l2}"
-rm -rf "$ROOTFS/tmp/dagu-chromium" "$ROOTFS/tmp/dagu-mesa"
-if ls "$CHROMIUM_DIR"/chromium*_arm64.deb >/dev/null 2>&1; then
-	mkdir -p "$ROOTFS/tmp/dagu-chromium"
-	cp "$CHROMIUM_DIR"/chromium*_arm64.deb "$ROOTFS/tmp/dagu-chromium/"
-	[[ -f "$CHROMIUM_DIR/chromium" ]] &&
-		install -m 755 "$CHROMIUM_DIR/chromium" "$ROOTFS/tmp/dagu-chromium/chromium"
+# Pinned packages: the exact builds the tablet runs, repacked on the
+# tablet with dpkg-repack (dagu-repack-pinned.sh). V4L2 Chromium with its
+# own paks, the dagu libmutter with the gnome-shell it was built for, the
+# PipeWire stack with the patched spa-v4l2, the patched libgallium and
+# libcamera IPA. The archive has moved on (mutter 50.1-0ubuntu2.5,
+# pipewire 1.6.2-1ubuntu1.2), so these cannot come from apt.
+PINNED_DIR="${PINNED_DIR:-$ROOT/out/dagu-pinned}"
+rm -rf "$ROOTFS/tmp/dagu-pinned" "$ROOTFS/tmp/dagu-mesa" "$ROOTFS/tmp/dagu-dsp"
+if ls "$PINNED_DIR"/*.deb >/dev/null 2>&1; then
+	mkdir -p "$ROOTFS/tmp/dagu-pinned"
+	cp "$PINNED_DIR"/*.deb "$ROOTFS/tmp/dagu-pinned/"
+else
+	echo "warning: $PINNED_DIR has no debs; the image gets stock GNOME/PipeWire and no browser" >&2
 fi
+# SLPI sensor userspace: hexagonrpcd, libhexagonrpc and the HexagonFS tree
+# without the per-device registry (first boot copies it from persist).
+if [[ -f "$ROOT/out/dagu-dsp-userspace.tar" ]]; then
+	mkdir -p "$ROOTFS/tmp/dagu-dsp"
+	cp "$ROOT/out/dagu-dsp-userspace.tar" "$ROOTFS/tmp/dagu-dsp/"
+fi
+# dagu Mesa libgallium that dagu-chromium-native puts on LD_LIBRARY_PATH.
 if [[ -f "$ROOT/out/libgallium-26.0.8-1ubuntu0.3.so" ]]; then
 	mkdir -p "$ROOTFS/tmp/dagu-mesa"
 	install -m 644 "$ROOT/out/libgallium-26.0.8-1ubuntu0.3.so" "$ROOTFS/tmp/dagu-mesa/"
@@ -155,8 +165,8 @@ chroot "$ROOTFS" env ROOT_PASSWORD="$PASS" SUITE="$SUITE" MIRROR="$MIRROR" \
 rm -rf "$ROOTFS/tmp/rootfs-desktop-setup.sh" \
 	"$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback" \
 	"$ROOTFS/tmp/dagu-bluez-hid" "$ROOTFS/tmp/dagu-gnome-status" \
-	"$ROOTFS/tmp/dagu-gnome-cc" "$ROOTFS/tmp/dagu-chromium" \
-	"$ROOTFS/tmp/dagu-mesa"
+	"$ROOTFS/tmp/dagu-gnome-cc" "$ROOTFS/tmp/dagu-pinned" \
+	"$ROOTFS/tmp/dagu-mesa" "$ROOTFS/tmp/dagu-dsp"
 
 # Public image: no builder SSH keys, new machine-id on first boot.
 rm -rf "$ROOTFS/root/.ssh"

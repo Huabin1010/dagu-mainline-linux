@@ -746,7 +746,7 @@ WCD9385 模拟麦 5（偏置 3）→ ADC4 INP5 → TX DEC0 → TX_CODEC_DMA_TX_3
 
 - QCA6390，`ath11k`，接口 `wlp1s0`。板级数据文件用 dump 里的 `bd_l81a.elf` 转成 `board.bin`，不要用 `board-2.bin`。网卡地址从 persist 取，放在不入库的 `dts/local-addresses.dtsi`。
 - 5 GHz 36 信道 80 MHz 双流，物理速率 866.7 Mbps；反向 4 流传输控制协议约 600–665 Mbps（物理速率的 70–77%）。
-- 休眠保活：NetworkManager 默认不武装无线局域网唤醒，进浅休眠就离开网络、关掉无线芯片。`systemd/20-dagu-wifi-wowlan.conf` 设 `disconnect,magic,gtk-rekey-failure`（不要 `any/all`，每个包都会唤醒），udev 打开唤醒。
+- 休眠保活：NetworkManager 默认不武装无线局域网唤醒，进浅休眠就离开网络、关掉无线芯片。`systemd/20-dagu-wifi-wowlan.conf` 只设 `magic`。`disconnect` 和 `gtk-rekey-failure` 在路由器重启或换钥失败时会唤醒平板并点亮屏幕，盖着保护套也不会再睡；`any/all` 每个包都会唤醒。udev 打开唤醒。
 - `1095132`：设置里点新的加密网络时会先断开当前网络、密码框又不弹。改成先弹框存密码再连接。
 
 ### 17.2 蓝牙

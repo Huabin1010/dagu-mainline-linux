@@ -16,6 +16,7 @@
 #include <linux/devm-helpers.h>
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
+#include <linux/math64.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/notifier.h>
@@ -47,8 +48,35 @@
 #define CHARGING_ENABLE_CMD			(CHGR_BASE + 0x42)
 #define CHARGING_ENABLE_CMD_BIT			BIT(0)
 
+#define CHGR_CFG2				(CHGR_BASE + 0x51)
+#define RECHG_MASK				GENMASK(2, 1)
+#define VBAT_BASED_RECHG_BIT			BIT(2)
+
 #define CHGR_FAST_CHARGE_CURRENT_CFG		(CHGR_BASE + 0x61)
+#define CHGR_ADC_ITERM_UP_THD_MSB		(CHGR_BASE + 0x67)
+#define CHGR_ADC_ITERM_UP_THD_LSB		(CHGR_BASE + 0x68)
+#define CHGR_NO_SAMPLE_TERM_RCHG_CFG		(CHGR_BASE + 0x6B)
+#define NO_OF_SAMPLE_FOR_RCHG			GENMASK(3, 2)
+#define NO_OF_SAMPLE_FOR_RCHG_3			(2 << 2)
+#define CHGR_ADC_TERM_CFG			(CHGR_BASE + 0x6C)
+#define TERM_BASED_ON_SAMPLE_CNT_BIT		BIT(0)
 #define CHGR_FLOAT_VOLTAGE_CFG			(CHGR_BASE + 0x70)
+#define CHGR_ADC_RECHARGE_THRESHOLD_MSB		(CHGR_BASE + 0x7E)
+#define CHGR_ADC_RECHARGE_THRESHOLD_LSB		(CHGR_BASE + 0x7F)
+
+/*
+ * Stock dagu qpnp-smb5 node: qcom,chg-term-src = <1> (ADC),
+ * qcom,chg-term-current-ma = <-230>, qcom,auto-recharge-vbat-mv =
+ * 4.40 V, no auto-recharge-soc (so VBAT-based). Conversions from
+ * qpnp-smb5.c / smb5-lib.h for PM8150B:
+ *   ITERM raw  = mA * 32767 / 10000, signed, big-endian
+ *   VBAT  raw  = mV * 1000000 / 194637, big-endian
+ * ABL leaves ITERM at -100 mA and recharge at 4.20 V.
+ */
+#define DAGU_ITERM_MA				(-230)
+#define DAGU_RECHARGE_MV			4400
+#define ITERM_LIMIT_MA				10000
+#define ADC_CHG_ITERM_MASK			32767
 
 #define POWER_PATH_STATUS			(DCDC_BASE + 0x0B)
 #define USBIN_SUSPEND_STS_BIT			BIT(6)
@@ -127,13 +155,16 @@
 #define FV_TARGET_UV				4480000
 #define FCC_UA					3000000
 /*
- * Stop the buck once the gauge shows 100%. Re-enable only after the
- * pack falls 100 mV under the 4.48 V float. Sitting full, with charge
- * current removed, this pack rests near 4.42 V, so 4.38 V does not
- * turn charging straight back on.
+ * Full and recharge belong to the SMB5 itself, as on stock: it
+ * terminates when the taper current falls under ITERM and starts
+ * again under the VBAT recharge threshold, with the buck still
+ * carrying the system. The driver used to clear CHARGING_ENABLE_CMD
+ * once "bms" read 100%. That point is only 4.39 V (both gauges at
+ * 96%), and with charging disabled the pack fed the system: -257 mA
+ * on the charger, 4.379 V four seconds later, charge back on. It
+ * cycled every 6 s for as long as it was plugged in.
  */
-#define DAGU_RECHARGE_UV			4380000
-#define DAGU_FULL_POLL_MS			2000
+#define DAGU_STATUS_POLL_MS			2000
 #define THERM_LEVELS				16
 
 /* qcom,thermal-mitigation on stock qpnp-smb5, microamps, level 0..15. */
@@ -172,8 +203,8 @@ struct pm8150b_chg {
 	int icl_step;
 	/* Pump path owns the pack; do not re-enable the buck. */
 	bool cp_mode;
-	/* Gauge is at 100%. Hold the buck off until the recharge voltage. */
-	bool charge_done;
+	/* Last BATTERY_CHARGER_STATUS_1 state, to report full/recharge once. */
+	int last_hw_state;
 	struct power_supply *bms;
 	/* Stock CHARGE_CONTROL_LIMIT: index into the thermal FCC/ICL tables. */
 	int therm_level;
@@ -450,41 +481,62 @@ static void chg_hold_off(struct pm8150b_chg *chg)
 			   CHARGING_ENABLE_CMD_BIT, 0);
 }
 
-/* Gauge capacity is the full signal. Voltage only decides when to start again. */
-static void chg_poll_full(struct pm8150b_chg *chg)
+/* The SMB5 decides full and recharge. Report its transitions once. */
+static void chg_poll_state(struct pm8150b_chg *chg)
 {
-	union power_supply_propval cap, uv;
-	int ret;
+	union power_supply_propval uv = { .intval = 0 };
+	unsigned int stat;
+	int state;
 
+	if (regmap_read(chg->regmap, BATTERY_CHARGER_STATUS_1, &stat))
+		return;
+	state = stat & BATTERY_CHARGER_STATUS_MASK;
+	if (state == chg->last_hw_state)
+		return;
 	if (!chg->bms)
 		chg->bms = power_supply_get_by_name("bms");
-	if (!chg->bms)
-		return;
-	ret = power_supply_get_property(chg->bms, POWER_SUPPLY_PROP_CAPACITY,
-					&cap);
-	if (ret)
-		return;
-	ret = power_supply_get_property(chg->bms, POWER_SUPPLY_PROP_VOLTAGE_NOW,
-					&uv);
-	if (ret)
-		return;
+	if (chg->bms)
+		power_supply_get_property(chg->bms,
+					  POWER_SUPPLY_PROP_VOLTAGE_NOW, &uv);
+	if (state == TERMINATE_CHARGE)
+		dev_info(chg->dev, "charge terminated at %d uV\n", uv.intval);
+	else if (chg->last_hw_state == TERMINATE_CHARGE)
+		dev_info(chg->dev, "recharge at %d uV (state %d)\n",
+			 uv.intval, state);
+	chg->last_hw_state = state;
+	power_supply_changed(chg->psy);
+}
 
-	if (!chg->charge_done) {
-		if (cap.intval < 100)
-			return;
-		chg->charge_done = true;
-		chg_hold_off(chg);
-		dev_info(chg->dev, "pack full %d%% %d uV, stop charge\n",
-			 cap.intval, uv.intval);
-		power_supply_changed(chg->psy);
-		return;
-	}
+static int chg_program_term_rechg(struct pm8150b_chg *chg)
+{
+	s16 iterm = (s16)div_s64((s64)DAGU_ITERM_MA * ADC_CHG_ITERM_MASK,
+				 ITERM_LIMIT_MA);
+	u16 vraw = (u16)div_u64((u64)DAGU_RECHARGE_MV * 1000000ULL, 194637);
+	int ret;
 
-	if (uv.intval < DAGU_RECHARGE_UV) {
-		chg->charge_done = false;
-		dev_info(chg->dev, "pack %d uV, recharge\n", uv.intval);
-		power_supply_changed(chg->psy);
-	}
+	ret = regmap_write(chg->regmap, CHGR_ADC_ITERM_UP_THD_MSB,
+			   ((u16)iterm >> 8) & 0xff);
+	if (!ret)
+		ret = regmap_write(chg->regmap, CHGR_ADC_ITERM_UP_THD_LSB,
+				   (u16)iterm & 0xff);
+	if (!ret)
+		ret = regmap_update_bits(chg->regmap, CHGR_ADC_TERM_CFG,
+					 TERM_BASED_ON_SAMPLE_CNT_BIT,
+					 TERM_BASED_ON_SAMPLE_CNT_BIT);
+	if (!ret)
+		ret = regmap_write(chg->regmap, CHGR_ADC_RECHARGE_THRESHOLD_MSB,
+				   vraw >> 8);
+	if (!ret)
+		ret = regmap_write(chg->regmap, CHGR_ADC_RECHARGE_THRESHOLD_LSB,
+				   vraw & 0xff);
+	if (!ret)
+		ret = regmap_update_bits(chg->regmap, CHGR_NO_SAMPLE_TERM_RCHG_CFG,
+					 NO_OF_SAMPLE_FOR_RCHG,
+					 NO_OF_SAMPLE_FOR_RCHG_3);
+	if (!ret)
+		ret = regmap_update_bits(chg->regmap, CHGR_CFG2, RECHG_MASK,
+					 VBAT_BASED_RECHG_BIT);
+	return ret;
 }
 
 static void chg_status_work(struct work_struct *work)
@@ -515,15 +567,12 @@ static void chg_status_work(struct work_struct *work)
 		return;
 	}
 
-	/*
-	 * 67 W PPS holds the buck off. A full gauge does too: status_work
-	 * must not turn the buck back on in either case.
-	 */
-	chg_poll_full(chg);
-	if (chg->cp_mode || chg->charge_done) {
+	/* 67 W PPS holds the buck off; status_work must not turn it back on. */
+	chg_poll_state(chg);
+	if (chg->cp_mode) {
 		chg_hold_off(chg);
 		schedule_delayed_work(&chg->status_work,
-				      msecs_to_jiffies(DAGU_FULL_POLL_MS));
+				      msecs_to_jiffies(DAGU_STATUS_POLL_MS));
 		return;
 	}
 
@@ -610,7 +659,7 @@ static void chg_status_work(struct work_struct *work)
 		power_supply_changed(chg->psy);
 	}
 	schedule_delayed_work(&chg->status_work,
-			      msecs_to_jiffies(DAGU_FULL_POLL_MS));
+			      msecs_to_jiffies(DAGU_STATUS_POLL_MS));
 }
 
 static int chg_psy_notifier(struct notifier_block *nb, unsigned long event,
@@ -662,10 +711,6 @@ static int chg_get_property(struct power_supply *psy,
 			return ret;
 		if (!online) {
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-			return 0;
-		}
-		if (chg->charge_done) {
-			val->intval = POWER_SUPPLY_STATUS_FULL;
 			return 0;
 		}
 		ret = regmap_read(chg->regmap, BATTERY_CHARGER_STATUS_1, &stat);
@@ -767,7 +812,7 @@ static int chg_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 		/* 0 is the pump path. Non-zero hands the pack back to the buck. */
 		chg->cp_mode = val->intval <= 0;
-		if (chg->cp_mode || chg->charge_done)
+		if (chg->cp_mode)
 			ret = regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD,
 						 CHARGING_ENABLE_CMD_BIT, 0);
 		else
@@ -864,6 +909,9 @@ static int chg_hw_init(struct pm8150b_chg *chg)
 	ret = chg_write_ua(chg, CHGR_FAST_CHARGE_CURRENT_CFG, FCC_UA);
 	if (ret)
 		return ret;
+	ret = chg_program_term_rechg(chg);
+	if (ret)
+		return ret;
 
 	return chg_enable_path(chg);
 }
@@ -877,6 +925,7 @@ static int chg_probe(struct platform_device *pdev)
 	chg = devm_kzalloc(&pdev->dev, sizeof(*chg), GFP_KERNEL);
 	if (!chg)
 		return -ENOMEM;
+	chg->last_hw_state = -1;
 
 	chg->dev = &pdev->dev;
 	dagu_chg = chg;

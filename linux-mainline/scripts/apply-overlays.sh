@@ -10433,3 +10433,67 @@ static bool vdec_codec_ok(struct venus_inst *inst, u32 pixfmt)
     p.write_text(t)
     print(f"patched {p}: {marker}")
 PY
+
+# venus: bound the system-error recovery loop. Upstream retries every
+# 10 ms forever; each attempt reboots the firmware and re-enables the
+# IRQ. When Iris2 cannot come back (seen after an SMMU fault in the
+# encoder) the level IRQ storms (~90k/s), journald and reboot stall and
+# the tablet has to be power-cycled. Back off and give up after a few
+# attempts: the codec stays unavailable (opens fail with -EIO because
+# sys_error stays set) but the system keeps running.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1]) / "drivers/media/platform/qcom/venus"
+marker = "dagu: bounded sys-error recovery"
+h = root / "core.h"
+t = h.read_text()
+if marker not in t:
+    old = "\tunsigned long sys_error;\n"
+    if old not in t:
+        raise SystemExit(f"{h}: sys_error needle missing")
+    t = t.replace(old, old + f"\tunsigned int sys_error_retries;\t/* {marker} */\n", 1)
+    h.write_text(t)
+    print(f"patched {h}: {marker}")
+c = root / "core.c"
+t = c.read_text()
+if marker not in t:
+    old_def = "#define RPM_WAIT_FOR_IDLE_MAX_ATTEMPTS 10\n"
+    old_fail = """	if (failed) {
+		disable_irq_nosync(core->irq);
+		dev_warn_ratelimited(core->dev,
+				     "System error has occurred, recovery failed to %s\\n",
+				     err_msg);
+		schedule_delayed_work(&core->work, msecs_to_jiffies(10));
+		return;
+	}
+"""
+    new_fail = f"""	if (failed) {{
+		/* {marker} */
+		unsigned int n = ++core->sys_error_retries;
+
+		disable_irq_nosync(core->irq);
+		if (n >= VENUS_SYS_ERROR_MAX_RETRIES) {{
+			mutex_lock(&core->lock);
+			venus_shutdown(core);
+			mutex_unlock(&core->lock);
+			dev_err(core->dev,
+				"System error has occurred, recovery failed to %s %u times; codec disabled until reboot\\n",
+				err_msg, n);
+			return;
+		}}
+		dev_warn(core->dev,
+			 "System error has occurred, recovery failed to %s (attempt %u)\\n",
+			 err_msg, n);
+		schedule_delayed_work(&core->work, msecs_to_jiffies(100U << n));
+		return;
+	}}
+	core->sys_error_retries = 0;
+"""
+    if old_def not in t or old_fail not in t:
+        raise SystemExit(f"{c}: sys-error recovery needles missing")
+    t = t.replace(old_def, old_def + "#define VENUS_SYS_ERROR_MAX_RETRIES 4\n", 1)
+    t = t.replace(old_fail, new_fail, 1)
+    c.write_text(t)
+    print(f"patched {c}: {marker}")
+PY

@@ -1,0 +1,75 @@
+From: dagu <dagu@localhost>
+Subject: [PATCH] device: Start LE GATT client after bonding completes
+
+When bluetoothd initiates LE bonding (Device1.Pair), the ATT channel is
+accepted at Pairing Request time and gatt_client_init() raises its
+security to medium. The kernel releases the queued Exchange MTU Request
+on Encryption Change, which is before SMP key distribution. A BT5.0 HID
+mouse (23:15:1D:17:xx:xx) acks that PDU at the link layer, sends its
+Encryption Information and Central Identification, and never answers
+the ATT request. The client then sits on the 30 s ATT timeout, Pair
+returns after the D-Bus timeout, and HoG only starts on a later
+reconnect. On reconnect (no key distribution) the same mouse answers
+Exchange MTU in 50 ms.
+
+Hold the GATT client while our own LE bonding is in progress and start
+it from device_bonding_complete(), so the first ATT request follows key
+distribution, the same order Android uses (bond, then GATT discovery).
+---
+--- a/src/device.c
++++ b/src/device.c
+@@ -210,6 +210,7 @@
+ 	struct btd_bearer *bredr;
+ 	struct btd_bearer *le;
+ 	bool		pending_paired;		/* "Paired" waiting for SDP */
++	bool		gatt_client_deferred;	/* waiting for LE bonding */
+ 	bool		svc_refreshed;
+ 	bool		refresh_discovery;
+ 
+@@ -6051,6 +6052,8 @@
+ 
+ 	DBG("");
+ 
++	device->gatt_client_deferred = false;
++
+ 	if (device->browse)
+ 		goto done;
+ 
+@@ -6357,7 +6360,22 @@
+ 		load_gatt_db(dev, btd_adapter_get_storage_dir(dev->adapter),
+ 								dstaddr);
+ 
+-	gatt_client_init(dev);
++	/*
++	 * While our own LE bonding is in progress the link becomes encrypted
++	 * before SMP key distribution has finished, and the kernel releases
++	 * queued ATT at that point. Some HID peripherals drop an ATT request
++	 * that arrives while they are distributing keys and never answer it,
++	 * so Exchange MTU waits for the 30 s ATT timeout. Start the client
++	 * once bonding has completed instead.
++	 */
++	if (dev->bonding && dev->bonding->bdaddr_type != BDADDR_BREDR &&
++					sec_level < BT_IO_SEC_MEDIUM) {
++		DBG("Deferring GATT client until bonding completes");
++		gatt_client_cleanup(dev);
++		dev->gatt_client_deferred = true;
++	} else {
++		gatt_client_init(dev);
++	}
+ 	gatt_server_init(dev, database);
+ 
+ 	/*
+@@ -7098,6 +7116,13 @@
+ 
+ 	DBG("bonding %p status 0x%02x", bonding, status);
+ 
++	/* Key distribution is over, success or not. */
++	if (device->gatt_client_deferred) {
++		device->gatt_client_deferred = false;
++		if (device->att)
++			gatt_client_init(device);
++	}
++
+ 	device->bonding_status = status;
+ 	if (status == MGMT_STATUS_AUTH_FAILED)
+ 		device_request_disconnect(device, NULL);

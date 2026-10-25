@@ -41,6 +41,10 @@ install -m644 "$ROOT/systemd/20-dagu-wifi-wowlan.conf" \
 	"$STAGE/files/etc/NetworkManager/conf.d/20-dagu-wifi-wowlan.conf"
 install -m755 "$ROOT/scripts/dagu-wifi-wowlan-apply.sh" \
 	"$STAGE/files/usr/local/sbin/dagu-wifi-wowlan-apply"
+# Daily fstrim keeps the UFS WriteBooster buffer from shrinking to 0.
+mkdir -p "$STAGE/files/etc/systemd/system/fstrim.timer.d"
+install -m644 "$ROOT/systemd/fstrim-dagu-daily.conf" \
+	"$STAGE/files/etc/systemd/system/fstrim.timer.d/dagu-daily.conf"
 # Wi-Fi power save follows the charger.
 mkdir -p "$STAGE/files/etc/udev/rules.d" "$STAGE/files/etc/NetworkManager/dispatcher.d"
 install -m755 "$ROOT/scripts/dagu-wifi-powersave.sh" \
@@ -101,6 +105,8 @@ systemctl daemon-reload
 systemctl enable dagu-bt-hid-host.service >/dev/null 2>&1 || true
 udevadm control --reload || true
 /usr/local/sbin/dagu-wifi-powersave || true
+systemctl restart fstrim.timer >/dev/null 2>&1 || true
+fstrim / >/dev/null 2>&1 || true
 # Mark the booted A/B slot successful on every boot. Without it ABL's
 # retry counter (7 per set_active) runs out and the tablet stops in fastboot.
 systemctl enable --now dagu-boot-success.service

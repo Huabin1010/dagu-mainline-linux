@@ -80,6 +80,9 @@ install -m 644 "$ROOT/systemd/dagu-boot-success.service" \
 mkdir -p "$ROOTFS/etc/systemd/system/multi-user.target.wants"
 ln -sfn /etc/systemd/system/dagu-boot-success.service \
 	"$ROOTFS/etc/systemd/system/multi-user.target.wants/dagu-boot-success.service"
+# Daily fstrim: UFS WriteBooster buffer comes from discarded LBAs.
+install -D -m 644 "$ROOT/systemd/fstrim-dagu-daily.conf" \
+	"$ROOTFS/etc/systemd/system/fstrim.timer.d/dagu-daily.conf"
 # Wi-Fi power save off on the charger (2.4 ms vs 7.4 ms gateway RTT).
 install -D -m 755 "$ROOT/scripts/dagu-wifi-powersave.sh" \
 	"$ROOTFS/usr/local/sbin/dagu-wifi-powersave"

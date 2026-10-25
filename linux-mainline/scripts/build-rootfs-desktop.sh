@@ -176,6 +176,15 @@ rm -f "$ROOTFS/etc/ssh/ssh_host_"*
 rm -f "$ROOTFS/var/lib/dbus/machine-id"
 : >"$ROOTFS/etc/machine-id"
 chroot "$ROOTFS" dpkg-reconfigure -f noninteractive openssh-server >/dev/null 2>&1 || true
+# dpkg-reconfigure just generated host keys again; every flashed tablet
+# would share them. sshd-keygen.service (ConditionFirstBoot, empty
+# machine-id) makes this tablet's own keys on first boot.
+rm -f "$ROOTFS/etc/ssh/ssh_host_"*
+# Session units and scripts use /run/user/1001 (the tablet's dagu uid).
+[[ "$(chroot "$ROOTFS" id -u dagu)" == 1001 ]] || {
+	echo "dagu must be uid 1001 (units hardcode /run/user/1001)" >&2
+	exit 1
+}
 
 chroot_umount
 trap - EXIT

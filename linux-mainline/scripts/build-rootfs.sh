@@ -126,7 +126,8 @@ if [[ -n "$PASS" ]]; then
 	echo "root:$PASS" | chroot "$ROOTFS" chpasswd
 	echo "==> root password updated"
 	if [[ "${DESKTOP:-0}" == 1 ]]; then
-		chroot "$ROOTFS" useradd -m -s /bin/bash -G sudo,video,render,input,plugdev dagu 2>/dev/null || true
+		# uid 1001 as on the tablet: session units use /run/user/1001.
+		chroot "$ROOTFS" useradd -m -u 1001 -s /bin/bash -G sudo,video,render,input,plugdev dagu 2>/dev/null || true
 		echo "dagu:$PASS" | chroot "$ROOTFS" chpasswd
 		echo 'dagu ALL=(ALL) NOPASSWD:ALL' >"$ROOTFS/etc/sudoers.d/dagu"
 		chmod 440 "$ROOTFS/etc/sudoers.d/dagu"

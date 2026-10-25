@@ -99,7 +99,7 @@ printf '127.0.0.1\tlocalhost\n127.0.1.1\tdagu\n' >/etc/hosts
 printf '%s\n' 'LABEL=dagu-linux / ext4 defaults 0 1' >/etc/fstab
 
 echo "root:$PASS" | chpasswd
-id dagu >/dev/null 2>&1 || useradd -m -s /bin/bash dagu
+id dagu >/dev/null 2>&1 || useradd -m -u 1001 -s /bin/bash dagu
 echo "dagu:$PASS" | chpasswd
 for g in sudo video render input plugdev bluetooth audio; do
 	getent group "$g" >/dev/null && usermod -aG "$g" dagu || true
@@ -1616,9 +1616,11 @@ always-show-universal-access-status=true
 [org/gnome/shell]
 disable-user-extensions=false
 enabled-extensions=['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com', 'tiling-assistant@ubuntu.com', 'dagu-osk-focus@dagu', 'dagu-present-pump@local', 'dagu-touch-window@dagu']
+favorite-apps=['org.chromium.Chromium.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.Snapshot.desktop', 'net.nokyan.Resources.desktop', 'org.gnome.TextEditor.desktop', 'org.gnome.Settings.desktop']
 
 [org/gnome/desktop/input-sources]
-sources=[('xkb', 'us'), ('ibus', 'libpinyin')]
+# Chinese input is fcitx5 (dagu-fcitx5.service); tap Shift to switch.
+sources=[('xkb', 'us')]
 
 [org/gnome/desktop/interface]
 toolkit-accessibility=true

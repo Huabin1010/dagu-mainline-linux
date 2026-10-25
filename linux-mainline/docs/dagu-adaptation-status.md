@@ -69,7 +69,7 @@
 | 前摄 imx596 | **已通（硬件 ISP 预览）** | 同上走 IFE1 PIX NV12 1280×960 → `/dev/video20` YUYV 1280×720 @30fps。生产者占一颗小核 12.2% |
 | CAMSS RDI / SMMU | **已通** | CSIPHY→CSID→VFE RDI 出 RAW。CSID TPG 也曾出完整 1 帧（约 15.6 MB） |
 | CAMSS（Camera Subsystem，相机子系统） IFE（Image Front End，图像前端） PIX（Pixel path，像素通路） | **部分** | `#500` 后置复测 **9331200 = 3×3110400**，`r0114=0x300`。前置 `#501`：紧包 2320 末行 4K 停写（4591616）；步长 4096 交出 **一整帧 8110080**，UV（chroma，色度）mean 128，末行满。30s 仍 1 帧。禁止 `ALIGN_UP FRAME_INCR`。产品预览继续 SoftISP（Software Image Signal Processor，软件图像信号处理器）。后置图 `dagu-ife-pipeline-status.md`；前置图 `dagu-ife-front-pipeline-status.md` |
-| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6。`#333` `hci0` UP RUNNING PSCAN，HCI 5.2。BLE HOG + 经典 HID（`ClassicBondedOnly=false`）。`dagu-bt-hid-host.sh` 保持 Pairable/PSCAN。A2DP 走 Q6 `SLIMBUS_7_RX`（`hw:0,3`），见 `dagu-adsp-voice.md` |
+| 蓝牙 | **已通** | QCA6390 uart6：stock `qupv3fw.elf` 只写 SE6。`#654`：天线开关 VDD_ASD = PM8150 L16（原厂 `qca,bt-vdd-asd-supply`，主线没接，不开时寻呼 0/10）；mgmt 搜索状态竞争已修；BlueZ `+dagu1` 在 LE 绑定完成后才起 GATT。K380（传统 PIN）和 BLE 鼠标在 GNOME 设置里点一下就配上。BlueZ 默认配置，旧蓝牙补丁和 `dagu-bt-hid-host` 已撤。A2DP 走 Q6 `SLIMBUS_7_RX`（`hw:0,3`），见 `dagu-adsp-voice.md`。记录：`dagu-bluetooth-pairing-2026-10.md` |
 | USB OTG Host / DP | **DT 已写** | HS OTG 角色可切；SS PHY / PS5169 未在活 DT 接上。`pm8150b_typec` 已 okay（CC/PD），USB 图仍切断以免 DWC3 等角色 |
 | 双电芯电量 | **已通** | 双 BQ27Z561 走 GENI I2C SE0/SE13 + `xiaomi-dual-fg`。`#333` `bms` Battery SoC（桌面跟 bms）。gpio `fg_i2c_se0` / `fg_i2c_se13` 保持 disabled |
 | 充电（SMB5 5 V） | **已通** | `#565` USB PD 5 V / 2 A，`pm8150b-charger` `online=1` `status=Charging`，ICL **2 A**，`bms` Charging。不再要 9 V |

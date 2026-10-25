@@ -150,11 +150,28 @@ class ShutdownContractTests(unittest.TestCase):
         self.assertNotIn("dagu-offmode-charger daemon", setup)
         self.assertIn("rm -f /etc/systemd/system/dagu-offmode-daemon.service", setup)
 
-    def test_shutdown_darkens_the_panel_first(self) -> None:
+    def test_shutdown_shows_the_console_and_darkens_last(self) -> None:
+        # Text console on the panel while services stop; dark only after
+        # / is read-only, in the systemd-shutdown hook.
         setup = (ROOT / "scripts" / "rootfs-desktop-setup.sh").read_text()
         block = setup.split("cat >/usr/local/sbin/dagu-shutdown-display", 1)[1]
         block = block.split("\nEOF\n", 1)[0]
-        self.assertIn("bl_power", block)
+        self.assertIn("VT_ACTIVATE", block)
+        self.assertNotIn('echo 0 >"$bind"', block)
+        self.assertNotIn("bl_power", block)
+        final = (ROOT / "systemd" / "dagu-shutdown-final").read_text()
+        self.assertIn("bl_power", final)
+        self.assertLess(final.index("remount,ro"), final.index("bl_power"))
+
+    def test_unplug_poweroff_is_orderly(self) -> None:
+        src = (ROOT / "scripts" / "dagu_offmode_charger.py").read_text()
+        body = src.split("def real_poweroff", 1)[1].split("\nclass ", 1)[0]
+        calls = [ln for ln in body.splitlines() if "run([" in ln]
+        self.assertTrue(calls, body)
+        for ln in calls:
+            self.assertIn('"poweroff"', ln)
+            self.assertNotIn('"--force"', ln)
+
 
 
 class PanelDarkTests(unittest.TestCase):

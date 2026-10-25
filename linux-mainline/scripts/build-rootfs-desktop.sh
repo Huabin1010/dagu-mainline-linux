@@ -80,6 +80,9 @@ install -m 644 "$ROOT/systemd/dagu-boot-success.service" \
 mkdir -p "$ROOTFS/etc/systemd/system/multi-user.target.wants"
 ln -sfn /etc/systemd/system/dagu-boot-success.service \
 	"$ROOTFS/etc/systemd/system/multi-user.target.wants/dagu-boot-success.service"
+# Last shutdown step: record a still-writable /, then darken the panel.
+install -D -m 755 "$ROOT/systemd/dagu-shutdown-final" \
+	"$ROOTFS/usr/lib/systemd/system-shutdown/dagu-shutdown-final"
 install -m 755 "$ROOT/scripts/dagu-folio-repeat-verify.py" \
 	"$ROOTFS/usr/local/sbin/dagu-folio-repeat-verify.py"
 install -m 755 "$ROOT/scripts/dagu-mutter-repeat-keep.sh" \

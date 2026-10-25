@@ -1,0 +1,39 @@
+#!/bin/sh
+# systemd-shutdown hook: the last step before the reboot()/poweroff
+# syscall, after every process is gone and systemd-shutdown has
+# remounted / read-only. $1 = poweroff | reboot | halt | kexec
+#
+# 1. If / is still writable the next boot replays the ext4 journal
+#    (initramfs e2fsck "recovering journal", rc=1). Keep a record of
+#    what held it, then try the read-only remount once more.
+# 2. Then go dark: the shutdown text (dagu-shutdown-display) stays lit
+#    until the filesystems are safe.
+log=/var/lib/dagu/shutdown-dirty.log
+if awk '$2 == "/" && $4 ~ /(^|,)rw(,|$)/ { f = 1 } END { exit !f }' /proc/mounts; then
+	echo "dagu-shutdown-final: / still rw at $1" >/dev/kmsg
+	{
+		echo "action=$1 uptime=$(cut -d' ' -f1 /proc/uptime)"
+		echo "== mounts"
+		cat /proc/mounts
+		echo "== processes"
+		for p in /proc/[0-9]*; do
+			[ -r "$p/stat" ] || continue
+			printf '%s %s %s\n' "${p#/proc/}" \
+				"$(cut -d' ' -f3 "$p/stat" 2>/dev/null)" \
+				"$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null | cut -c1-120)"
+		done
+		echo "== kernel log"
+		dmesg | tail -120
+	} >"$log" 2>&1
+	sync
+	if mount -o remount,ro / 2>/dev/null; then
+		echo "dagu-shutdown-final: / remounted ro" >/dev/kmsg
+	fi
+else
+	echo "dagu-shutdown-final: / read-only, panel off ($1)" >/dev/kmsg
+fi
+sync
+for p in /sys/class/backlight/*/bl_power; do
+	echo 4 >"$p" 2>/dev/null || true
+done
+exit 0

@@ -28,6 +28,10 @@ install -m644 "$ROOT/systemd/dagu-boot-success.service" \
 install -m644 "$ROOT/systemd/logind-dagu-power.conf" "$STAGE/files/etc/systemd/logind.conf.d/dagu-power.conf"
 install -m644 "$ROOT/systemd/dagu-camera-loopback-watch.service" \
 	"$STAGE/files/etc/systemd/system/dagu-camera-loopback-watch.service"
+# Shutdown: text console stays lit until / is read-only, then dark.
+mkdir -p "$STAGE/files/usr/lib/systemd/system-shutdown"
+install -m755 "$ROOT/systemd/dagu-shutdown-final" \
+	"$STAGE/files/usr/lib/systemd/system-shutdown/dagu-shutdown-final"
 # s2idle: SEE client stop/start around sleep, magic-packet-only WoWLAN.
 mkdir -p "$STAGE/files/usr/lib/systemd/system-sleep" \
 	"$STAGE/files/etc/NetworkManager/conf.d"
@@ -52,7 +56,7 @@ sed -n '/^cat >\/usr\/local\/sbin\/dagu-shutdown-display <<.EOF.$/,/^EOF$/p' \
 	"$ROOT/scripts/rootfs-desktop-setup.sh" | sed '1d;$d' \
 	>"$STAGE/files/usr/local/sbin/dagu-shutdown-display"
 chmod 755 "$STAGE/files/usr/local/sbin/dagu-shutdown-display"
-grep -q bl_power "$STAGE/files/usr/local/sbin/dagu-shutdown-display" || {
+grep -q VT_ACTIVATE "$STAGE/files/usr/local/sbin/dagu-shutdown-display" || {
 	echo "dagu-shutdown-display extract failed" >&2
 	exit 1
 }

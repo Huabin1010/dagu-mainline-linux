@@ -3521,31 +3521,41 @@ fi
 
 cat >/usr/local/sbin/dagu-shutdown-display <<'EOF'
 #!/bin/sh
-# Stop the framebuffer console from taking the panel when GNOME/Mutter
-# drops DRM master. ignore_loglevel + console=tty0 would otherwise keep
-# reprinting the same kernel log block until the PMIC finally cuts power.
 set -eu
-# Dark at once, as Android goes dark after "Power off": nothing of the
-# greeter or the console shows while the desktop stops. bl_power off
-# switches the LED boost off; HWEN and the panel link stay up.
-for p in /sys/class/backlight/*/bl_power; do
-	echo 4 >"$p" 2>/dev/null || true
+# Normal Linux shutdown on the panel: the text console shows systemd's
+# stop lines and the kernel log scrolling, and the backlight goes off
+# only after / is read-only (system-shutdown/dagu-shutdown-final).
+# fbcon may have been detached (charger screen); attach it again, keep
+# the console from blanking, and bring tty1 to the front so the desktop
+# hands the panel over now instead of whenever it exits.
+for v in /sys/class/vtconsole/vtcon*; do
+	grep -q "frame buffer" "$v/name" 2>/dev/null || continue
+	echo 1 >"$v/bind" 2>/dev/null || true
 done
-echo 1 >/proc/sys/kernel/printk 2>/dev/null || true
-for bind in /sys/class/vtconsole/vtcon*/bind; do
-	[ -w "$bind" ] || continue
-	echo 0 >"$bind" 2>/dev/null || true
-done
-for tty in /dev/tty1 /dev/tty0; do
-	[ -c "$tty" ] || continue
-	setterm --cursor off --blank force --term linux <"$tty" >"$tty" 2>/dev/null || true
-done
+if [ -c /dev/tty1 ]; then
+	setterm --term linux --blank 0 --powerdown 0 --cursor off \
+		</dev/tty1 >/dev/tty1 2>/dev/null || true
+	python3 - <<'PY' 2>/dev/null || true
+import fcntl, os
+KDSETMODE, KD_TEXT, VT_ACTIVATE = 0x4B3A, 0, 0x5606
+fd = os.open("/dev/tty1", os.O_RDWR | os.O_NOCTTY)
+try:
+    fcntl.ioctl(fd, KDSETMODE, KD_TEXT)
+finally:
+    os.close(fd)
+fd = os.open("/dev/tty0", os.O_RDWR | os.O_NOCTTY)
+try:
+    fcntl.ioctl(fd, VT_ACTIVATE, 1)
+finally:
+    os.close(fd)
+PY
+fi
 exit 0
 EOF
 chmod 755 /usr/local/sbin/dagu-shutdown-display
 cat >/etc/systemd/system/dagu-shutdown-display.service <<'EOF'
 [Unit]
-Description=dagu: unbind framebuffer console before shutdown redraw
+Description=dagu: text console on the panel during shutdown
 DefaultDependencies=no
 After=gdm.service display-manager.service
 Conflicts=shutdown.target

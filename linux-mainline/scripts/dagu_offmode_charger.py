@@ -462,8 +462,11 @@ def real_poweroff() -> None:
     except OSError:
         pass
     mark_pending()
-    run(["systemctl", "poweroff", "--force", "--no-block"])
-    time.sleep(8)
+    # Orderly, not --force: --force skips stopping units and unmounting,
+    # so / was still rw at reboot() and the next boot had to replay the
+    # ext4 journal. systemd stops this unit as part of the shutdown;
+    # exit now so the finally: in cmd_ui does not start the desktop.
+    run(["systemctl", "poweroff", "--no-block"])
     os._exit(0)
 
 

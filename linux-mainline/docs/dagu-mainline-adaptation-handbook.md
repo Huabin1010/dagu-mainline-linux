@@ -706,10 +706,16 @@ WCD9385 模拟麦 5（偏置 3）→ ADC4 INP5 → TX DEC0 → TX_CODEC_DMA_TX_3
 
 - 行为照 HyperOS：插线开机显示电量，45 秒后熄屏（实测 HyperOS 约 45 秒），短按电源点亮，长按 2.5 秒进桌面，拔线 15 秒后关机。直接画到 `/dev/fb0`，转 270°。
 - 判断是不是“插线开机”只看确定的信号：引导程序给的 `androidboot.mode=charger`、充电类的启动原因、开机原因寄存器有插线位且没有电源键位。调试用的数据线会让充电器在线，“充电器在线”本身绝不能跳过桌面；遗留的待处理标记也不算。
-- 关机就是真关机（`#630`）：插着线关机时，电源管理芯片看到有电会马上重新上电，引导程序带 `androidboot.mode=charger` 启动内核，这和安卓的关机充电是同一条路。关机一开始 `dagu-shutdown-display` 就关背光，所以点完关机屏幕立刻变黑，不会再露出登录界面。
+- 关机就是真关机（`#630`）：插着线关机时，电源管理芯片看到有电会马上重新上电，引导程序带 `androidboot.mode=charger` 启动内核，这和安卓的关机充电是同一条路。关机一开始 `dagu-shutdown-display` 就把屏幕交给文字控制台（tty1），显示 systemd 停服务的输出和内核日志，不会再露出登录界面；背光到根分区只读后才关（见下面 10-25 一条）。
 - 以前的问题：有一个守护进程想在桌面里“拦下关机”，它持有关机延迟锁却只盯着定时关机的文件，从不释放。于是每次关机 logind 都要等满 `InhibitDelayMaxSec=20s`，这 20 秒里桌面会话先退出，显示管理器又把登录界面拉了起来，看起来就是“先回到锁屏，再关机”。现在守护进程删掉了，延迟恢复默认 5 秒；实测从发出关机到开始关机 14 毫秒，0.17 秒黑屏，约 2.8 秒断电。
 - 关机充电开机时内核日志不上屏：面板驱动看到 `androidboot.mode=charger` 就一直关着灯，直到电池界面画好再由界面写 `/sys/module/panel_xiaomi_dagu_l81a/parameters/charger_dark` 开灯；进桌面的路径也会开灯。60 秒内没人开灯就自己亮，免得坏掉的启动什么都看不见。
 - 电池界面先画再做慢的事：`systemctl mask` 每次都会重载 systemd，挪到画完之后。按从上电开始的计时，9.3 秒出电池（以前 12.3 秒），其中约 7.2 秒是芯片和引导程序。
+- 关机（10-25）：开机时的 e2fsck 有两次报 `recovering journal`（rc=1），即上次关机时根分区还是可写的。
+  - 能确认的一次：前一次启动是充电界面，拔线后走 `real_poweroff()` 的 `systemctl poweroff --force`，跳过停服务和卸载。现在改成有序的 `systemctl poweroff`。
+  - 另一次是桌面里的正常关机，没能复现。用串口抓了 4 次有序关机，`/` 都按时只读，下次启动 rc=0。
+  - 现在 `system-shutdown/dagu-shutdown-final` 在断电前查 `/`：还可写就把挂载和进程记到 `/var/lib/dagu/shutdown-dirty.log`，再试一次只读重挂。
+  - 显示：以前第一个停止任务就关背光，还解绑了帧缓冲控制台，干净的 1.5 秒关机看着像断电。现在 `dagu-shutdown-display` 重新绑定帧缓冲控制台，切到 tty1，像普通 Linux 一样滚动 `[  OK  ] Stopped …` 和 `systemd-shutdown` 的输出；背光一直亮到 `/` 只读之后，由 `dagu-shutdown-final` 关掉。
+  - 验证：断电前把前台终端的屏幕缓冲（`/dev/vcs1`）打到串口，最后几行是 `re-mounted … ro`、`All filesystems … detached`；之后才关背光、断电。
 - 关键教训（10-24 桌面起不来那次）：电池界面服务原来挂在多用户目标上，又写了和显示管理器冲突，systemd 每次开机都把显示管理器的启动任务丢掉，平板停在控制台刷日志。现在这个服务不挂任何目标，只由判断服务在确认插线开机时 `systemctl start --no-block` 拉起，它对显示管理器排的停止任务正好替换掉待启动的任务。
 
 ## 16. 休眠
@@ -769,6 +775,7 @@ BlueZ 侧另外设了设备类别为平板、临时设备保留 180 秒、总是
   - `32a52b6`：Ctrl+C 之后只剩修饰键时补发抬起。
   - `dbb13e5`：中断线已经回高时，序号加一的空报告是真抬起。
   - `f541909`：Fn 音量键的消费者报告全 0 被当成鬼键，合成器把音量一直加到顶；改成 Fn 之后释放。
+- 每包日志默认关（10-25）：`rx seq=`、`kbd seq=`、`consumer seq=` 原来是 `dev_info`，命令行带 `console=tty0 ignore_loglevel`，关机文字控制台上每按一个键就冒一行。现在走 `nanosic_trace()`，调键盘时 `echo 1 > /sys/module/nanosic_dagu/parameters/log_packets` 打开；`dagu-folio-repeat-verify` 没有这些行时用 evdev 判。
 - udev 规则给它补 `ID_BUS=i2c`（合成器的连发需要真实总线类型），并忽略唤醒脚那个伪键盘节点（`b5c85cb`：唤醒脉冲当成重复键，抢走了正在按住的键的连发）。
 - 不要用 keyd 独占这个设备：它独占后经虚拟输入设备重发的事件没有扫描码，Wayland 第一下不连发（`12cd094`）。点 Shift 切 fcitx5 用 `userspace/dagu-fcitx5-shift-tap.c`，只监听不独占。
 - mutter 50.1 任意一个键松开都会取消连发（GNOME 上游问题 4675），打补丁改成只有正在连发的那个键松开才取消（`patches/mutter-50-repeat-on-other-key-release.patch`），`dagu-mutter-repeat-keep.service` 防止升级把原版库装回来。

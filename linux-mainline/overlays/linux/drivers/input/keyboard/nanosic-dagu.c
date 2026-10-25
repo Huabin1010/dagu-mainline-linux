@@ -54,6 +54,24 @@
 
 #include "nanosic-kbd-ghost.h"
 
+/*
+ * One kernel log line per MCU packet / key was the debug trail for the
+ * ghost-key and hold-repeat work. With console=tty0 + ignore_loglevel
+ * every key press scrolled onto the panel (shutdown console, charger
+ * screen). Off by default; dagu-folio-repeat-verify falls back to evdev.
+ * Turn it on while debugging the folio:
+ *   echo 1 > /sys/module/nanosic_dagu/parameters/log_packets
+ */
+static bool log_packets;
+module_param(log_packets, bool, 0644);
+MODULE_PARM_DESC(log_packets, "log every MCU packet and key report");
+
+#define nanosic_trace(kb, fmt, ...)					\
+	do {								\
+		if (READ_ONCE(log_packets))				\
+			dev_info(&(kb)->client->dev, fmt, ##__VA_ARGS__);	\
+	} while (0)
+
 #define NANOSIC_WRITE_LEN	66
 #define NANOSIC_READ_LEN	68
 
@@ -682,7 +700,7 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 			 * a stale sequence.
 			 */
 			if (nanosic_ghost_empty(kb, p, seen_vendor)) {
-				dev_info(&kb->client->dev,
+				nanosic_trace(kb,
 					 "kbd drop leftover empty seq=%02x d=%d keys=%6phD gpio=%d\n",
 					 data[1], kb->rx_seq_delta, p + 3,
 					 nanosic_data_pending(kb));
@@ -690,7 +708,7 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 				left -= 9;
 				break;
 			}
-			dev_info(&kb->client->dev,
+			nanosic_trace(kb,
 				 "kbd seq=%02x empty=%d keys=%6phD gpio=%d\n",
 				 data[1], nanosic_kbd_empty(p), p + 3,
 				 nanosic_data_pending(kb));
@@ -714,7 +732,7 @@ static int nanosic_parse(struct nanosic_kb *kb, u8 *data, size_t len)
 				left -= 5;
 				break;
 			}
-			dev_info(&kb->client->dev,
+			nanosic_trace(kb,
 				 "consumer seq=%02x usage=%04x down=%d gpio=%d\n",
 				 data[1], nanosic_consumer_usage(p),
 				 nanosic_consumer_usage(p) != 0,
@@ -989,7 +1007,7 @@ static void nanosic_rx_once(struct nanosic_kb *kb, bool drain)
 	}
 	kb->rx_have_prev_seq = kb->have_seq;
 	kb->rx_seq_delta = kb->have_seq ? (s8)(buf[1] - kb->last_seq) : 1;
-	dev_info(&kb->client->dev, "rx seq=%02x d=%d %16phD\n",
+	nanosic_trace(kb, "rx seq=%02x d=%d %16phD\n",
 		 buf[1], kb->rx_seq_delta, buf);
 	nanosic_parse(kb, buf, sizeof(buf));
 	/*

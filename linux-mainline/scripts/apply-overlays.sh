@@ -10497,3 +10497,87 @@ if marker not in t:
     c.write_text(t)
     print(f"patched {c}: {marker}")
 PY
+
+# venus: power the encoder up for STREAMOFF. venc uses the generic
+# venus_helper_vb2_stop_streaming(), which sends session stop / release
+# buffers / deinit without a runtime-PM reference (vdec_stop_streaming
+# does vdec_pm_get_put()). After 2 s idle the encoder is autosuspended,
+# the firmware cannot answer, each unset_buffers waits out its 1 s
+# timeout, and the internal buffers are freed while Iris2 still owns them.
+# The next session then faults in the SMMU (iova inside the freed
+# persist buffer) and the firmware dies. Chromium hits this whenever a
+# WebCodecs/MediaRecorder encoder sits idle before it is destroyed.
+# Also: never hand an internal buffer back to the allocator if the live
+# firmware did not acknowledge its release; leak it instead.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1]) / "drivers/media/platform/qcom/venus"
+marker = "dagu: venc STREAMOFF holds runtime PM"
+p = root / "venc.c"
+t = p.read_text()
+if marker not in t:
+    old = "\t.stop_streaming = venus_helper_vb2_stop_streaming,\n\t.buf_queue = venc_vb2_buf_queue,\n"
+    anchor = "static const struct vb2_ops venc_vb2_ops = {\n"
+    if old not in t or anchor not in t:
+        raise SystemExit(f"{p}: venc stop_streaming needles missing")
+    helper = f"""/* {marker}: the firmware must be powered to stop the session. */
+static void venc_stop_streaming(struct vb2_queue *q)
+{{
+	struct venus_inst *inst = vb2_get_drv_priv(q);
+	bool powered = !venc_pm_get(inst);
+
+	venus_helper_vb2_stop_streaming(q);
+	if (powered)
+		venc_pm_put(inst, true);
+}}
+
+"""
+    t = t.replace(anchor, helper + anchor, 1)
+    t = t.replace(old, "\t.stop_streaming = venc_stop_streaming,\n\t.buf_queue = venc_vb2_buf_queue,\n", 1)
+    p.write_text(t)
+    print(f"patched {p}: {marker}")
+marker2 = "dagu: keep unreleased internal buffers"
+p = root / "helpers.c"
+t = p.read_text()
+if marker2 not in t:
+    old = """		ret = hfi_session_unset_buffers(inst, &bd);
+
+		list_del_init(&buf->list);
+		dma_free_attrs(inst->core->dev, buf->size, buf->va, buf->da,
+			       buf->attrs);
+		kfree(buf);
+	}
+
+	return ret;
+}
+"""
+    new = f"""		ret = hfi_session_unset_buffers(inst, &bd);
+
+		list_del_init(&buf->list);
+		/*
+		 * {marker2}: a live firmware that did not ack the
+		 * release may still DMA into it. Leak rather than let the next
+		 * session fault on freed memory. After a system error the
+		 * firmware is gone and freeing is safe.
+		 */
+		if (ret && !test_bit(0, &inst->core->sys_error)) {{
+			dev_warn(inst->core->dev,
+				 "internal buffer type %u (%zu bytes) not released (%d), leaking it\\n",
+				 buf->type, buf->size, ret);
+			continue;
+		}}
+		dma_free_attrs(inst->core->dev, buf->size, buf->va, buf->da,
+			       buf->attrs);
+		kfree(buf);
+	}}
+
+	return ret;
+}}
+"""
+    if old not in t:
+        raise SystemExit(f"{p}: intbufs_unset_buffers needle missing")
+    t = t.replace(old, new, 1)
+    p.write_text(t)
+    print(f"patched {p}: {marker2}")
+PY

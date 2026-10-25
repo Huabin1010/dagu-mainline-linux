@@ -107,155 +107,24 @@ done
 echo 'dagu ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/dagu
 chmod 440 /etc/sudoers.d/dagu
 
-# Classic HID keyboards (K380): BlueZ 5.64+ rejects unbonded HIDP by default,
-# so GNOME can show Connected while hidp_add_connection fails and no evdev
-# node appears. Pairing PIN is typed on the keyboard, so HID must be allowed
-# before bonding. See linux-mainline/bluetooth/input.conf.
-mkdir -p /etc/bluetooth
-cat >/etc/bluetooth/input.conf <<'EOF'
-[General]
-ClassicBondedOnly=false
-UserspaceHID=persist
-EOF
-# HID host (classic keyboard + BLE mouse): keep sniff / UART RPM / QCA IBS.
-# Sniff 6–18 slots = 3.75–11.25 ms (not the ACL 80–800). FastConnectable is
-# interlaced page scan at 160 ms so a waking K380 can page us. PageTimeout
-# 10.24 s because QCA6390 shares the radio with LE HID.
-# ReconnectUUIDs stays audio-only. Classic HID keyboards page the host on
-# keypress; if bluetoothd outgoing-pages them for PageTimeout the radio is
-# not in page scan and both sides miss. Do not add HID 00001124.
-# Do not clear HCI_LP_SNIFF or pin UART on.
-bt_main_set() {
-	local key=$1 val=$2 file=/etc/bluetooth/main.conf
-	[ -f "$file" ] || return 0
-	if grep -qE "^#?${key}" "$file"; then
-		sed -i -E "s|^#?${key}.*|${key}=${val}|" "$file"
-	else
-		printf '\n%s=%s\n' "$key" "$val" >>"$file"
-	fi
-}
-bt_main_set MinSniffInterval 6
-bt_main_set MaxSniffInterval 18
-bt_main_set PageTimeout 16384
-bt_main_set FastConnectable true
-bt_main_set PageScanInterval 0x0100
-bt_main_set PageScanWindow 0x0012
-bt_main_set ReconnectUUIDs '00001112-0000-1000-8000-00805f9b34fb,0000111f-0000-1000-8000-00805f9b34fb,0000110a-0000-1000-8000-00805f9b34fb,0000110b-0000-1000-8000-00805f9b34fb'
-# Computer/Tablet CoD so classic HID inquiry sees a tablet, not 0x000000.
-# TemporaryTimeout 180s: unpaired Inquiry results stay in BlueZ (Android
-# pairing UI keeps them; default 30s is why bluetoothctl "Device not available").
-# JustWorksRepairing: K380 channel re-pair after the keyboard was bonded to
-# Android. Privacy=off: classic PIN HID. LE interval 24–40 (30–50 ms) is the
-# HID+BR coexistence floor so Inquiry can hear FHS while the mouse is up.
-# Do not set ControllerMode=bredr (that kills HOG). Do not add HID ReconnectUUIDs.
-bt_main_set Class 0x00011c
-bt_main_set TemporaryTimeout 180
-bt_main_set JustWorksRepairing always
-bt_main_set Privacy off
-bt_main_set PairableTimeout 0
-# GNOME setup-mode writes Pairable=no when the user clicks Connect, then
-# Pair/Connect. AlwaysPairable keeps outgoing/incoming pairing alive.
-# hid-host still restores bondable/PSCAN after QCA HCI reset (0x03).
-bt_main_set AlwaysPairable true
-bt_main_set MinConnectionInterval 24
-bt_main_set MaxConnectionInterval 40
-# 3 s. The kernel default 420 ms drops a mouse that applies slave
-# latency before the central accepts the request. Per-device PPCP
-# still overrides this on the live link. The kernel keeps 24–40 only
-# for LE Create Connection. The mouse's update (often 7.5–11.25 ms)
-# is applied with a connection-event length.
-bt_main_set ConnectionSupervisionTimeout 300
-# Device-initiated classic HID (K380 ReconnectMode=device): GNOME
-# Device1.Connect must wait for the keypress page. Outgoing page drops
-# PSCAN on QCA6390. Rebuild bluetoothd with dagu-build-bluez-hid.sh
-# (DAGU_PATCH_BLUEZ=1 during image build, or live on the tablet).
-if [ -f /tmp/dagu-bluez-hid/dagu-bluez-hid-wait-incoming.py ]; then
-	install -m 755 /tmp/dagu-bluez-hid/dagu-bluez-hid-wait-incoming.py \
-		/usr/local/sbin/dagu-bluez-hid-wait-incoming.py
-	install -m 755 /tmp/dagu-bluez-hid/dagu-build-bluez-hid.sh \
-		/usr/local/sbin/dagu-build-bluez-hid.sh
-	if [ "${DAGU_PATCH_BLUEZ:-0}" = 1 ]; then
-		DAGU_BLUEZ_BUILD=/usr/local/src/dagu-bluez-hid \
-			/usr/local/sbin/dagu-build-bluez-hid.sh || true
-	fi
-fi
-# GNOME 未设置: unnamed LE rows must Pair immediately; AlreadyExists after
-# a CLI pair is success; Connect after Pair has 25s
-# (DAGU_PATCH_GNOMEBT=1 during image build, or live on the tablet).
-if [ -f /tmp/dagu-gnome-bt/dagu-gnome-bt-setup-unnamed.py ]; then
-	install -m 755 /tmp/dagu-gnome-bt/dagu-gnome-bt-setup-unnamed.py \
-		/usr/local/sbin/dagu-gnome-bt-setup-unnamed.py
-	install -m 755 /tmp/dagu-gnome-bt/dagu-build-gnome-bt.sh \
-		/usr/local/sbin/dagu-build-gnome-bt.sh
-	if [ "${DAGU_PATCH_GNOMEBT:-0}" = 1 ]; then
-		DAGU_GNOMEBT_BUILD=/usr/local/src/dagu-gnome-bt \
-			/usr/local/sbin/dagu-build-gnome-bt.sh || true
-	fi
-fi
-# Keep HCI_CONNECTABLE / bondable after GNOME closes the bluetooth panel.
-# Forget of the last classic HID device otherwise drops SCAN_PAGE and the
-# next K380 pair attempt is Create Connection with Pairable=no → device gone.
-# Re-run on udev change: QCA setup after Add Device 0x03 is not udev add.
-cat >/usr/local/sbin/dagu-bt-hid-host.sh <<'EOF'
-#!/bin/sh
-set -eu
-# btmgmt cannot epoll a /dev/null stdin and hangs; give it an empty pipe.
-bt() { : | timeout 2 btmgmt --index 0 "$@" >/dev/null 2>&1 || true; }
-# bluetoothd writes Connectable off when Set Powered completes; wait for it.
-i=0
-while [ "$i" -lt 20 ]; do
-	: | timeout 1 btmgmt --index 0 info 2>/dev/null |
-		grep -q 'current settings: powered' && break
-	i=$((i + 1))
-	sleep 0.3
-done
-bt connectable on
-bt bondable on
-bt fast-conn on
-timeout 2 bluetoothctl pairable on >/dev/null 2>&1 || true
-# GNOME Settings 未设置 is !Paired && !Trusted. bluetoothctl pair leaves
-# Trusted=no; the row stays 未设置 and Device1.Pair returns AlreadyExists.
-# Trust every bonded device so Settings shows Disconnected and Connects.
-timeout 3 bluetoothctl devices Paired 2>/dev/null | awk '{print $2}' | while read -r addr; do
-	[ -n "$addr" ] || continue
-	timeout 2 bluetoothctl trust "$addr" >/dev/null 2>&1 || true
-done
-EOF
-chmod 755 /usr/local/sbin/dagu-bt-hid-host.sh
-# Not ExecStartPost: the script then holds bluetooth.service in
-# "activating" (19.6 s while btmgmt hung on /dev/null). Run it as its
-# own unit after bluetoothd instead.
-rm -f /etc/systemd/system/bluetooth.service.d/dagu-hid-host.conf
-cat >/etc/systemd/system/dagu-bt-hid-host.service <<'EOF'
-[Unit]
-Description=dagu Bluetooth HID host pairable/PSCAN after QCA setup
-After=bluetooth.service
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/dagu-bt-hid-host.sh
-[Install]
-WantedBy=bluetooth.service
-EOF
-systemctl enable dagu-bt-hid-host.service >/dev/null 2>&1 || true
-cat >/etc/systemd/system/dagu-bt-hid-host.timer <<'EOF'
-[Unit]
-Description=Re-apply dagu Bluetooth HID host after HCI UP race
-[Timer]
-OnBootSec=20
-AccuracySec=1s
-Unit=dagu-bt-hid-host.service
-[Install]
-WantedBy=timers.target
-EOF
-systemctl enable dagu-bt-hid-host.timer >/dev/null 2>&1 || true
-# Add is covered by WantedBy=bluetooth.service. On change, queue the
-# unit; do not run the script from udev. udevd has no
-# AF_BLUETOOTH and bluetoothd is not up yet, so the script only ran into
-# its timeouts. hci0 and its rfkill child stay unprocessed meanwhile, and
-# bluetooth.target (and bluetoothd) started 24 s late.
-cat >/etc/udev/rules.d/90-dagu-bt-hid-host.rules <<'EOF'
-ACTION=="change", SUBSYSTEM=="bluetooth", KERNEL=="hci[0-9]*", RUN+="/usr/bin/systemctl --no-block start dagu-bt-hid-host.service"
-EOF
+# Bluetooth runs on stock BlueZ settings (main.conf / input.conf as
+# packaged). BlueZ itself is the pinned +dagu package (GATT client after
+# LE bonding, patches/bluez-*.patch, scripts/dagu-build-bluez.sh). Remove
+# the helpers older images installed: they changed sniff, page scan,
+# pairable state and Trusted behind bluetoothd to work around a
+# controller that could not hear (QCA6390 VDD_ASD was unpowered).
+# See docs/dagu-bluetooth-pairing-2026-10.md.
+rm -f /usr/local/sbin/dagu-bt-hid-host.sh \
+	/usr/local/sbin/dagu-bluez-hid-wait-incoming.py \
+	/usr/local/sbin/dagu-build-bluez-hid.sh \
+	/usr/local/sbin/dagu-gnome-bt-setup-unnamed.py \
+	/usr/local/sbin/dagu-build-gnome-bt.sh \
+	/etc/systemd/system/dagu-bt-hid-host.service \
+	/etc/systemd/system/dagu-bt-hid-host.timer \
+	/etc/systemd/system/bluetooth.service.wants/dagu-bt-hid-host.service \
+	/etc/systemd/system/timers.target.wants/dagu-bt-hid-host.timer \
+	/etc/systemd/system/bluetooth.service.d/dagu-hid-host.conf \
+	/etc/udev/rules.d/90-dagu-bt-hid-host.rules
 
 
 mkdir -p /etc/gdm3
@@ -315,9 +184,9 @@ Environment=MESA_EXTENSION_OVERRIDE=-EGL_KHR_swap_buffers_with_damage;-EGL_EXT_s
 Environment=G_RESOURCE_OVERLAYS=/org/gnome/shell=/usr/local/share/dagu/gnome-shell-overlay
 UnsetEnvironment=FD_MESA_DEBUG TU_DEBUG LD_PRELOAD MESA_VK_WSI_DEBUG DAGU_LINEAR_DESTILE MUTTER_DEBUG_PAINT
 EOF
-# Quick-settings Wi-Fi/Bluetooth spinners wait forever when RequestScan or
-# Device1.Connect does not move the property they poll. Overlay the shell
-# JS so a failed or queued call still stops the spinner after reboot.
+# The quick-settings Wi-Fi spinner waits forever when RequestScan does
+# not move the property it polls. Overlay the shell JS so a failed or
+# queued scan still stops the spinner after reboot. Bluetooth is stock.
 if [ -f /tmp/dagu-gnome-status/dagu-gnome-status-spinner.py ]; then
 	install -m 755 /tmp/dagu-gnome-status/dagu-gnome-status-spinner.py \
 		/usr/local/sbin/dagu-gnome-status-spinner.py
@@ -325,7 +194,7 @@ if [ -f /tmp/dagu-gnome-status/dagu-gnome-status-spinner.py ]; then
 fi
 cat >/etc/systemd/system/dagu-gnome-status-spinner.service <<'EOF'
 [Unit]
-Description=Refresh GNOME Shell Wi-Fi and Bluetooth status overlay
+Description=Refresh GNOME Shell Wi-Fi status overlay
 Before=display-manager.service
 ConditionPathExists=/usr/local/sbin/dagu-gnome-status-spinner.py
 

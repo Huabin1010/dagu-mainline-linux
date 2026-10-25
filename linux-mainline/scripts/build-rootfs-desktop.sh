@@ -117,7 +117,8 @@ fi
 # tablet with dpkg-repack (dagu-repack-pinned.sh). V4L2 Chromium with its
 # own paks, the dagu libmutter with the gnome-shell it was built for, the
 # PipeWire stack with the patched spa-v4l2, the patched libgallium and
-# libcamera IPA. The archive has moved on (mutter 50.1-0ubuntu2.5,
+# libcamera IPA, BlueZ +dagu (dagu-build-bluez.sh) and the Wi-Fi-patched
+# gnome-control-center. The archive has moved on (mutter 50.1-0ubuntu2.5,
 # pipewire 1.6.2-1ubuntu1.2), so these cannot come from apt.
 PINNED_DIR="${PINNED_DIR:-$ROOT/out/dagu-pinned}"
 rm -rf "$ROOTFS/tmp/dagu-pinned" "$ROOTFS/tmp/dagu-mesa" "$ROOTFS/tmp/dagu-dsp"
@@ -138,16 +139,6 @@ if [[ -f "$ROOT/out/libgallium-26.0.8-1ubuntu0.3.so" ]]; then
 	mkdir -p "$ROOTFS/tmp/dagu-mesa"
 	install -m 644 "$ROOT/out/libgallium-26.0.8-1ubuntu0.3.so" "$ROOTFS/tmp/dagu-mesa/"
 fi
-mkdir -p "$ROOTFS/tmp/dagu-bluez-hid"
-install -m 755 "$ROOT/scripts/dagu-bluez-hid-wait-incoming.py" \
-	"$ROOTFS/tmp/dagu-bluez-hid/dagu-bluez-hid-wait-incoming.py"
-install -m 755 "$ROOT/scripts/dagu-build-bluez-hid.sh" \
-		"$ROOTFS/tmp/dagu-bluez-hid/dagu-build-bluez-hid.sh"
-mkdir -p "$ROOTFS/tmp/dagu-gnome-bt"
-install -m 755 "$ROOT/scripts/dagu-gnome-bt-setup-unnamed.py" \
-		"$ROOTFS/tmp/dagu-gnome-bt/dagu-gnome-bt-setup-unnamed.py"
-install -m 755 "$ROOT/scripts/dagu-build-gnome-bt.sh" \
-		"$ROOTFS/tmp/dagu-gnome-bt/dagu-build-gnome-bt.sh"
 mkdir -p "$ROOTFS/tmp/dagu-gnome-status" "$ROOTFS/tmp/dagu-gnome-cc"
 install -m 755 "$ROOT/scripts/dagu-gnome-status-spinner.py" \
 		"$ROOTFS/tmp/dagu-gnome-status/dagu-gnome-status-spinner.py"
@@ -158,13 +149,11 @@ install -m 755 "$ROOT/scripts/dagu-gnome-cc-wifi-dialog.py" \
 install -m 755 "$ROOT/scripts/dagu-build-gnome-cc-wifi.sh" \
 		"$ROOTFS/tmp/dagu-gnome-cc/dagu-build-gnome-cc-wifi.sh"
 chroot "$ROOTFS" env ROOT_PASSWORD="$PASS" SUITE="$SUITE" MIRROR="$MIRROR" \
-	DAGU_PATCH_BLUEZ="${DAGU_PATCH_BLUEZ:-0}" \
-	DAGU_PATCH_GNOMEBT="${DAGU_PATCH_GNOMEBT:-0}" \
 	DAGU_PATCH_GCC="${DAGU_PATCH_GCC:-0}" \
 	/bin/bash /tmp/rootfs-desktop-setup.sh
 rm -rf "$ROOTFS/tmp/rootfs-desktop-setup.sh" \
 	"$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback" \
-	"$ROOTFS/tmp/dagu-bluez-hid" "$ROOTFS/tmp/dagu-gnome-status" \
+	"$ROOTFS/tmp/dagu-gnome-status" \
 	"$ROOTFS/tmp/dagu-gnome-cc" "$ROOTFS/tmp/dagu-pinned" \
 	"$ROOTFS/tmp/dagu-mesa" "$ROOTFS/tmp/dagu-dsp"
 

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Overlay gnome-shell quick-settings Wi-Fi and Bluetooth status code.
+"""Overlay gnome-shell quick-settings Wi-Fi status code.
 
 NetworkManager RequestScan returns when the scan is queued. The stock
 menu waits forever for lastScan to change, and an exception skips
-Spinner.stop(). Bluetooth Device1.Connect stays on the bus until the
-controller finishes; a second click is then InProgress and the first
-spinner never stops. The overlay stops the Wi-Fi spinner when the scan
+Spinner.stop(). The overlay stops the Wi-Fi spinner when the scan
 finishes or when NetworkManager's activated rate-limit window has
-elapsed with no last-scan update, and it cancels a Bluetooth connect
-that is still pending so the controller is idle for the next attempt.
+elapsed with no last-scan update.
+
+Bluetooth uses the stock bluetooth.js. Device1.Connect returns on its
+own: about 5 s (Page Timeout) for a classic keyboard that is asleep,
+30 s for an LE device that is not advertising. An older overlay that
+cancelled a pending Connect after 20 s is removed here.
 """
 import subprocess
 import sys
@@ -106,86 +108,6 @@ STOP_NEW = """    _stopScanning() {
     }
 """
 
-TOGGLE_OLD = """    async _toggleConnected() {
-        this._spinner.play();
-        await this._client.toggleDevice(this._device);
-        this._spinner?.stop();
-    }
-"""
-
-TOGGLE_NEW = """    async _toggleConnected() {
-        this._spinner.play();
-        try {
-            await this._client.toggleDevice(this._device);
-        } finally {
-            this._spinner?.stop();
-        }
-    }
-"""
-
-DEVICE_OLD = """    async toggleDevice(device) {
-        const connect = !device.connected;
-        console.debug(`${connect
-            ? 'Connect' : 'Disconnect'} device "${device.name}"`);
-
-        try {
-            await this._client.connect_service(
-                device.get_object_path(),
-                connect,
-                null);
-            console.debug(`Device "${device.name}" ${
-                connect ? 'connected' : 'disconnected'}`);
-        } catch (e) {
-            console.error(`Failed to ${connect
-                ? 'connect' : 'disconnect'} device "${device.name}": ${e.message}`);
-        }
-    }
-"""
-
-DEVICE_NEW = """    async toggleDevice(device) {
-        const connect = !device.connected;
-        console.debug(`${connect
-            ? 'Connect' : 'Disconnect'} device "${device.name}"`);
-
-        const path = device.get_object_path();
-        let timerId = 0;
-        let settled = false;
-        const attempt = this._client.connect_service(path, connect, null);
-        attempt.catch(() => {});
-        const racers = [attempt];
-        if (connect) {
-            racers.push(new Promise((_resolve, reject) => {
-                timerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 20, () => {
-                    timerId = 0;
-                    if (!settled)
-                        reject(new Error('Device1.Connect still pending; cancelling'));
-                    return GLib.SOURCE_REMOVE;
-                });
-            }));
-        }
-        try {
-            await Promise.race(racers);
-            settled = true;
-            console.debug(`Device "${device.name}" ${
-                connect ? 'connected' : 'disconnected'}`);
-        } catch (e) {
-            settled = true;
-            if (connect) {
-                try {
-                    await this._client.connect_service(path, false, null);
-                } catch (cancelError) {
-                    console.debug(`Cancel connect "${device.name}": ${cancelError.message}`);
-                }
-            }
-            console.error(`Failed to ${connect
-                ? 'connect' : 'disconnect'} device "${device.name}": ${e.message}`);
-        } finally {
-            if (timerId)
-                GLib.source_remove(timerId);
-        }
-    }
-"""
-
 
 def gresource() -> Path:
     candidates = [
@@ -219,22 +141,15 @@ def patch(text: str, old: str, new: str, label: str) -> str:
 def main() -> None:
     resource = gresource()
     network = extract(resource, "network.js")
-    bluetooth = extract(resource, "bluetooth.js")
     network = patch(network, SCAN_OLD, SCAN_NEW, "wifi scan")
     network = patch(network, STOP_OLD, STOP_NEW, "wifi stop")
-    bluetooth = patch(bluetooth, TOGGLE_OLD, TOGGLE_NEW, "bt toggle")
-    bluetooth = patch(bluetooth, DEVICE_OLD, DEVICE_NEW, "bt device")
     if "10 * GLib.TIME_SPAN_SECOND" not in network:
         raise SystemExit("wifi overlay missing")
-    if "Device1.Connect still pending" not in bluetooth:
-        raise SystemExit("bluetooth overlay missing")
-
     dest_net = OVERLAY / "ui/status/network.js"
-    dest_bt = OVERLAY / "ui/status/bluetooth.js"
     dest_net.parent.mkdir(parents=True, exist_ok=True)
     dest_net.write_text(network)
-    dest_bt.write_text(bluetooth)
-    print(f"overlay {dest_net} {dest_bt} from {resource}")
+    (OVERLAY / "ui/status/bluetooth.js").unlink(missing_ok=True)
+    print(f"overlay {dest_net} from {resource}")
 
 
 if __name__ == "__main__":

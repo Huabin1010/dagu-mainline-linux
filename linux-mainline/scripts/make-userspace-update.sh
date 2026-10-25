@@ -53,20 +53,24 @@ install -m644 "$ROOT/systemd/71-dagu-wifi-powersave.rules" \
 	"$STAGE/files/etc/udev/rules.d/71-dagu-wifi-powersave.rules"
 install -m755 "$ROOT/systemd/60-dagu-wifi-powersave.dispatcher" \
 	"$STAGE/files/etc/NetworkManager/dispatcher.d/60-dagu-wifi-powersave"
-# Bluetooth helper: own unit after bluetoothd, not udev RUN/ExecStartPost.
-install -m755 "$ROOT/scripts/dagu-bt-hid-host.sh" \
-	"$STAGE/files/usr/local/sbin/dagu-bt-hid-host.sh"
-sed -n '/^cat >\/etc\/systemd\/system\/dagu-bt-hid-host.service <<.EOF.$/,/^EOF$/p' \
-	"$ROOT/scripts/rootfs-desktop-setup.sh" | sed '1d;$d' \
-	>"$STAGE/files/etc/systemd/system/dagu-bt-hid-host.service"
-sed -n '/^cat >\/etc\/udev\/rules.d\/90-dagu-bt-hid-host.rules <<.EOF.$/,/^EOF$/p' \
-	"$ROOT/scripts/rootfs-desktop-setup.sh" | sed '1d;$d' \
-	>"$STAGE/files/etc/udev/rules.d/90-dagu-bt-hid-host.rules"
-grep -q 'WantedBy=bluetooth.service' "$STAGE/files/etc/systemd/system/dagu-bt-hid-host.service" &&
-	grep -q 'ACTION=="change"' "$STAGE/files/etc/udev/rules.d/90-dagu-bt-hid-host.rules" || {
-	echo "dagu-bt-hid-host unit/rule extract failed" >&2
-	exit 1
-}
+# Bluetooth: BlueZ +dagu (GATT after LE bonding) from the pinned set, the
+# archive gnome-bluetooth to replace the patched one older images held,
+# and the Wi-Fi-only shell overlay generator.
+PINNED_DIR="${PINNED_DIR:-$ROOT/out/dagu-pinned}"
+STOCK_DIR="${STOCK_DIR:-$ROOT/out/dagu-stock-restore}"
+mkdir -p "$STAGE/debs/pinned" "$STAGE/debs/stock"
+for pkg in bluez libbluetooth3 bluez-obexd; do
+	set -- "$PINNED_DIR/${pkg}_"*+dagu*.deb
+	[ -f "$1" ] || { echo "no $pkg +dagu deb in $PINNED_DIR (dagu-repack-pinned.sh)" >&2; exit 1; }
+	cp "$1" "$STAGE/debs/pinned/"
+done
+for pkg in libgnome-bluetooth-3.0-13 libgnome-bluetooth-ui-3.0-13; do
+	set -- "$STOCK_DIR/${pkg}_"*.deb
+	[ -f "$1" ] || { echo "no archive $pkg deb in $STOCK_DIR (dagu-repack-pinned.sh)" >&2; exit 1; }
+	cp "$1" "$STAGE/debs/stock/"
+done
+install -m755 "$ROOT/scripts/dagu-gnome-status-spinner.py" \
+	"$STAGE/files/usr/local/sbin/dagu-gnome-status-spinner.py"
 # Upstream QCA6390 amss/m3 (stage-firmware.sh). The kernel loads them from
 # the boot ramdisk; the rootfs copy is what a Wi-Fi restart reloads.
 FWQ="$ROOT/firmware/dagu/lib/firmware/ath11k/QCA6390/hw2.0"
@@ -99,10 +103,27 @@ cp -a "$here/files/." /
 systemctl disable --now dagu-offmode-daemon.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/dagu-offmode-daemon.service \
 	/etc/systemd/system/multi-user.target.wants/dagu-offmode-daemon.service
-# The helper as ExecStartPost held bluetooth.service for 19.6 s.
-rm -f /etc/systemd/system/bluetooth.service.d/dagu-hid-host.conf
+# Bluetooth: drop the helpers that rewrote pairable / page scan / sniff
+# behind bluetoothd, go back to the packaged main.conf and input.conf,
+# install BlueZ +dagu and the archive gnome-bluetooth.
+systemctl disable --now dagu-bt-hid-host.timer dagu-bt-hid-host.service >/dev/null 2>&1 || true
+rm -f /usr/local/sbin/dagu-bt-hid-host.sh \
+	/usr/local/sbin/dagu-bluez-hid-wait-incoming.py \
+	/usr/local/sbin/dagu-build-bluez-hid.sh \
+	/usr/local/sbin/dagu-gnome-bt-setup-unnamed.py \
+	/usr/local/sbin/dagu-build-gnome-bt.sh \
+	/etc/systemd/system/dagu-bt-hid-host.service \
+	/etc/systemd/system/dagu-bt-hid-host.timer \
+	/etc/systemd/system/bluetooth.service.d/dagu-hid-host.conf \
+	/etc/udev/rules.d/90-dagu-bt-hid-host.rules \
+	/etc/bluetooth/main.conf /etc/bluetooth/input.conf
+apt-mark unhold bluez libbluetooth3 bluez-obexd \
+	libgnome-bluetooth-3.0-13 libgnome-bluetooth-ui-3.0-13 >/dev/null 2>&1 || true
+dpkg -i --force-confmiss "$here"/debs/pinned/*.deb
+dpkg -i "$here"/debs/stock/*.deb
+apt-mark hold bluez libbluetooth3 bluez-obexd >/dev/null
+/usr/local/sbin/dagu-gnome-status-spinner.py || true
 systemctl daemon-reload
-systemctl enable dagu-bt-hid-host.service >/dev/null 2>&1 || true
 udevadm control --reload || true
 /usr/local/sbin/dagu-wifi-powersave || true
 systemctl restart fstrim.timer >/dev/null 2>&1 || true
@@ -119,6 +140,6 @@ systemctl restart dagu-camera-loopback-watch.service
 echo "installed; reboot once so the new kernel and these files meet"
 EOF
 chmod 755 "$STAGE/install.sh"
-(cd "$STAGE" && find files -type f -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
+(cd "$STAGE" && find files debs -type f -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
 tar -C "$ROOT/out" -czf "$ROOT/out/$NAME.tar.gz" "$NAME"
 ls -l "$ROOT/out/$NAME.tar.gz"

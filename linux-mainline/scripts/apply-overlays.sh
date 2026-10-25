@@ -10363,3 +10363,34 @@ for name, old, new in sites:
     p.write_text(t.replace(old, new))
     print(f"patched {p}: {marker}")
 PY
+
+# venus: H.264 level 5.2. The decoder and encoder level menus stopped at
+# 5.1 and HFI level 5.2 mapped back to 5.1, so GStreamer/Chromium caps
+# excluded every 4K60 H.264 stream (level 5.2) and fell back to software.
+# Venus on SM8250 decodes them: a 4K60 stream re-tagged 5.1 ran at 116 fps.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1]) / "drivers/media/platform/qcom/venus"
+marker = "dagu: H.264 level 5.2"
+edits = [
+    ("helpers.c",
+     "\t{ HFI_H264_LEVEL_52, V4L2_MPEG_VIDEO_H264_LEVEL_5_1 },\n",
+     "\t{ HFI_H264_LEVEL_52, V4L2_MPEG_VIDEO_H264_LEVEL_5_2 }, /* dagu: H.264 level 5.2 */\n"),
+    ("vdec_ctrls.c",
+     "\t\t\t\t      V4L2_CID_MPEG_VIDEO_H264_LEVEL,\n\t\t\t\t      V4L2_MPEG_VIDEO_H264_LEVEL_5_1,\n",
+     "\t\t\t\t      V4L2_CID_MPEG_VIDEO_H264_LEVEL,\n\t\t\t\t      V4L2_MPEG_VIDEO_H264_LEVEL_5_2, /* dagu: H.264 level 5.2 */\n"),
+    ("venc_ctrls.c",
+     "\t\tV4L2_CID_MPEG_VIDEO_H264_LEVEL,\n\t\tV4L2_MPEG_VIDEO_H264_LEVEL_5_1,\n",
+     "\t\tV4L2_CID_MPEG_VIDEO_H264_LEVEL,\n\t\tV4L2_MPEG_VIDEO_H264_LEVEL_5_2, /* dagu: H.264 level 5.2 */\n"),
+]
+for name, old, new in edits:
+    p = root / name
+    t = p.read_text()
+    if marker in t:
+        continue
+    if old not in t:
+        raise SystemExit(f"{p}: H.264 level needle missing")
+    p.write_text(t.replace(old, new, 1))
+    print(f"patched {p}: {marker}")
+PY

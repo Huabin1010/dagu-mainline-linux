@@ -1,6 +1,7 @@
 # Chrome GPU 一线 + Venus（禁止软解了事）
 
 日期：2026-09-12。设备 `dagu` / SM8250。  
+> **2026-10-25 更新**：Chromium WebCodecs 硬件编码、4K60 播放丢帧、暂停后跳转卡住、编码器空闲后固件崩溃都已修复，测试 11/11 通过。见 `linux-mainline/docs/dagu-codec-fixes-2026-10.md`。
 规则：`.cursor/rules/dagu-no-soft-fallback.mdc`。
 
 ## 源码结论（Chrome 153.0.8010.36）
@@ -64,6 +65,8 @@ GNOME Shell **50.1** 已广告 `wp_linux_drm_syncobj_manager_v1:1`，Chrome 包�
 WebNN：Linux 没有 Venus/Turnip 后端，打开会走 CPU/TFLite，禁止。
 
 ## Video Encode 为什么假绿
+> **2026-10-25 更新**：WebCodecs 需要额外开 `ChromeOSHWVBREncoding`，编码输入已改为 MMAP 拷贝；4K60 播放丢帧、暂停后跳转卡住、编码器空闲后固件崩溃都已修复，测试 11/11 通过。见 `linux-mainline/docs/dagu-codec-fixes-2026-10.md`。
+
 
 上游 `media/gpu/gpu_video_encode_accelerator_factory.cc` 的 `CreateV4L2VEA()`：`IS_CHROMEOS` 才 `new V4L2VideoEncodeAccelerator`，Linux 直接 `nullptr`。`media/gpu/v4l2/BUILD.gn` 也只在 `is_chromeos` 编进编码器。平板 `/usr/lib/chromium/chromium` **没有** `V4L2VideoEncodeAccelerator` 字符串。`--enable-features=AcceleratedVideoEncoder` 只清掉 “disabled via flags”，`chrome://gpu` 会标 Hardware，但 **VEA 配置表空、不会打开 Venus `/dev/video15`**。
 

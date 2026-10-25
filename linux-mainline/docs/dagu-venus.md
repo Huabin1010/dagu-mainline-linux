@@ -2,7 +2,8 @@
 
 记录日期：**2026-09-12**。  
 设备：小米平板 5 Pro 12.4（`dagu` / SM8250，`androidboot.serialno=<linux-serial>`）。  
-相关总表：`linux-mainline/docs/dagu-adaptation-status.md`。
+相关总表：`linux-mainline/docs/dagu-adaptation-status.md`。  
+2026-10 编解码修复与验收：`linux-mainline/docs/dagu-codec-fixes-2026-10.md`。
 
 ---
 
@@ -347,7 +348,7 @@ gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
 | 掉帧 | 9.61% 基线 | 2.69% / 1.54% / 4.58% |
 | JSON | `linux-mainline/out/display-stress/video-jank-baseline.json` | `video-jank-h264.json` / `video-jank-vp9.json` / `video-jank-hevc.json` |
 
-Video Encode：`chrome://gpu` 在开了 `AcceleratedVideoEncoder` 后标 Hardware，但是上游 `CreateV4L2VEA()` 只在 ChromeOS 返回真编码器。干净 `MediaRecorder`：`irq_delta=0`、没有 `/dev/video15`。见 `linux-mainline/docs/dagu-chrome-gpu-venus.md`。
+（已过时，见 `dagu-codec-fixes-2026-10.md`）Video Encode：`chrome://gpu` 在开了 `AcceleratedVideoEncoder` 后标 Hardware，但是上游 `CreateV4L2VEA()` 只在 ChromeOS 返回真编码器。干净 `MediaRecorder`：`irq_delta=0`、没有 `/dev/video15`。见 `linux-mainline/docs/dagu-chrome-gpu-venus.md`。
 
 时钟：`linux-mainline/scripts/dagu-touch-boost.py` 认 Chromium / `/dev/video14`。不要 `governor=performance`，不要钉大核。
 

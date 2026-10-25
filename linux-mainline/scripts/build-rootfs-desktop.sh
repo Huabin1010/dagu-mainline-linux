@@ -90,6 +90,17 @@ install -D -m 644 "$ROOT/systemd/71-dagu-wifi-powersave.rules" \
 	"$ROOTFS/etc/udev/rules.d/71-dagu-wifi-powersave.rules"
 install -D -m 755 "$ROOT/systemd/60-dagu-wifi-powersave.dispatcher" \
 	"$ROOTFS/etc/NetworkManager/dispatcher.d/60-dagu-wifi-powersave"
+# Speakers and mic: PipeWire only sees the HiFi profile once
+# dagu-audio-up.sh has run after the card exists (dagu-mic-deploy.sh does
+# the same on a live tablet).
+install -D -m 644 "$ROOT/systemd/dagu-audio-up.service" \
+	"$ROOTFS/etc/systemd/user/dagu-audio-up.service"
+mkdir -p "$ROOTFS/etc/systemd/user/graphical-session.target.wants" \
+	"$ROOTFS/etc/systemd/user/default.target.wants"
+ln -sfn ../dagu-audio-up.service \
+	"$ROOTFS/etc/systemd/user/graphical-session.target.wants/dagu-audio-up.service"
+ln -sfn ../dagu-audio-up.service \
+	"$ROOTFS/etc/systemd/user/default.target.wants/dagu-audio-up.service"
 # Last shutdown step: record a still-writable /, then darken the panel.
 install -D -m 755 "$ROOT/systemd/dagu-shutdown-final" \
 	"$ROOTFS/usr/lib/systemd/system-shutdown/dagu-shutdown-final"
@@ -101,6 +112,21 @@ if [[ -f "$ROOT/out/libmutter-18.so.0.0.0-dagu" ]]; then
 	mkdir -p "$ROOTFS/usr/local/lib/dagu-mutter"
 	install -m 644 "$ROOT/out/libmutter-18.so.0.0.0-dagu" \
 		"$ROOTFS/usr/local/lib/dagu-mutter/libmutter-18.so.0.0.0"
+fi
+# Optional prebuilt inputs: V4L2 Chromium (the XtraDeb debs plus the V4L2
+# chromium binary of the same version) and the dagu Mesa libgallium that
+# dagu-chromium-native puts on LD_LIBRARY_PATH.
+CHROMIUM_DIR="${CHROMIUM_DIR:-$ROOT/out/chromium-v4l2}"
+rm -rf "$ROOTFS/tmp/dagu-chromium" "$ROOTFS/tmp/dagu-mesa"
+if ls "$CHROMIUM_DIR"/chromium*_arm64.deb >/dev/null 2>&1; then
+	mkdir -p "$ROOTFS/tmp/dagu-chromium"
+	cp "$CHROMIUM_DIR"/chromium*_arm64.deb "$ROOTFS/tmp/dagu-chromium/"
+	[[ -f "$CHROMIUM_DIR/chromium" ]] &&
+		install -m 755 "$CHROMIUM_DIR/chromium" "$ROOTFS/tmp/dagu-chromium/chromium"
+fi
+if [[ -f "$ROOT/out/libgallium-26.0.8-1ubuntu0.3.so" ]]; then
+	mkdir -p "$ROOTFS/tmp/dagu-mesa"
+	install -m 644 "$ROOT/out/libgallium-26.0.8-1ubuntu0.3.so" "$ROOTFS/tmp/dagu-mesa/"
 fi
 mkdir -p "$ROOTFS/tmp/dagu-bluez-hid"
 install -m 755 "$ROOT/scripts/dagu-bluez-hid-wait-incoming.py" \
@@ -129,7 +155,8 @@ chroot "$ROOTFS" env ROOT_PASSWORD="$PASS" SUITE="$SUITE" MIRROR="$MIRROR" \
 rm -rf "$ROOTFS/tmp/rootfs-desktop-setup.sh" \
 	"$ROOTFS/tmp/dagu-userspace" "$ROOTFS/tmp/dagu-camera-loopback" \
 	"$ROOTFS/tmp/dagu-bluez-hid" "$ROOTFS/tmp/dagu-gnome-status" \
-	"$ROOTFS/tmp/dagu-gnome-cc"
+	"$ROOTFS/tmp/dagu-gnome-cc" "$ROOTFS/tmp/dagu-chromium" \
+	"$ROOTFS/tmp/dagu-mesa"
 
 # Public image: no builder SSH keys, new machine-id on first boot.
 rm -rf "$ROOTFS/root/.ssh"

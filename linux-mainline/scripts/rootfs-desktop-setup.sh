@@ -349,6 +349,25 @@ cat >/usr/share/drirc.d/00-dagu-no-rgb10.conf <<'EOF'
 </driconf>
 EOF
 
+# Browser and GPU userspace the tablet runs, when the image build stages
+# them (build-rootfs-desktop.sh copies out/chromium-v4l2 and the dagu Mesa
+# build). Without these the image has no browser at all: Ubuntu's
+# Chromium/Firefox are snaps and snapd does not run in this chroot.
+if ls /tmp/dagu-chromium/chromium*_arm64.deb >/dev/null 2>&1; then
+	apt-get install -y --no-install-recommends /tmp/dagu-chromium/chromium*_arm64.deb
+	apt-mark hold chromium chromium-common chromium-sandbox >/dev/null 2>&1 || true
+	# The V4L2 (Venus decode/encode) build of the same version.
+	if [ -f /tmp/dagu-chromium/chromium ] &&
+		[ "$(head -c 4 /tmp/dagu-chromium/chromium)" = "$(printf '\177ELF')" ]; then
+		install -m755 /tmp/dagu-chromium/chromium /usr/lib/chromium/chromium
+	fi
+	apt-get clean
+fi
+if [ -f /tmp/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so ]; then
+	install -D -m644 /tmp/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so \
+		/usr/local/lib/dagu-mesa/libgallium-26.0.8-1ubuntu0.3.so
+fi
+
 # One browser: V4L2 Chromium. Official google-chrome is USE_V4L2=0 and
 # is not installed. dagu-chrome remains as a name that launches it, so
 # older scripts do not exec a missing binary.
@@ -647,8 +666,11 @@ cat >/home/dagu/.config/monitors.xml <<'EOF'
     <logicalmonitor>
       <x>0</x>
       <y>0</y>
-      <scale>2</scale>
+      <scale>1.25</scale>
       <primary>yes</primary>
+      <transform>
+        <rotation>right</rotation>
+      </transform>
       <monitor>
         <monitorspec>
           <connector>DSI-1</connector>
@@ -2035,6 +2057,78 @@ ln -sf /etc/systemd/system/dagu-fix-pam.service \
 # shows HTML without CSS. NTP after Wi-Fi, HTTP Date as fallback.
 ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 printf 'Asia/Shanghai\n' >/etc/timezone
+
+# Chinese desktop with fcitx5, as the tablet runs. GTK_IM_MODULE stays
+# empty so GTK uses Wayland text-input-v3 (the folio keyboard and the
+# on-screen keyboard both go through it); Qt/SDL/X11 use the fcitx module.
+apt-get install -y --no-install-recommends \
+	locales language-pack-zh-hans language-pack-gnome-zh-hans \
+	fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3 fcitx5-frontend-gtk4 \
+	fcitx5-frontend-qt5 fcitx5-frontend-qt6 fcitx5-config-qt
+locale-gen zh_CN.UTF-8 en_US.UTF-8 >/dev/null
+printf 'LANG=zh_CN.UTF-8\nLANGUAGE=zh_CN:zh\n' >/etc/default/locale
+mkdir -p /etc/environment.d
+cat >/etc/environment.d/90fcitx.conf <<'EOF'
+GTK_IM_MODULE=
+QT_IM_MODULE=fcitx
+XMODIFIERS=@im=fcitx
+SDL_IM_MODULE=fcitx
+GLFW_IM_MODULE=fcitx
+EOF
+cat >/usr/local/bin/dagu-fcitx5.sh <<'EOF'
+#!/bin/sh
+# fcitx5 for the GNOME Wayland session (user unit dagu-fcitx5.service).
+# Wait for the compositor and the session bus, then replace any instance.
+for _ in $(seq 1 50); do
+	if [ -S "$XDG_RUNTIME_DIR/${WAYLAND_DISPLAY:-wayland-0}" ] &&
+		[ -S "$XDG_RUNTIME_DIR/bus" ]; then
+		break
+	fi
+	sleep 0.2
+done
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+xauth=$(ls "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+[ -n "$xauth" ] && export XAUTHORITY="$xauth"
+exec /usr/bin/fcitx5 -r
+EOF
+chmod 755 /usr/local/bin/dagu-fcitx5.sh
+mkdir -p /etc/systemd/user/graphical-session.target.wants
+cat >/etc/systemd/user/dagu-fcitx5.service <<'EOF'
+[Unit]
+Description=Fcitx 5 input method
+PartOf=graphical-session.target
+After=graphical-session.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dagu-fcitx5.sh
+Restart=always
+RestartSec=1
+KillMode=mixed
+TimeoutStopSec=5
+[Install]
+WantedBy=graphical-session.target
+EOF
+ln -sfn ../dagu-fcitx5.service \
+	/etc/systemd/user/graphical-session.target.wants/dagu-fcitx5.service
+mkdir -p /home/dagu/.config/fcitx5
+cat >/home/dagu/.config/fcitx5/profile <<'EOF'
+[Groups/0]
+Name=默认
+Default Layout=us
+DefaultIM=pinyin
+
+[Groups/0/Items/0]
+Name=keyboard-us
+Layout=
+
+[Groups/0/Items/1]
+Name=pinyin
+Layout=
+
+[GroupOrder]
+0=默认
+EOF
+chown -R dagu:dagu /home/dagu/.config/fcitx5 2>/dev/null || true
 mkdir -p /etc/systemd/timesyncd.conf.d
 cat >/etc/systemd/timesyncd.conf.d/dagu.conf <<'EOF'
 [Time]

@@ -98,6 +98,15 @@ MODULE_PARM_DESC(dagu_wm_pattern, "front WM4/5 drop/subsample pattern: 0 = 1, 1 
 static unsigned int dagu_ds_mode;
 module_param(dagu_ds_mode, uint, 0644);
 MODULE_PARM_DESC(dagu_ds_mode, "front: 1 = Android DS4/DS16 + WM6/7");
+/*
+ * Per-frame bring-up trace (CSIPHY, CSID and IFE interrupts). Off by
+ * default: it printed about 15 lines a second for as long as a camera
+ * streamed and rotated early boot out of the kernel ring buffer.
+ *   echo 1 > /sys/module/qcom_camss/parameters/dagu_trace
+ */
+bool dagu_camss_trace;
+module_param_named(dagu_trace, dagu_camss_trace, bool, 0644);
+MODULE_PARM_DESC(dagu_trace, "log CSIPHY/CSID/IFE events every frame");
 static bool dagu_in_comp_done;
 static bool dagu_rup_pending;
 static int dagu_mid_n;
@@ -576,7 +585,7 @@ static enum hrtimer_restart dagu_front_rup_fn(struct hrtimer *timer)
 	vfe->reg_update |= 0x41;
 	wmb();
 	writel_relaxed(vfe->reg_update, vfe->base + 0x34);
-	dev_info_ratelimited(vfe->camss->dev, "dagu front late rup\n");
+	dagu_camss_trace_rl(vfe->camss->dev, "dagu front late rup\n");
 	return HRTIMER_NORESTART;
 }
 
@@ -4036,7 +4045,7 @@ static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
 		wmb();
 		writel_relaxed(1 << WM_CFG_EN | MODE_QCOM_PLAIN << WM_CFG_MODE,
 			       vfe->base + VFE_BUS_WM_CFG(wm));
-		dev_info_ratelimited(vfe->camss->dev,
+		dagu_camss_trace_rl(vfe->camss->dev,
 				     "dagu ife%d pix wm_update en-reload wm=%u addr=0x%x cfg0=0x%x incr=0x%x\n",
 				     vfe->id, wm, addr, cfg0, incr);
 		return;
@@ -4203,7 +4212,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 		u32 bus = readl_relaxed(vfe->base + VFE_BUS_IRQ_STATUS(0));
 
 		dagu_front_evt_n++;
-		if (dagu_front_evt_shown < 96) {
+		if (dagu_camss_trace && dagu_front_evt_shown < 96) {
 			dagu_front_evt_shown++;
 			dev_info(vfe->camss->dev,
 				 "dagu front evt us=%llu n=%u status0=0x%x status1=0x%x bus=0x%x dbg0=0x%x dbg1=0x%x wm4=0x%x wmd4=0x%x wmd5=0x%x as2=0x%x/0x%x hw=0x%x img=0x%x\n",
@@ -4236,7 +4245,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 		writel_relaxed(status1, vfe->base + VFE_IRQ_CLEAR(1));
 		if (status1 & IRQ_MASK_1_CAMIF)
-			dev_info_ratelimited(vfe->camss->dev,
+			dagu_camss_trace_rl(vfe->camss->dev,
 					     "dagu ife%d camif irq1=0x%x dbg0=0x%x dbg1=0x%x hw=0x%x mnds=0x%x wmd=0x%x/0x%x\n",
 					     vfe->id, status1,
 					     readl_relaxed(vfe->base + CAMIF_DEBUG_0),
@@ -4362,7 +4371,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 		if (!vfe_is_lite(vfe) &&
 		    (bus & BUS_IRQ_MASK_0_COMP_DONE(vfe, DISP_COMP_GROUP))) {
-			dev_info_ratelimited(vfe->camss->dev,
+			dagu_camss_trace_rl(vfe->camss->dev,
 					     "dagu ife%d pix COMP_DONE bus=0x%x as0=0x%x/0x%x as3=0x%x/0x%x\n",
 					     vfe->id, bus,
 					     readl_relaxed(vfe->base + VFE_BUS_WM_ADDR_STATUS0(DISP_Y_WM)),

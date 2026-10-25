@@ -10317,3 +10317,49 @@ grep -q 'dagu: wake on press only' "$KERNEL_SRC/drivers/input/misc/pm8941-pwrkey
 	echo "pm8941-pwrkey press-only wake missing" >&2
 	exit 1
 }
+
+# camss: per-frame bring-up prints behind qcom_camss.dagu_trace (default
+# off). They printed ~15 lines/s while a camera streamed.
+python3 - "$KERNEL_SRC" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1]) / "drivers/media/platform/qcom/camss"
+marker = "dagu: camss per-frame trace switch"
+hdr = root / "camss.h"
+text = hdr.read_text()
+if marker not in text:
+    end = "#endif /* QC_MSM_CAMSS_H */"
+    if end not in text:
+        raise SystemExit(f"{hdr}: include guard end missing")
+    add = f"""/* {marker}: qcom_camss.dagu_trace, camss-vfe-480.c */
+extern bool dagu_camss_trace;
+#define dagu_camss_trace_rl(dev, fmt, ...)				\\
+	do {{								\\
+		if (dagu_camss_trace)					\\
+			dev_info_ratelimited(dev, fmt, ##__VA_ARGS__);	\\
+	}} while (0)
+
+"""
+    hdr.write_text(text.replace(end, add + end, 1))
+    print(f"patched {hdr}: {marker}")
+sites = [
+    ("camss-csiphy-3ph-1-0.c",
+     "\t\t\tdev_info_ratelimited(csiphy->camss->dev,\n\t\t\t\t\t     \"dagu csiphy%d irq[%d]=0x%x\\n\",",
+     "\t\t\tdagu_camss_trace_rl(csiphy->camss->dev,\n\t\t\t\t\t     \"dagu csiphy%d irq[%d]=0x%x\\n\","),
+    ("camss-csid-gen2.c",
+     "\t\t\tdev_info_ratelimited(csid->camss->dev,\n\t\t\t\t\t     \"dagu csid ipp irq=0x%x\\n\", val);",
+     "\t\t\tdagu_camss_trace_rl(csid->camss->dev,\n\t\t\t\t\t     \"dagu csid ipp irq=0x%x\\n\", val);"),
+    ("camss-csid-gen2.c",
+     "\t\t\t\tdev_info_ratelimited(csid->camss->dev,\n\t\t\t\t\t\t     \"dagu csid ipp sof recrop",
+     "\t\t\t\tdagu_camss_trace_rl(csid->camss->dev,\n\t\t\t\t\t\t     \"dagu csid ipp sof recrop"),
+]
+for name, old, new in sites:
+    p = root / name
+    t = p.read_text()
+    if new in t:
+        continue
+    if old not in t:
+        raise SystemExit(f"{p}: per-frame print needle missing")
+    p.write_text(t.replace(old, new))
+    print(f"patched {p}: {marker}")
+PY

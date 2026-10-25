@@ -25,10 +25,12 @@ remote() { "${SSH[@]}" "$@"; }
 remote 'cat /sys/module/printk/parameters/ignore_loglevel > /tmp/dagu-pix-ignore-loglevel
 cut -f1 /proc/sys/kernel/printk > /tmp/dagu-pix-console-loglevel
 echo N > /sys/module/printk/parameters/ignore_loglevel
-echo 1 > /proc/sys/kernel/printk'
+echo 1 > /proc/sys/kernel/printk
+echo 1 > /sys/module/qcom_camss/parameters/dagu_trace 2>/dev/null || true'
 restore_console() {
 	remote 'cat /tmp/dagu-pix-ignore-loglevel > /sys/module/printk/parameters/ignore_loglevel
-cat /tmp/dagu-pix-console-loglevel > /proc/sys/kernel/printk' || true
+cat /tmp/dagu-pix-console-loglevel > /proc/sys/kernel/printk
+echo 0 > /sys/module/qcom_camss/parameters/dagu_trace 2>/dev/null || true' || true
 }
 trap restore_console EXIT
 

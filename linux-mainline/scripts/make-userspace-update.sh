@@ -64,6 +64,13 @@ for pkg in bluez libbluetooth3 bluez-obexd; do
 	[ -f "$1" ] || { echo "no $pkg +dagu deb in $PINNED_DIR (dagu-repack-pinned.sh)" >&2; exit 1; }
 	cp "$1" "$STAGE/debs/pinned/"
 done
+# V4L2 Chromium: hardware WebCodecs encode and seek-while-paused
+# (8df8b99) are in the binary, so upgrades need the new build too.
+for pkg in chromium chromium-common chromium-sandbox; do
+	set -- "$PINNED_DIR/${pkg}_"*.deb
+	[ -f "$1" ] || { echo "no $pkg deb in $PINNED_DIR (dagu-repack-pinned.sh)" >&2; exit 1; }
+	cp "$1" "$STAGE/debs/pinned/"
+done
 for pkg in libgnome-bluetooth-3.0-13 libgnome-bluetooth-ui-3.0-13; do
 	set -- "$STOCK_DIR/${pkg}_"*.deb
 	[ -f "$1" ] || { echo "no archive $pkg deb in $STOCK_DIR (dagu-repack-pinned.sh)" >&2; exit 1; }
@@ -75,9 +82,9 @@ install -m755 "$ROOT/scripts/dagu-gnome-status-spinner.py" \
 # the boot ramdisk; the rootfs copy is what a Wi-Fi restart reloads.
 FWQ="$ROOT/firmware/dagu/lib/firmware/ath11k/QCA6390/hw2.0"
 if grep -aq 'QCAHSTSWPLZ_V2_TO_X86' "$FWQ/amss.bin" 2>/dev/null; then
-	mkdir -p "$STAGE/files/lib/firmware/ath11k/QCA6390/hw2.0"
+	mkdir -p "$STAGE/files/usr/lib/firmware/ath11k/QCA6390/hw2.0"
 	install -m644 "$FWQ/amss.bin" "$FWQ/m3.bin" \
-		"$STAGE/files/lib/firmware/ath11k/QCA6390/hw2.0/"
+		"$STAGE/files/usr/lib/firmware/ath11k/QCA6390/hw2.0/"
 else
 	echo "warning: $FWQ is not the upstream QCA6390 build; run stage-firmware.sh" >&2
 fi
@@ -97,7 +104,10 @@ cat >"$STAGE/install.sh" <<'EOF'
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
-cp -a "$here/files/." /
+# /lib is a symlink to usr/lib (usrmerge), so files/ only uses usr/lib.
+# --remove-destination: running binaries (camera producer) are replaced,
+# not opened for writing ("Text file busy").
+cp -a --remove-destination "$here/files/." /
 # Power-off is a real power-off now; the shutdown-diverting daemon held
 # logind for 20 s on every shutdown. Remove it.
 systemctl disable --now dagu-offmode-daemon.service >/dev/null 2>&1 || true
@@ -118,10 +128,12 @@ rm -f /usr/local/sbin/dagu-bt-hid-host.sh \
 	/etc/udev/rules.d/90-dagu-bt-hid-host.rules \
 	/etc/bluetooth/main.conf /etc/bluetooth/input.conf
 apt-mark unhold bluez libbluetooth3 bluez-obexd \
-	libgnome-bluetooth-3.0-13 libgnome-bluetooth-ui-3.0-13 >/dev/null 2>&1 || true
+	libgnome-bluetooth-3.0-13 libgnome-bluetooth-ui-3.0-13 \
+	chromium chromium-common chromium-sandbox >/dev/null 2>&1 || true
 dpkg -i --force-confmiss "$here"/debs/pinned/*.deb
 dpkg -i "$here"/debs/stock/*.deb
-apt-mark hold bluez libbluetooth3 bluez-obexd >/dev/null
+apt-mark hold bluez libbluetooth3 bluez-obexd \
+	chromium chromium-common chromium-sandbox >/dev/null
 /usr/local/sbin/dagu-gnome-status-spinner.py || true
 systemctl daemon-reload
 udevadm control --reload || true

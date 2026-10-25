@@ -57,7 +57,7 @@ USB gadget `0525:a4a7` 须保持 **>30 秒**。约 6 秒变回兔子 `18d1:d00d`
 | USB 串口登录 | `root` / `dagu`（预构建） |
 | Wi-Fi SSH | 平板连上网络后，同一密码 |
 
-第一次开机 `dagu-resize-root` 把 8 GiB 镜像扩到 userdata（约 228 GiB）。扬声器和内置麦（WCD9385 AMIC5）已进 UCM。改密码：
+第一次开机 `dagu-resize-root` 把 10 GiB 镜像扩到整个 userdata（这台 128 GB 平板约 106 GiB）。扬声器和内置麦（WCD9385 AMIC5）已进 UCM。改密码：
 
 ```bash
 passwd
@@ -81,7 +81,7 @@ ROOT_PASSWORD='your-secret' ./linux-mainline/scripts/build-rootfs-desktop.sh
 ./linux-mainline/scripts/flash-boot.sh flash-b
 ```
 
-`build-rootfs-desktop.sh` 会：Ubuntu 26.04 minbase → `rootfs-desktop-setup.sh`（GNOME、GDM、ALSA UCM、平板会话）→ 打 8 GiB ext4（无洞，避免 journal 被 sparse 跳过）→ zstd。**不要**把 `ROOT_PASSWORD` 或 `out/root-password` 提交进 git。公开预构建请设 `SKIP_HOST_SSH_KEY=1`（脚本默认已是）。
+`build-rootfs-desktop.sh` 会：Ubuntu 26.04 minbase → `rootfs-desktop-setup.sh`（GNOME、GDM、ALSA UCM、平板会话）→ 打无洞 ext4（大小由 `SIZE` 决定，v0.1.6 镜像为 10 GiB；无洞，避免 journal 被 sparse 跳过）→ zstd。**不要**把 `ROOT_PASSWORD` 或 `out/root-password` 提交进 git。公开预构建请设 `SKIP_HOST_SSH_KEY=1`（脚本默认已是）。
 
 ### 只要控制台（没有 GNOME）
 
@@ -96,7 +96,7 @@ IMG=linux-mainline/out/rootfs.ext4 ./linux-mainline/scripts/flash-rootfs.sh
 ## 不要做
 
 - 把 rootfs 刷进 `boot` / `super` / A 槽
-- 用 Google `fastboot` 37 写 4–8 GiB userdata（AMD 主机卡 `USBDEVFS_REAPURB`；也不走 768 MiB 上限）
+- 用 Google `fastboot` 37 写几 GiB 的 userdata（AMD 主机卡 `USBDEVFS_REAPURB`；也不走 768 MiB 上限）
 - userdata 已经是 Ubuntu 后再刷一遍 rootfs（会抹掉你装的软件）
 - 把密码、`id_dagu`、persist MAC 放进公开镜像
 - 刷完 userdata 立刻 `fastboot reboot` 进当前槽的原厂安卓 `boot`（挂不上 Ubuntu）。先 `flash-boot.sh flash-b`

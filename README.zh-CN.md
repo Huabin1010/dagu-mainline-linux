@@ -22,22 +22,25 @@
 
 Windows on ARM / edk2-msm 移植在 [`port/dagu/`](port/dagu/) 和 [`docs/uefi-port-dagu.md`](docs/uefi-port-dagu.md)，**不是**现在每天在跑的系统。
 
+**完整安装教程（从安卓到 Ubuntu 桌面）：** [简体中文](docs/zh-CN/install-guide.md) · [English](docs/install-guide.md)
 **刷机指南：** [简体中文](docs/zh-CN/flash-guide.md) · [English](docs/flash-guide.md)
 **Rootfs / 桌面镜像：** [简体中文](docs/zh-CN/rootfs-guide.md) · [English](docs/rootfs-guide.md)
-**最新镜像：** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases)（`v0.1.5`）
+**最新镜像：** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases)（`v0.1.6`）
 
-## 最近更新（`v0.1.5`）
+## 最近更新（`v0.1.6`）
 
-相对 `v0.1.4`（2026-10-22）。内核 `#630`。
+相对 `v0.1.5`（2026-10-24）。内核 `#645`。
 
-- **摄像头走硬件图像处理：** 前后摄像头都经 Titan 480 图像前端 1 的像素通路输出线性 NV12（NV12 semi-planar 4:2:0，亮度平面加交织色度平面的 4:2:0 格式），生产者做自动曝光和自动白平衡。软件图像信号处理器只作退路。每秒 30 帧，约占单核 23%。
-- **前摄不再只出一帧：** 驱动当成显示裁剪和钳位的那几块其实是人脸检测支路，后面没有写通道接收，第一帧收不了尾就把管线堵住。现在一直关着。
-- **关机充电和安卓一致：** 插着线关机就是真关机，屏幕立刻变黑，平板随即重新上电进电池界面，长按电源进桌面。以前一个关机延迟锁让系统每次关机都等 20 秒，登录界面会先冒出来。
-- **充电动画丝滑：** 画面先在内存里画好，只把变化的列写到屏幕上，每秒 30 帧，不再闪烁，约占单核 9%。
-- **开机和熄屏：** 面板复位时背光关着，出第一帧后才亮，开机那一下白色花屏没了。关机充电开机时内核日志不上屏。熄屏是真黑，不再微微发亮。
-- **文档：** [`linux-mainline/docs/dagu-mainline-adaptation-handbook.md`](linux-mainline/docs/dagu-mainline-adaptation-handbook.md)，完整适配记录与心得。
+- **蓝牙：** 开机约 9 秒就能用（以前约 33 秒）；配对过的低功耗设备不在身边时，搜索不会再 2.56 秒就停；设备可连接状态真正生效。
+- **Wi-Fi：** 插电时关闭省电，到路由器的延迟从平均 7.4 ms 降到 2.4 ms，抖动从 5.5 ms 降到 0.2 ms；用电池时仍省电。
+- **相机：** 打开应用到出画面约 0.5 秒（以前约 1.3 秒）；打包和自动曝光/白平衡改用 NEON 和浮点，前摄生产者 CPU 从 21.9% 降到 12.2%，后摄从 12.8% 降到 8.7%。相机驱动不再每秒往内核日志打 15 行。
+- **闪存：** 每天 TRIM，UFS 写入加速缓存不再长期为 0，顺序写 1.2 GB/s。
+- **充电：** 和原厂一样由电源芯片判断充满（截止 230 mA）和回充（4.40 V），不再在 100% 附近每 6 秒开关一次、插着线也用电池供电。
+- **新镜像：** `rootfs-desktop.ext4.zst` 用当前脚本重新构建，带 V4L2 Chromium、fcitx5 中文输入、横屏 1.25 缩放和扬声器自启。
 
-预构建账号仍是 `dagu` / `dagu`（第一次进桌面请改掉）。**只刷 B 槽。** userdata 不用重刷：在平板上解开发布里的 `dagu-userspace-v0.1.5.tar.gz`，运行 `sudo ./install.sh`。不装的话新内核也能启动，但摄像头仍走软件处理，关机充电开机会黑屏 60 秒。
+全新安装按 [完整安装教程](docs/zh-CN/install-guide.md)。已装好的系统：只刷 B 槽启动链，再在平板上解开 `dagu-userspace-v0.1.6.tar.gz` 运行 `sudo ./install.sh`。预构建账号 `dagu` / `dagu`（第一次进桌面请改掉）。
+
+已知问题：重力和光线传感器暂不可用（没有自动旋转和自动亮度）。
 
 ## 快速开始
 

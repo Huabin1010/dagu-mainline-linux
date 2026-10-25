@@ -22,22 +22,25 @@ Hardware notes and the full bring-up record live under [`linux-mainline/docs/`](
 
 An unfinished Windows-on-ARM / edk2-msm port lives under [`port/dagu/`](port/dagu/) and [`docs/uefi-port-dagu.md`](docs/uefi-port-dagu.md). That is **not** the daily system.
 
+**Full install (Android to Ubuntu desktop):** [English](docs/install-guide.md) · [简体中文](docs/zh-CN/install-guide.md)
 **Flash tutorial:** [English](docs/flash-guide.md) · [简体中文](docs/zh-CN/flash-guide.md)
 **Rootfs / desktop image:** [English](docs/rootfs-guide.md) · [简体中文](docs/zh-CN/rootfs-guide.md)
-**Latest images:** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases) (`v0.1.5`)
+**Latest images:** [GitHub Releases](https://github.com/Huabin1010/dagu-mainline-linux/releases) (`v0.1.6`)
 
-## Recent updates (`v0.1.5`)
+## Recent updates (`v0.1.6`)
 
-Since `v0.1.4` (22 Oct 2026). Kernel `#630`.
+Since `v0.1.5` (2026-10-24). Kernel `#645`.
 
-- **Cameras on the hardware ISP:** Both cameras stream through the Titan 480 IFE1 pixel path as linear NV12, with auto exposure and auto white balance in the producer. SoftISP is only the fallback. 30 fps, about 23% of one core.
-- **Front camera keeps streaming:** The blocks the driver used as display crop and clamp are the face-detection branch. With no write master behind it, it stalled the pipeline after one frame. It stays off now.
-- **Off-mode charging like Android:** Power off with the cable in is a real power-off. The screen goes dark at once, the tablet powers back up into the battery screen, and a long press boots the desktop. Before, a shutdown inhibitor held logind for 20 s and GDM brought the greeter back first.
-- **Smooth charger animation:** Frames are built off-screen and only the changed columns reach the scanout, at 30 fps. The screen no longer flickers. About 9% of one core.
-- **Boot and blank:** The backlight stays off while the panel is reset and comes on after the first frame, so the white flash at boot is gone. A charger boot keeps the kernel log off the panel. Blanked screens are dark instead of a dim glow.
-- **Docs:** [`linux-mainline/docs/dagu-mainline-adaptation-handbook.md`](linux-mainline/docs/dagu-mainline-adaptation-handbook.md), the full adaptation record and lessons (Chinese).
+- **Bluetooth:** ready about 9 s after boot (was about 33 s). Discovery no longer stops after 2.56 s while a bonded LE device is away, and the adapter really is connectable.
+- **Wi-Fi:** power save is off on the charger: router latency 2.4 ms average and 0.2 ms jitter, down from 7.4 ms and 5.5 ms. Battery keeps power save.
+- **Cameras:** the picture appears about 0.5 s after an app opens the camera (was about 1.3 s). NEON packing and float 3A cut the producer from 21.9% to 12.2% of a little core (front) and 12.8% to 8.7% (rear). The camera driver no longer logs 15 lines a second.
+- **Storage:** daily TRIM keeps the UFS WriteBooster buffer available (it sat at 0 for days); sequential write 1.2 GB/s.
+- **Charging:** the SMB5 decides full (230 mA termination) and recharge (4.40 V) as on stock. It no longer toggles every 6 s near 100% or runs the tablet from the battery with the cable in.
+- **New image:** `rootfs-desktop.ext4.zst` is rebuilt from the current scripts, with V4L2 Chromium, fcitx5 Chinese input, landscape at 1.25 and speakers on at login.
 
-Prebuilt login is unchanged: `dagu` / `dagu` (change it on first boot). Only flash **slot B**. Existing userdata stays: install `dagu-userspace-v0.1.5.tar.gz` from the release on the tablet (`sudo ./install.sh`). Without it the new kernel still boots, but cameras stay on SoftISP and a charger boot stays dark for 60 s.
+New installs: follow the [full install guide](docs/install-guide.md). Installed systems: flash the slot B boot chain, then unpack `dagu-userspace-v0.1.6.tar.gz` on the tablet and run `sudo ./install.sh`. Prebuilt login `dagu` / `dagu` (change it on first login).
+
+Known issue: the accelerometer and light sensor are not available yet (no auto-rotate, no auto-brightness).
 
 ## Quick start
 

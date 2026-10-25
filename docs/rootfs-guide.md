@@ -57,7 +57,7 @@ USB gadget `0525:a4a7` must stay up **>30 s**. A bounce to rabbit `18d1:d00d` in
 | Serial login | `root` / `dagu` (prebuilt) |
 | Wi-Fi SSH | same password after the tablet joins a network |
 
-First boot grows the 8 GiB image across userdata (~228 GiB). Speakers and the built-in mic (WCD9385 AMIC5) are in UCM. Then:
+First boot grows the 10 GiB image across userdata (about 106 GiB on this 128 GB tablet). Speakers and the built-in mic (WCD9385 AMIC5) are in UCM. Then:
 
 ```bash
 passwd
@@ -81,7 +81,7 @@ ROOT_PASSWORD='your-secret' ./linux-mainline/scripts/build-rootfs-desktop.sh
 ./linux-mainline/scripts/flash-boot.sh flash-b
 ```
 
-`build-rootfs-desktop.sh` does Ubuntu 26.04 minbase → `rootfs-desktop-setup.sh` (GNOME, GDM, ALSA UCM, tablet session) → 8 GiB hole-free ext4 (so sparse flash cannot skip the journal) → zstd. Do **not** commit `ROOT_PASSWORD` or `out/root-password`. Public images keep `SKIP_HOST_SSH_KEY=1` (the script default).
+`build-rootfs-desktop.sh` does Ubuntu 26.04 minbase → `rootfs-desktop-setup.sh` (GNOME, GDM, ALSA UCM, tablet session) → hole-free ext4 (`SIZE`; 10 GiB for the v0.1.6 image) (so sparse flash cannot skip the journal) → zstd. Do **not** commit `ROOT_PASSWORD` or `out/root-password`. Public images keep `SKIP_HOST_SSH_KEY=1` (the script default).
 
 ### Console only (no GNOME)
 
@@ -96,7 +96,7 @@ Default `SUITE=noble`. The desktop prebuilt is `resolute` (26.04) so Mesa / mutt
 ## Do not
 
 - Flash rootfs to `boot` / `super` / slot A
-- Use Google `fastboot` 37 for a 4–8 GiB userdata image (AMD hosts stall in `USBDEVFS_REAPURB`; also exceeds the 768 MiB download cap)
+- Use Google `fastboot` 37 for a multi-GiB userdata image (AMD hosts stall in `USBDEVFS_REAPURB`; also exceeds the 768 MiB download cap)
 - Re-flash userdata after Ubuntu is already there (wipes packages you installed)
 - Put passwords, `id_dagu`, or persist MACs in a public image
 - `fastboot reboot` into stock Android `boot` after userdata is Ubuntu (it cannot mount ext4). Run `flash-boot.sh flash-b` first

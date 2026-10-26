@@ -9,6 +9,10 @@
 #ifndef DAGU_PID1_PING
 #define DAGU_PID1_PING 0
 #endif
+/* resize2fs size argument for userdata; "" = grow to fill the partition. */
+#ifndef DAGU_USERDATA_RESIZE
+#define DAGU_USERDATA_RESIZE ""
+#endif
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -722,7 +726,12 @@ static void grow_userdata(const char *dev)
 		wdt_stretch(30);
 		return;
 	}
-	rc = run_tool(resize, dev, NULL);
+	/*
+	 * Empty target = grow to the partition. A one-off build with e.g.
+	 * DAGU_USERDATA_RESIZE="47G" shrinks the filesystem offline so the
+	 * partition can be cut down for Windows (tools/winarm/).
+	 */
+	rc = run_tool(resize, dev, DAGU_USERDATA_RESIZE[0] ? DAGU_USERDATA_RESIZE : NULL);
 	snprintf(buf, sizeof(buf), "resize2fs rc=%d", rc);
 	kmsg(buf);
 	wdt_stretch(30);
@@ -791,6 +800,9 @@ int main(void)
 	mount("proc", "/proc", "proc", 0, NULL);
 	mount("sysfs", "/sys", "sysfs", 0, NULL);
 	mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
+
+	if (DAGU_USERDATA_RESIZE[0])
+		kmsg("userdata resize target " DAGU_USERDATA_RESIZE);
 
 #if DAGU_PID1_PING
 	/* Zero-USB test: if PID1 runs, we bounce to ABL ~3s later. */

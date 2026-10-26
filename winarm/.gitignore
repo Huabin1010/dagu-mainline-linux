@@ -1,0 +1,6 @@
+# Huge upstream clones and fetched blobs — re-created by build-dagu-uefi.sh
+/mu_aloha_platforms/
+/UEFIFirmwareBackup/
+/out/
+*.img
+/drivers/

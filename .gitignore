@@ -73,3 +73,8 @@ root-password.md
 # Device partition backups taken before UEFI experiments
 backups/slot-a-*/
 backups/gpt-*/
+
+# WOA driver test-signing private keys (never commit)
+
+# WOA driver test-signing material (generated locally; keys must never be committed)
+tools/winarm/signing/

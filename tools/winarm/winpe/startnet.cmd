@@ -62,6 +62,8 @@ reg load HKLM\OFFSYS W:\Windows\System32\config\SYSTEM >> %LOG% 2>&1
 reg add HKLM\OFFSYS\ControlSet001\Control\CrashControl /v AutoReboot /t REG_DWORD /d 0 /f >> %LOG% 2>&1
 reg add HKLM\OFFSYS\ControlSet001\Control\CrashControl /v DisplayParameters /t REG_DWORD /d 1 /f >> %LOG% 2>&1
 reg unload HKLM\OFFSYS >> %LOG% 2>&1
+rem Trust the dagu WOA test root CA so the test-signed himax driver loads.
+if exist %M%\woa\rootcert.hex call :trustca
 if exist %M%\woa\service goto :done
 
 :bcdboot
@@ -118,10 +120,17 @@ echo select disk %DISK%
 echo select partition 36
 echo remove all noerr
 echo assign letter=W
+echo select partition 35
+echo remove all noerr
+echo assign letter=S
 ) > X:\svc.txt
 diskpart /s X:\svc.txt >> %LOG% 2>&1
 if not exist W:\Windows\System32\ntoskrnl.exe (echo no Windows on W: >> %LOG% & goto :done)
 echo === service mode >> %LOG%
+rem Re-assert test-signing on the kept BCD so a servicing pass can add a
+rem test-signed driver even if this image was first deployed without it.
+if exist S:\EFI\Microsoft\Boot\BCD bcdedit /store S:\EFI\Microsoft\Boot\BCD /set {default} testsigning on >> %LOG% 2>&1
+if exist S:\EFI\Microsoft\Boot\BCD bcdedit /store S:\EFI\Microsoft\Boot\BCD /set {default} nointegritychecks on >> %LOG% 2>&1
 rem \woa\remove-drivers.txt: "oemNN.inf catalog.cat" per line. The catalog
 rem name guards against oemNN renumbering: a mismatch is skipped, not removed.
 if exist %M%\woa\remove-drivers.txt for /f "usebackq eol=# tokens=1,2" %%i in ("%M%\woa\remove-drivers.txt") do call :rmdrv %%i %%j
@@ -133,6 +142,23 @@ find /i "%2" W:\Windows\INF\%1 >nul 2>&1 || (echo skip %1: not %2 >> %LOG% & got
 echo === remove-driver %1 %2 %TIME% >> %LOG%
 dism /Image:W:\ /LogPath:%M%\woa\dism-remove.log /Remove-Driver /Driver:%1 >> %LOG% 2>&1
 echo remove rc=%ERRORLEVEL% >> %LOG%
+goto :eof
+
+:trustca
+rem Import the test root CA (DER) into the offline image's machine ROOT and
+rem TrustedPublisher stores. A registry cert-store element is REG_BINARY Blob
+rem under ...\SystemCertificates\<store>\Certificates\<sha1 thumbprint>. The
+rem blob (propid 0x20 + cert DER) and thumbprint are emitted by sign-driver.sh.
+echo === trust test root CA %TIME% >> %LOG%
+set ROOTHEX=
+set ROOTTP=
+set /p ROOTHEX=<%M%\woa\rootcert.hex
+set /p ROOTTP=<%M%\woa\rootthumb.txt
+reg load HKLM\OFFSW W:\Windows\System32\config\SOFTWARE >> %LOG% 2>&1
+reg add "HKLM\OFFSW\Microsoft\SystemCertificates\ROOT\Certificates\%ROOTTP%" /v Blob /t REG_BINARY /d %ROOTHEX% /f >> %LOG% 2>&1
+reg add "HKLM\OFFSW\Microsoft\SystemCertificates\TrustedPublisher\Certificates\%ROOTTP%" /v Blob /t REG_BINARY /d %ROOTHEX% /f >> %LOG% 2>&1
+reg unload HKLM\OFFSW >> %LOG% 2>&1
+echo trustca rc=%ERRORLEVEL% %TIME% >> %LOG%
 goto :eof
 
 :probe

@@ -5,8 +5,16 @@
 // Protocol: linux-mainline/overlays/linux/drivers/input/touchscreen/himax-dagu.c
 //           SPI_MODE_3, cmd 0x30, 10 fingers. Do not bind GPIO 100 (panel tp-reset).
 //
-// _HID HIMA8312 is a placeholder. No official Windows INF. Do not treat
-// this node as a working touch stack. \_SB.GIO0 lives in gpio.asl.
+// _HID HIMA8312 binds the self-contained himax-hx83121.sys HIDCLASS
+// minidriver (port/dagu/windows-drivers/himax-hx83121). That driver owns SE4
+// itself: it MmMapIoSpace()s the GENI block at 0x990000 and runs the FIFO SPI
+// transfer directly, and polls gpio39's TLMM level register at 0x0F527000.
+// So TPAD declares NO resources on purpose -- an SPISerialBus("\_SB.SP04")
+// here would drag in qcspi8250, whose GENI/GPI/SMMU stack dagu lacks and which
+// hangs the kernel at ExitBootServices. DaguQupDxe (UEFI) already clocked and
+// firmware-loaded SE4 and keeps the clocks across ExitBootServices, so the
+// minidriver finds SE4 live without PEP/SMMU/GPI. GPIO100 (panel reset) must
+// not be touched.
 
 Device (TPAD)
 {
@@ -15,26 +23,17 @@ Device (TPAD)
     Name (_UID, 0)
     Name (_DDN, "Himax HX83121")
 
-    Name (XMAX, 1600)
-    Name (YMAX, 2560)
-    Name (SPIM, 3)
-    Name (SPHZ, 4000000)
-    Name (IRQG, 39)
-
     Method (_STA, 0)
     {
         Return (0xF)
     }
 
+    // No resources: the minidriver maps SE4 (0x990000) and the gpio39 TLMM
+    // register (0x0F527000) itself and polls, so it needs neither a SPB
+    // controller (SP04/qcspi8250) nor a GpioInt provider (GIO0).
     Method (_CRS, 0x0, NotSerialized)
     {
-        Name (RBUF, ResourceTemplate ()
-        {
-            SPISerialBus (0x00, PolarityLow, FourWireMode, 0x08,
-                ControllerInitiated, 0x003D0900, ClockPolarityHigh,
-                ClockPhaseSecond, "\\_SB.SP04", 0x00, ResourceConsumer)
-            GpioInt (Level, ActiveLow, Exclusive, PullUp, 0, "\\_SB.GIO0") {39}
-        })
+        Name (RBUF, ResourceTemplate () {})
         Return (RBUF)
     }
 }

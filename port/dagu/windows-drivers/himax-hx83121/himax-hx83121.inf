@@ -6,8 +6,10 @@ Signature   = "$WINDOWS NT$"
 Class       = HIDClass
 ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
 Provider    = %Mfg%
-DriverVer   = 09/19/2026,1.0.0.0
-CatalogFile = himax-hx83121.cat
+DriverVer   = 10/27/2026,1.0.0.1
+; No CatalogFile: the .sys carries an embedded Authenticode test signature
+; (tools/winarm/sign-driver.sh) and is added with DISM /ForceUnsigned; the
+; test root CA is trusted in the image so KMCI loads it under testsigning.
 PnpLockdown = 1
 
 [Manufacturer]

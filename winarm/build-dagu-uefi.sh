@@ -66,6 +66,26 @@ grep -q DaguBacklightDxe "$DEV/xiaomi-dagu/DXE.inc" || \
 	sed -i "s|^\(\s*\)INF AndromedaPkg/Driver/SimpleFbDxe/SimpleFbDxe.inf|&\n\1INF $BL_INF|" "$DEV/xiaomi-dagu/DXE.inc"
 grep -q DaguBacklightDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
 	sed -i "s|^\(\s*\)AndromedaPkg/Driver/SimpleFbDxe/SimpleFbDxe.inf|&\n\1$BL_INF|" "$DEV/xiaomi-dagu/DXE.dsc.inc"
+# QUP: per-SE firmware for the keyboard (SE2 I2C) and touch (SE4 SPI).
+# The blob is generated here because qupv3fw.elf is not in git.
+QUP_INF='$(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Driver/DaguQupDxe/DaguQupDxe.inf'
+QUP_ELF="$HERE/../linux-mainline/firmware/dagu/lib/firmware/qcom/sm8250/xiaomi/dagu/qupv3fw.elf"
+[ -s "$QUP_ELF" ] || { echo "no QUP firmware: $QUP_ELF" >&2; exit 1; }
+python3 - "$QUP_ELF" "$DEV/xiaomi-dagu/Driver/DaguQupDxe/DaguQupFw.inc" <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+if data[:4] != b"\x7fELF" or len(data) < 64:
+    sys.exit("qupv3fw.elf is not an ELF")
+out = open(sys.argv[2], "w")
+for i in range(0, len(data), 16):
+    chunk = data[i:i + 16]
+    out.write("  " + ", ".join("0x%02x" % b for b in chunk) + ",\n")
+out.close()
+PY
+grep -q DaguQupDxe "$DEV/xiaomi-dagu/DXE.inc" || \
+	sed -i "s|^\(\s*\)INF .*DaguBacklightDxe.inf|&\n\1INF $QUP_INF|" "$DEV/xiaomi-dagu/DXE.inc"
+grep -q DaguQupDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
+	sed -i "s|^\(\s*\).*DaguBacklightDxe.inf|&\n\1$QUP_INF|" "$DEV/xiaomi-dagu/DXE.dsc.inc"
 # DSDT: pipa ships a 0-byte DSDT.aml. AcpiPlatformDxe then reads the table
 # Length from an empty RAW section (garbage), asserts Size >= TableSize, and
 # AcpiPlatformChecksum walks off the end of mapped DDR (data abort at
@@ -83,6 +103,13 @@ IASL="$(command -v iasl || true)"
 [ -x "$IASL" ] || { echo "no iasl (install acpica-tools)" >&2; exit 1; }
 ASL_TMP="$(mktemp -d)"
 cp "$ASL_SRC"/*.asl "$ASL_TMP/"
+# Bisection: DSDT_ONLY="ufs Pep_lpi" keeps only those Include()s in
+# dsdt_common.asl (the set alioth/lmi/elish boot Windows with); empty = all.
+if [ -n "${DSDT_ONLY:-}" ]; then
+	keep="$(printf '%s\n' $DSDT_ONLY | sed 's/$/.asl/' | paste -sd'|')"
+	sed -Ei "/Include\(\"($keep)\"\)/! s|^(\s*)Include\(|\1// Include(|" "$ASL_TMP/dsdt_common.asl"
+	echo "==> DSDT_ONLY: $(grep -oE '^\s*Include\("[^"]+"\)' "$ASL_TMP/dsdt_common.asl" | tr -d ' ' | paste -sd' ')"
+fi
 (cd "$ASL_TMP" && "$IASL" -vi Dsdt.asl >/dev/null)
 cp -f "$ASL_TMP/DSDT.aml" "$DEV/xiaomi-dagu/ACPI/DSDT.aml"
 rm -rf "$ASL_TMP"

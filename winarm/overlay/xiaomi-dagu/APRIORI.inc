@@ -33,6 +33,9 @@ APRIORI DXE {
     INF $(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Binaries/QcomPkg/Drivers/ShmBridgeDxe/ShmBridgeDxeLA.inf
     INF $(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Binaries/QcomPkg/Drivers/TzDxe/ScmDxeLA.inf
     INF $(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Binaries/QcomPkg/Drivers/TLMMDxe/TLMMDxe.inf
+    # dagu: QUP0 SE2 (keyboard I2C) and SE4 (touch SPI) clocks, pins, firmware.
+    # After ClockDxe and TLMMDxe. Does not touch the QUP wrapper.
+    INF $(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Driver/DaguQupDxe/DaguQupDxe.inf
     INF $(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Binaries/QcomPkg/Drivers/ResetRuntimeDxe/ResetRuntimeDxe.inf
     INF $(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Binaries/QcomPkg/Drivers/PmicDxe/PmicDxeLa.inf
 

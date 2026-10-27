@@ -1,0 +1,33 @@
+## @file
+#  dagu: clocks, pins and per-SE firmware for the keyboard and touch engines.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = DaguQupDxe
+  FILE_GUID                      = 7c2e9a14-6b51-4e8d-a3f0-1d5c8e2b47a6
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = DaguQupDxeInitialize
+
+[Sources.common]
+  DaguQupDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  ArmPkg/ArmPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  IoLib
+  TimerLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Guids]
+  gEfiEventExitBootServicesGuid
+
+[Depex]
+  TRUE

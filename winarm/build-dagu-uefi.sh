@@ -86,6 +86,12 @@ grep -q DaguQupDxe "$DEV/xiaomi-dagu/DXE.inc" || \
 	sed -i "s|^\(\s*\)INF .*DaguBacklightDxe.inf|&\n\1INF $QUP_INF|" "$DEV/xiaomi-dagu/DXE.inc"
 grep -q DaguQupDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
 	sed -i "s|^\(\s*\).*DaguBacklightDxe.inf|&\n\1$QUP_INF|" "$DEV/xiaomi-dagu/DXE.dsc.inc"
+# Watchdog probe: read-only log of the APSS watchdog around ExitBootServices.
+WDT_INF='$(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Driver/DaguWdtProbeDxe/DaguWdtProbeDxe.inf'
+grep -q DaguWdtProbeDxe "$DEV/xiaomi-dagu/DXE.inc" || \
+	sed -i "s|^\(\s*\)INF .*DaguQupDxe.inf|&\n\1INF $WDT_INF|" "$DEV/xiaomi-dagu/DXE.inc"
+grep -q DaguWdtProbeDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
+	sed -i "s|^\(\s*\).*DaguQupDxe.inf|&\n\1$WDT_INF|" "$DEV/xiaomi-dagu/DXE.dsc.inc"
 # DSDT: pipa ships a 0-byte DSDT.aml. AcpiPlatformDxe then reads the table
 # Length from an empty RAW section (garbage), asserts Size >= TableSize, and
 # AcpiPlatformChecksum walks off the end of mapped DDR (data abort at

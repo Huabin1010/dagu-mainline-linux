@@ -35,10 +35,15 @@ Device (IC01)
     }
 }
 
+// qci2c8250.inf binds ACPI\QCOM2511. _UID is the global SE number counted
+// from 1 (QUP0 s0..s7 = 1..8, QUP1 = 9..14, QUP2 = 15..20), as in the MTP
+// DSDT where each node's PEP clock names the SE (I2C5 = wrap0_s4). SE2 = 3.
+// No _DEP: \_SB.PEP0 is a placeholder; UEFI leaves SE clocks and IRAM set up.
 Device (IC02)
 {
-    Name (_HID, "QCOM0C10")
-    Name (_UID, 2)
+    Name (_HID, "QCOM2511")
+    Name (_UID, 3)
+    Name (_CCA, Zero)
     Name (_DDN, "QUP0 SE2 I2C Nanosic")
     Method (_STA, 0) { Return (0xF) }
     Method (_CRS, 0x0, NotSerialized)
@@ -69,10 +74,12 @@ Device (IC03)
     }
 }
 
+// qcspi8250.inf binds ACPI\QCOM250F. SE4 = global _UID 5 (see IC02).
 Device (SP04)
 {
-    Name (_HID, "QCOM0C11")
-    Name (_UID, 4)
+    Name (_HID, "QCOM250F")
+    Name (_UID, 5)
+    Name (_CCA, Zero)
     Name (_DDN, "QUP0 SE4 SPI Himax")
     Method (_STA, 0) { Return (0xF) }
     Method (_CRS, 0x0, NotSerialized)

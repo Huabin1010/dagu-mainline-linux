@@ -6,23 +6,7 @@
 //           SPI_MODE_3, cmd 0x30, 10 fingers. Do not bind GPIO 100 (panel tp-reset).
 //
 // _HID HIMA8312 is a placeholder. No official Windows INF. Do not treat
-// this node as a working touch stack.
-
-Device (GIO0)
-{
-    Name (_HID, "QCOM0C22")
-    Name (_UID, 0)
-    Method (_STA, 0) { Return (0xF) }
-
-    Method (_CRS, 0x0, NotSerialized)
-    {
-        Name (RBUF, ResourceTemplate ()
-        {
-            Memory32Fixed (ReadWrite, 0x0F100000, 0x00900000)
-        })
-        Return (RBUF)
-    }
-}
+// this node as a working touch stack. \_SB.GIO0 lives in gpio.asl.
 
 Device (TPAD)
 {

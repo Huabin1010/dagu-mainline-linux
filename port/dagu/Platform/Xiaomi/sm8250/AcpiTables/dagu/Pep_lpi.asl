@@ -14,11 +14,18 @@ Device (SYSM) {
 		Package () {
 			9500,    // Min residency (us)
 			6000,    // Wake latency (us)
-			1,       // Flags, set bit0 to 1 to enable this state
+			0,       // Flags, set bit0 to 1 to enable this state
 			0x20,    // Arch context last flags + 0x20 For Debugger Transistion by PEP.
 			0,       // Residency counter frequency
 			0,       // Enabled parent state
-			0xB300,  // Integer entry method PSCI E3 + F3 + LLC 
+			0xC200,  // Stock kona llcc-off system id (psci-mode 0xC24 << 4,
+			         // minus the 0x40 that L3 D4 adds). Not entered: Flags is 0.
+			         // No PEP votes RPMh before CPU_SUSPEND. With Flags 1, elish
+			         // 0xB300 composed 0x4100B344 and TZ returned -2 (bugcheck
+			         // 0xA0, param3 0xC4000001, param4 0xFFFFFFFE). Stock 0xC200
+			         // composes 0x4100C244, TZ accepts it, and the SoC reset
+			         // before Windows wrote a dump. C3/C4/D4 stay disabled so
+			         // the only idle left is C1 WFI.
 			ResourceTemplate(){Register(SystemMemory,0,0,0,0)},	 // Residency counter register
 			ResourceTemplate(){Register(SystemMemory,0,0,0,0)},	 // Usage counter register
 			"platform.DRIPS"						             // Name
@@ -55,7 +62,7 @@ Device (SYSM) {
 			{
 				6000,   // Min residency (us)
 				3300,   // Wake latency (us)
-				1,      // Flags, set bit0 to 1 to enable this state
+				0,      // Flags, set bit0 to 1 to enable this state
 				0,      // Arch context last flags
 				0,      // Residency counter frequency
 				1,      // Enabled parent state (Till F1)
@@ -113,7 +120,7 @@ Device (SYSM) {
 				{
 					1774,	// Min residency (us)
 					901,	// Wake latency (us)
-					1,	// Flags, set bit0 to 1 to enable this state
+					0,	// Flags, set bit0 to 1 to enable this state
 					1,	// Arch context last flags
 					0,	// Residency counter frequency
 					1,	// Enabled parent state (Enables D4)              0x40000003
@@ -127,7 +134,7 @@ Device (SYSM) {
 				{
 					4001,	// Min residency (us)
 					915,	// Wake latency (us)
-					1,	// Flags, set bit0 to 1 to enable this state
+					0,	// Flags, set bit0 to 1 to enable this state
 					1,	// Arch context last flags
 					0,	// Residency counter frequency
 					2,	// Enabled parent state (Enables D4)              0x40000003
@@ -186,7 +193,7 @@ Device (SYSM) {
 				{
 					1774,	// Min residency (us)
 					901,	// Wake latency (us)
-					1,	// Flags, set bit0 to 1 to enable this state
+					0,	// Flags, set bit0 to 1 to enable this state
 					1,	// Arch context last flags
 					0,	// Residency counter frequency
 					1,	// Enabled parent state (Enables D4)
@@ -200,7 +207,7 @@ Device (SYSM) {
 				{
 					4001,	// Min residency (us)
 					915,	// Wake latency (us)
-					1,	// Flags, set bit0 to 1 to enable this state
+					0,	// Flags, set bit0 to 1 to enable this state
 					1,	// Arch context last flags
 					0,	// Residency counter frequency
 					2,	// Enabled parent state (Enables LLC)
@@ -259,7 +266,7 @@ Device (SYSM) {
 				{
 					1774,	// Min residency (us)
 					901,	// Wake latency (us)
-					1,	// Flags, set bit0 to 1 to enable this state
+					0,	// Flags, set bit0 to 1 to enable this state
 					1,	// Arch context last flags
 					0,	// Residency counter frequency
 					1,	// Enabled parent state (Enables D4)
@@ -273,7 +280,7 @@ Device (SYSM) {
 				{
 					4001,	// Min residency (us)
 					915,	// Wake latency (us)
-					1,	// Flags, set bit0 to 1 to enable this state
+					0,	// Flags, set bit0 to 1 to enable this state
 					1,	// Arch context last flags
 					0,	// Residency counter frequency
 					2,	// Enabled parent state (Enables LLC)
@@ -331,7 +338,7 @@ Device (SYSM) {
 				{
 					1774,	// Min residency (us)
 					901,	// Wake latency (us)
-					1,	// Flags, set bit0 to 1 to enable this state
+					0,	// Flags, set bit0 to 1 to enable this state
 					1,	// Arch context last flags
 					0,	// Residency counter frequency
 					1,	// Enabled parent state (Enables D4)
@@ -345,7 +352,7 @@ Device (SYSM) {
 				{
 					4001,	// Min residency (us)
 					915,	// Wake latency (us)
-					1,	// Flags, set bit0 to 1 to enable this state
+					0,	// Flags, set bit0 to 1 to enable this state
 					1,	// Arch context last flags
 					0,	// Residency counter frequency
 					2,	// Enabled parent state (Enables LLC)
@@ -404,7 +411,7 @@ Device (SYSM) {
 				{
 					3850,	// Min residency (us)
 					860,	// Wake latency (us)
-					1,		// Flags, set bit0 to 1 to enable this state
+					0,		// Flags, set bit0 to 1 to enable this state
 					1,		// Arch context last flags
 					0,		// Residency counter frequency
 					1,		// Enabled parent state (Enables D4)
@@ -418,7 +425,7 @@ Device (SYSM) {
 				{
 					3950,	// Min residency (us)
 					910,	// Wake latency (us)
-					1,		// Flags, set bit0 to 1 to enable this state
+					0,		// Flags, set bit0 to 1 to enable this state
 					1,		// Arch context last flags
 					0,		// Residency counter frequency
 					2,		// Enabled parent state (Enables LLC)
@@ -476,7 +483,7 @@ Device (SYSM) {
 				{
 					3850,	// Min residency (us)
 					860,	// Wake latency (us)
-					1,		// Flags, set bit0 to 1 to enable this state
+					0,		// Flags, set bit0 to 1 to enable this state
 					1,		// Arch context last flags
 					0,		// Residency counter frequency
 					1,		// Enabled parent state (Enables D4)   0x40000003
@@ -490,7 +497,7 @@ Device (SYSM) {
 				{
 					3950,	// Min residency (us)
 					910,	// Wake latency (us)
-					1,		// Flags, set bit0 to 1 to enable this state
+					0,		// Flags, set bit0 to 1 to enable this state
 					1,		// Arch context last flags
 					0,		// Residency counter frequency
 					2,		// Enabled parent state (Enables D4)   0x40000003
@@ -548,7 +555,7 @@ Device (SYSM) {
 				{
 					3850,	// Min residency (us)
 					860,	// Wake latency (us)
-					1,		// Flags, set bit0 to 1 to enable this state
+					0,		// Flags, set bit0 to 1 to enable this state
 					1,		// Arch context last flags
 					0,		// Residency counter frequency
 					1,		// Enabled parent state (Enables D4)  0x40000003
@@ -562,7 +569,7 @@ Device (SYSM) {
 				{
 					3950,	// Min residency (us)
 					910,	// Wake latency (us)
-					1,		// Flags, set bit0 to 1 to enable this state
+					0,		// Flags, set bit0 to 1 to enable this state
 					1,		// Arch context last flags
 					0,		// Residency counter frequency
 					2,		// Enabled parent state (Enables D4)  0x40000004
@@ -620,7 +627,7 @@ Device (SYSM) {
 				{
 					3990,	// Min residency (us)
 					1000,	// Wake latency (us)
-					1,		// Flags, set bit0 to 1 to enable this state
+					0,		// Flags, set bit0 to 1 to enable this state
 					1,		// Arch context last flags
 					0,		// Residency counter frequency
 					1,		// Enabled parent state (Enables D4)  0x40000003
@@ -634,7 +641,7 @@ Device (SYSM) {
 				{
 					4490,	// Min residency (us)
 					1500,	// Wake latency (us)
-					1,		// Flags, set bit0 to 1 to enable this state
+					0,		// Flags, set bit0 to 1 to enable this state
 					1,		// Arch context last flags
 					0,		// Residency counter frequency
 					2,		// Enabled parent state (Enables D4)  0x40000004

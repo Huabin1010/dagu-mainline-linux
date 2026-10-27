@@ -25,6 +25,7 @@ for %%d in (0 1 2 3) do if not defined DISK call :probe %%d
 if not defined DISK (echo LUN0 not found >> %LOG% & goto :done)
 echo LUN0 = disk %DISK% >> %LOG%
 
+if exist %M%\woa\bcdonly goto :bcdonly
 if exist %M%\woa\service goto :service
 (
 echo select disk %DISK%
@@ -63,6 +64,7 @@ reg add HKLM\OFFSYS\ControlSet001\Control\CrashControl /v DisplayParameters /t R
 reg unload HKLM\OFFSYS >> %LOG% 2>&1
 if exist %M%\woa\service goto :done
 
+:bcdboot
 echo === bcdboot %TIME% >> %LOG%
 bcdboot W:\Windows /s S: /f UEFI /l zh-cn >> %LOG% 2>&1
 echo bcdboot rc=%ERRORLEVEL% >> %LOG%
@@ -73,6 +75,13 @@ bcdedit %BCD% /set {default} recoveryenabled no >> %LOG% 2>&1
 bcdedit %BCD% /set {default} bootstatuspolicy IgnoreAllFailures >> %LOG% 2>&1
 rem ntbtlog.txt in W:\Windows lists every boot driver load.
 bcdedit %BCD% /set {default} bootlog yes >> %LOG% 2>&1
+rem Show driver names on screen while the kernel loads (sos) and keep the
+rem boot animation off (quietboot no), so a hang shows where it stopped.
+bcdedit %BCD% /set {default} sos on >> %LOG% 2>&1
+bcdedit %BCD% /set {default} quietboot no >> %LOG% 2>&1
+rem sos alone is ignored while the boot animation is on; bootux disabled
+rem turns the spinner off so sos prints each driver as it loads.
+bcdedit %BCD% /set {default} bootux disabled >> %LOG% 2>&1
 bcdedit %BCD% /timeout 0 >> %LOG% 2>&1
 bcdedit %BCD% /enum all >> %LOG% 2>&1
 
@@ -81,6 +90,27 @@ echo === DONE %DATE% %TIME% >> %LOG%
 copy /y X:\Windows\Logs\DISM\dism.log %M%\woa\dism-pe.log >nul 2>&1
 wpeutil shutdown
 goto :eof
+
+:bcdonly
+rem \woa\bcdonly present = rebuild only the BCD. Windows and the drivers are
+rem not touched. The old store is kept as BCD.old so bcdboot writes a new one
+rem instead of merging into the broken one.
+(
+echo select disk %DISK%
+echo select partition 36
+echo remove all noerr
+echo assign letter=W
+echo select partition 35
+echo remove all noerr
+echo assign letter=S
+) > X:\bcd.txt
+diskpart /s X:\bcd.txt >> %LOG% 2>&1
+if not exist W:\Windows\System32\winload.efi (echo no Windows on W: >> %LOG% & goto :done)
+if not exist S:\EFI (echo no ESP on S: >> %LOG% & goto :done)
+echo === bcd rebuild %TIME% >> %LOG%
+if exist S:\EFI\Microsoft\Boot\BCD.old del /f /q S:\EFI\Microsoft\Boot\BCD.old
+ren S:\EFI\Microsoft\Boot\BCD BCD.old >> %LOG% 2>&1
+goto :bcdboot
 
 :service
 (

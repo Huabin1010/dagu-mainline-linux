@@ -1,34 +1,42 @@
-// Chip / boot facts for dagu (SM8250 / kona).
-// SOID 356 = 0x164 from live FDT qcom,msm-id.
-// STOR=1 UFS. Do not copy Linux interconnect deletions into ACPI.
+// Chip / boot facts for dagu (SM8250 / kona). Do not copy Linux interconnect
+// deletions into ACPI.
+//
+// These are placeholders, not values. AcpiPlatformUpdateLib (Mu, Sm8250)
+// overwrites each one at boot with a fixed-width CopyMem after the AML prefix
+// byte (SOID = 356 / 0x164 and PLST = 0x33 come from ChipInfo / PlatformInfo).
+// The placeholder must already be encoded at exactly that width: 0xffffffff
+// (DWord), 0xffff (Word), a QWord constant, a 15-char string for SIDS (16 bytes
+// with NUL). A short encoding such as 0, 1, 356 or "SM8250" gets overrun, the
+// AML after it is corrupted, Windows loads no ACPI namespace and the boot disk
+// UFS0 never enumerates (bugcheck 0x7B). build-dagu-uefi.sh checks the widths.
 
-Name(SOID, 356)
-Name(STOR, 0x1)
-Name(SIDS, "SM8250")
-Name(SIDV, 0x00020001)
-Name(SVMJ, 0x0002)
-Name(SVMI, 0x0001)
-Name(SDFE, 0x0000)
-Name(SFES, "SM8250")
-Name(SIDM, 0x0)
-Name(SUFS, 0x0)
-Name(PUS3, 0x1)
-Name(SUS3, 0x0)
-Name(SIDT, 0x0)
-Name(SJTG, 0x0)
-Name(SOSN, 0x0)
-Name(PLST, 0x33)
+Name(SOID, 0xffffffff)
+Name(STOR, 0xffffffff)
+Name(SIDS, "899800000000000")
+Name(SIDV, 0xffffffff)
+Name(SVMJ, 0xffff)
+Name(SVMI, 0xffff)
+Name(SDFE, 0xffff)
+Name(SFES, "899800000000000")
+Name(SIDM, 0xfffffffff)
+Name(SUFS, 0xffffffff)
+Name(PUS3, 0xffffffff)
+Name(SUS3, 0xffffffff)
+Name(SIDT, 0xffffffff)
+Name(SJTG, 0xffffffff)
+Name(SOSN, 0xaaaaaaaabbbbbbbb)
+Name(PLST, 0xffffffff)
 Name(EMUL, 0x0)
-Name (RMTB, 0x0)
-Name (RMTX, 0x0)
-Name (RFMB, 0x0)
-Name (RFMS, 0x0)
-Name (RFAB, 0x0)
-Name (RFAS, 0x0)
-Name (TCMA, 0x0)
-Name (TCML, 0x0)
-Name (SOSI, 0x0)
-Name (PRP1, 0x00000001)
+Name (RMTB, 0xaaaaaaaa)
+Name (RMTX, 0xbbbbbbbb)
+Name (RFMB, 0xcccccccc)
+Name (RFMS, 0xdddddddd)
+Name (RFAB, 0xeeeeeeee)
+Name (RFAS, 0x77777777)
+Name (TCMA, 0xDEADBEEF)
+Name (TCML, 0xBEEFDEAD)
+Name (SOSI, 0xdeadbeefffffffff)
+Name (PRP1, 0xFFFFFFFF)
 Name (SKUV, 0x1)
 
 		 Name (ESNL, 20)
@@ -42,6 +50,10 @@ Name (SKUV, 0x1)
 
         // Adreno 650 — linux gpu@3d00000 / iomem kgsl-3d0
         Include("graphics.asl")
+
+        // TLMM (qcgpio8250, ACPI\QCOM250D). Every GpioInt/GpioIo resource
+        // below names \_SB.GIO0, so it comes before its consumers.
+        Include("gpio.asl")
 
         // GENI I2C/SPI controllers first — children use I2cSerialBusV2 / SPI
         Include("i2c.asl")
@@ -71,7 +83,13 @@ Name (SKUV, 0x1)
         Include("cdsp.asl")
         Include("pmic.asl")
         Include("lpass.asl")
-        Include("smmu.asl")
+        // SMMU devices stay out until the stack that owns them (IORT + qcsmmu
+        // + PEP) works. The boot-critical path is UFS0 -> storufs with direct
+        // DMA, as on the SM8250 phones that boot Windows (alioth, lmi, elish
+        // ship no IORT and no SMMU device). With the MTP IORT in the table set,
+        // \_SB.UFS0 is mapped behind the 0x15000000 SMMU and the boot disk
+        // never appears (bugcheck 0x7B, 0xC0000034).
+        // Include("smmu.asl")
         Include("ipcc.asl")
         Include("smem.asl")
         Include("qmp.asl")

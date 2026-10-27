@@ -62,6 +62,8 @@ APRIORI DXE {
 
     # INF $(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Binaries/QcomPkg/Drivers/FeatureEnablerDxe/FeatureEnablerDxe.inf
     INF $(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Binaries/QcomPkg/Drivers/QcomWDogDxe/QcomWDogDxe.inf
+    # dagu: read-only log of the APSS watchdog (EN/BARK/BITE) around ExitBootServices
+    INF $(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Driver/DaguWdtProbeDxe/DaguWdtProbeDxe.inf
     INF $(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Binaries/QcomPkg/Drivers/DDRInfoDxe/DDRInfoDxe.inf
     INF AndromedaPkg/Driver/SimpleFbDxe/SimpleFbDxe.inf
     # dagu: raise the dual-KTZ8866 backlight from the dim boot-splash level

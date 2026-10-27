@@ -74,24 +74,8 @@ Device (IC03)
     }
 }
 
-// qcspi8250.inf binds ACPI\QCOM250F. SE4 = global _UID 5 (see IC02).
-Device (SP04)
-{
-    Name (_HID, "QCOM250F")
-    Name (_UID, 5)
-    Name (_CCA, Zero)
-    Name (_DDN, "QUP0 SE4 SPI Himax")
-    Method (_STA, 0) { Return (0xF) }
-    Method (_CRS, 0x0, NotSerialized)
-    {
-        Name (RBUF, ResourceTemplate ()
-        {
-            Memory32Fixed (ReadWrite, 0x00990000, 0x00004000)
-            Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, , , ) {637}
-        })
-        Return (RBUF)
-    }
-}
+// SP04 (QUP0 SE4 SPI, Himax touch) moved to spi.asl so the touch stack can be
+// built on its own via DSDT_ONLY. qcspi8250.inf binds ACPI\QCOM250F there.
 
 Device (IC08)
 {

@@ -54,6 +54,30 @@ for path, name in re.findall(r'Path="\$\(mspackageroot\)\\([^"]+)" Name="([^"]+)
     n += 1
 print(n, "driver packages staged")
 PY
+	# dagu: QUP0 SE4 is the Himax touch SPI. The BSP configures SE4 (Instance\4,
+	# QUPBlock QUP_0) for GPI DMA (OpMode=GPI), which needs the GPI DMA engine
+	# (\_SB.QGP0) and the SMMU (\_SB.MMU0) -- both MTP's SPI4 _DEP lists. dagu
+	# ships neither (SMMU is left out so UFS boots), so qcspi8250 faults setting
+	# up SE4 GPI and the kernel hangs just after ExitBootServices. Force SE4 to
+	# FIFO (PIO): the Himax transfers are 56 bytes and DaguQupDxe already drives
+	# SE4 via FIFO. INF files are UTF-16LE, so patch in Python, not sed.
+	python3 - "$1/drivers" <<'PY'
+import os, sys
+hits = 0
+for base, _, files in os.walk(sys.argv[1]):
+    for name in files:
+        if name.lower() != "qcspi8250.inf":
+            continue
+        p = os.path.join(base, name)
+        txt = open(p, "rb").read().decode("utf-16")
+        if "%OP_MODE_GPI%" in txt:
+            open(p, "wb").write(txt.replace("%OP_MODE_GPI%", "%OP_MODE_FIFO%").encode("utf-16"))
+            hits += 1
+if hits == 0:
+    sys.exit("qcspi8250 SE4 FIFO patch: no %OP_MODE_GPI% found to replace")
+print("qcspi8250 SE4 -> FIFO:", hits, "inf patched")
+PY
+
 	# OOBE: local admin "dagu", no online-account/network pages.
 	sed 's/>Kona</>dagu</g' "$QCP/components/Devices/Kona/Setup/DesktopSetup/Unattend.xml" \
 		>"$1/unattend.xml"

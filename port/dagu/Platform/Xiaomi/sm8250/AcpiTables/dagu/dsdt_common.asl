@@ -58,6 +58,10 @@ Name (SKUV, 0x1)
         // GENI I2C/SPI controllers first — children use I2cSerialBusV2 / SPI
         Include("i2c.asl")
 
+        // GENI SPI (QUP0 SE4) for the Himax touch — split from i2c.asl so the
+        // touch stack (gpio + spi + himax) can be built via DSDT_ONLY alone.
+        Include("spi.asl")
+
         // Himax HX83121 on QUP0 SE4 — dagu-geni-spi-experiment.on.dtsi
         Include("himax.asl")
 

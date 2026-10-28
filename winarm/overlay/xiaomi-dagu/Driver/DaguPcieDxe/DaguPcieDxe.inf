@@ -22,6 +22,7 @@
   BaseMemoryLib
   DebugLib
   IoLib
+  DxeServicesTableLib
   UefiBootServicesTableLib
   UefiDriverEntryPoint
 

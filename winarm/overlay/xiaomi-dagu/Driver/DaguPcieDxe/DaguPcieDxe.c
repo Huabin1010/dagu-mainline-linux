@@ -32,6 +32,7 @@
 #include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
 #include <Library/IoLib.h>
+#include <Library/DxeServicesTableLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiDriverEntryPoint.h>
 
@@ -540,6 +541,36 @@ BringUpPcie0 (
   return TRUE;
 }
 
+// ---- MMIO mapping ---------------------------------------------------------------
+// The dagu UEFI memory map has no PCIe entries: the first PARF write took a
+// level-3 translation fault (FAR 0x01C00000) and the boot looped. GCC/TLMM
+// work because Qualcomm's HWIO/Clock drivers add them to the GCD at runtime;
+// do the same for the PCIe0 blocks: add as MMIO, then make them uncached so
+// CpuDxe installs the page-table entries.
+STATIC BOOLEAN
+MapMmio (
+  EFI_PHYSICAL_ADDRESS  Base,
+  UINT64                Len,
+  CONST CHAR8           *Name
+  )
+{
+  EFI_GCD_MEMORY_SPACE_DESCRIPTOR  D;
+  EFI_STATUS                       Sa = EFI_SUCCESS, Ss;
+
+  if (EFI_ERROR (gDS->GetMemorySpaceDescriptor (Base, &D)) ||
+      D.GcdMemoryType == EfiGcdMemoryTypeNonExistent)
+  {
+    Sa = gDS->AddMemorySpace (EfiGcdMemoryTypeMemoryMappedIo, Base, Len,
+                              EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
+  }
+  Ss = gDS->SetMemorySpaceAttributes (Base, Len, EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
+  if (EFI_ERROR (Ss)) {
+    Ss = gDS->SetMemorySpaceAttributes (Base, Len, EFI_MEMORY_UC);
+  }
+  DEBUG ((DEBUG_ERROR, "DaguPcie: map %a %lx+%lx add %r attr %r\n", Name, Base, Len, Sa, Ss));
+  return !EFI_ERROR (Ss);
+}
+
 // ---- 6. probe config space, publish ACPI -----------------------------------------
 STATIC BOOLEAN
 ProbeConfig (
@@ -623,6 +654,13 @@ DaguPcieDxeInitialize (
   BOOLEAN  Up;
 
   DEBUG ((DEBUG_ERROR, "\n=== DAGU PCIE0 / QCA6390 ===\n"));
+  // PARF 0x01C00000 + QMP PHY 0x01C06000; DBI/ATU/config/MEM 0x60000000-0x63FFFFFF.
+  if (!MapMmio (PARF, 0x10000, "PARF+PHY") || !MapMmio (DBI, 0x4000000, "PCIe0 AXI")) {
+    Fail (1, "cannot map PCIe0 MMIO, not touching it");
+    DEBUG ((DEBUG_ERROR, "=== DAGU PCIE0: FAILED (map) - holding %u s ===\n", DAGU_PCIE_HOLD_S));
+    StallMs (DAGU_PCIE_HOLD_S * 1000u);
+    return EFI_SUCCESS;
+  }
   PowerQca6390 ();
   Up = BringUpPcie0 () && ProbeConfig ();
   if (Up) {

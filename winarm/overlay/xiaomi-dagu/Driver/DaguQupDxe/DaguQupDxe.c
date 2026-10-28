@@ -137,6 +137,10 @@ struct _EFI_QCOM_PMIC_VREG_PROTOCOL {
 
 STATIC EFI_GUID  mVregProtocolGuid = EFI_PMICVREG_PROTOCOL_GUID;
 
+// 1 = run ProbeWcnPower() on this boot. build-dagu-uefi.sh rewrites this line
+// in the build copy when DAGU_WCN_PROBE=1; the committed default is off.
+#define DAGU_WCN_PROBE  0
+
 // EFI_PM_VREG_ID_TYPE: LDO_1..33 are 0..32, then LDO_INVALID (33), then
 // SMPS_1.. starts at 34. Index the enum arithmetically to avoid pasting all
 // 60 names. dagu QCA6390 rails (sm8250-xiaomi-dagu.dts): vreg_s5a (2.0V
@@ -957,7 +961,27 @@ ProbeWcnPower (
     MmioRead32 (TLMM_NORTH + 0x1000u * 20u + 4u) & 1u,
     MmioRead32 (TLMM_NORTH + 0x1000u * 21u + 4u) & 1u
     ));
-  DaguStallMs (60000);
+  DEBUG ((DEBUG_ERROR, "=== DAGU WCN POWER: holding 90 s, then boot continues ===\n"));
+  DaguStallMs (90000);
+}
+
+STATIC EFI_EVENT  mVregEvent;
+STATIC VOID       *mVregReg;
+
+STATIC VOID
+EFIAPI
+OnVregInstalled (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  VOID  *Vreg;
+
+  if (EFI_ERROR (gBS->LocateProtocol (&mVregProtocolGuid, mVregReg, &Vreg))) {
+    return;
+  }
+  gBS->CloseEvent (Event);
+  ProbeWcnPower ();
 }
 
 STATIC VOID
@@ -1087,8 +1111,26 @@ DaguQupDxeInitialize (
     DEBUG ((DEBUG_ERROR, "DaguQup SE6: clocks off, MMIO skipped\n"));
   }
 
-  // ProbeWcnPower (); // held Wi-Fi/BT rail census; enable for one probe boot
-  (VOID)ProbeWcnPower;  // keep compiled without -Werror unused-function
+  // Wi-Fi/BT rail census, only in a probe build (DAGU_WCN_PROBE=1 in
+  // build-dagu-uefi.sh). This driver is APRIORI-dispatched before PmicDxe, so
+  // the VREG protocol does not exist yet: wait for PmicDxe to install it.
+  // That also runs the probe before QcomWDogDxe arms the HW watchdog, so the
+  // long on-screen hold cannot get bitten.
+  if (DAGU_WCN_PROBE) {
+    VOID  *Probe;
+
+    if (!EFI_ERROR (gBS->LocateProtocol (&mVregProtocolGuid, NULL, &Probe))) {
+      ProbeWcnPower ();
+    } else {
+      Status = gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+                                 OnVregInstalled, NULL, &mVregEvent);
+      if (!EFI_ERROR (Status)) {
+        Status = gBS->RegisterProtocolNotify (&mVregProtocolGuid, mVregEvent,
+                                              &mVregReg);
+      }
+      DEBUG ((DEBUG_ERROR, "DaguQup WCN probe: waiting for PMIC VREG (%r)\n", Status));
+    }
+  }
 
   return EFI_SUCCESS;
 }

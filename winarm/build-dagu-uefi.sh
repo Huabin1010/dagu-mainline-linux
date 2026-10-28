@@ -82,6 +82,14 @@ for i in range(0, len(data), 16):
     out.write("  " + ", ".join("0x%02x" % b for b in chunk) + ",\n")
 out.close()
 PY
+# DAGU_WCN_PROBE=1: one-off probe build that dumps the QCA6390 rail state on
+# screen + PStore and holds 90 s (DaguQupDxe ProbeWcnPower).
+if [ "${DAGU_WCN_PROBE:-0}" = 1 ]; then
+	sed -i 's/^#define DAGU_WCN_PROBE  0$/#define DAGU_WCN_PROBE  1/' "$DEV/xiaomi-dagu/Driver/DaguQupDxe/DaguQupDxe.c"
+	grep -q '^#define DAGU_WCN_PROBE  1$' "$DEV/xiaomi-dagu/Driver/DaguQupDxe/DaguQupDxe.c" || \
+		{ echo "DAGU_WCN_PROBE patch failed" >&2; exit 1; }
+	echo "==> DaguQupDxe: WCN power probe ON"
+fi
 grep -q DaguQupDxe "$DEV/xiaomi-dagu/DXE.inc" || \
 	sed -i "s|^\(\s*\)INF .*DaguBacklightDxe.inf|&\n\1INF $QUP_INF|" "$DEV/xiaomi-dagu/DXE.inc"
 grep -q DaguQupDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \

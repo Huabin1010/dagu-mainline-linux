@@ -573,6 +573,74 @@ MapMmio (
   return !EFI_ERROR (Ss);
 }
 
+// ---- SMMU: let PCIe0 DMA through -------------------------------------------------
+// Windows runs without an SMMU driver, but every DMA/MSI write from the
+// QCA6390 still passes the apps SMMU (SMMU-500 at 0x15000000) with stream
+// ID 0x1c00 (sm8250.dtsi pcie0 iommu-map: 0x1c00..0x1c01). With sCR0.USFCFG
+// set, an unmatched stream faults, so the MHI firmware download and MSIs
+// die and qcwlan fails MiniportInitialize (Code 10). If no stream match
+// entry covers 0x1c00, add a BYPASS S2CR for it in a free SMR slot; global
+// bypass is not changed.
+#define SMMU            0x15000000u
+#define SMMU_SCR0       0x000
+#define SMMU_IDR0       0x020
+#define SMMU_SMR(n)     (0x800u + 4u * (n))
+#define SMMU_S2CR(n)    (0xC00u + 4u * (n))
+#define SMR_VALID       BIT31
+#define S2CR_BYPASS     (1u << 16)
+#define PCIE0_SID       0x1C00u
+#define PCIE0_SID_MASK  0x0001u
+
+STATIC VOID
+SmmuBypassPcie0 (
+  VOID
+  )
+{
+  UINT32  Scr0, Idr0, N, I, Smr, Id, Mask, FreeSlot = 0xFFFFFFFFu, Hit = 0xFFFFFFFFu;
+
+  Scr0 = MmioRead32 (SMMU + SMMU_SCR0);
+  Idr0 = MmioRead32 (SMMU + SMMU_IDR0);
+  N = Idr0 & 0xFFu;
+  for (I = 0; I < N && I < 128; I++) {
+    Smr = MmioRead32 (SMMU + SMMU_SMR (I));
+    if (!(Smr & SMR_VALID)) {
+      FreeSlot = I;                         // keep the highest free slot
+      continue;
+    }
+    Id = Smr & 0x7FFFu;
+    Mask = (Smr >> 16) & 0x7FFFu;
+    if (((Id ^ PCIE0_SID) & ~Mask & 0x7FFFu) == 0 && Hit == 0xFFFFFFFFu) {
+      Hit = I;
+    }
+  }
+  DEBUG ((
+    DEBUG_ERROR,
+    "DaguPcie: SMMU sCR0 %08x (CLIENTPD %u USFCFG %u) IDR0 %08x smrs %u, sid %x %a%u\n",
+    Scr0, Scr0 & 1u, (Scr0 >> 10) & 1u, Idr0, N, PCIE0_SID,
+    (Hit != 0xFFFFFFFFu) ? "matched by SMR " : "unmatched, free SMR ",
+    (Hit != 0xFFFFFFFFu) ? Hit : FreeSlot
+    ));
+  if (Hit != 0xFFFFFFFFu) {
+    DEBUG ((DEBUG_ERROR, "DaguPcie: SMR %u S2CR %08x (left alone)\n",
+            Hit, MmioRead32 (SMMU + SMMU_S2CR (Hit))));
+    return;
+  }
+  if ((Scr0 & 1u) || !((Scr0 >> 10) & 1u)) {
+    DEBUG ((DEBUG_ERROR, "DaguPcie: SMMU passes unmatched streams, nothing to do\n"));
+    return;
+  }
+  if (FreeSlot == 0xFFFFFFFFu) {
+    DEBUG ((DEBUG_ERROR, "DaguPcie: no free SMR, PCIe DMA will fault\n"));
+    return;
+  }
+  MmioWrite32 (SMMU + SMMU_S2CR (FreeSlot), S2CR_BYPASS);
+  MmioWrite32 (SMMU + SMMU_SMR (FreeSlot), SMR_VALID | (PCIE0_SID_MASK << 16) | PCIE0_SID);
+  DEBUG ((
+    DEBUG_ERROR, "DaguPcie: SMR %u = %08x, S2CR = %08x (bypass for PCIe0)\n",
+    FreeSlot, MmioRead32 (SMMU + SMMU_SMR (FreeSlot)), MmioRead32 (SMMU + SMMU_S2CR (FreeSlot))
+    ));
+}
+
 // ---- 6. probe config space, publish ACPI -----------------------------------------
 STATIC BOOLEAN
 ProbeConfig (
@@ -666,6 +734,7 @@ DaguPcieDxeInitialize (
   PowerQca6390 ();
   Up = BringUpPcie0 () && ProbeConfig ();
   if (Up) {
+    SmmuBypassPcie0 ();
     PublishAcpi ();
   }
   DEBUG ((

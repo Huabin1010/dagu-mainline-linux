@@ -696,10 +696,14 @@ SmmuBypassPcie0 (
   }
   Tbl = (UINT64 *)(UINTN)TblPa;
   for (I = 0; I < 512; I++) {
-    // block[1:0]=01, AP=00 (RW), SH=11 (IS), AF=1. 0..2 GB is MMIO on SM8250
-    // (GICv2m MSI doorbell 0x17A10000): AttrIndx=2 Device-nGnRE -> 0x709.
-    // DDR from 0x80000000: AttrIndx=0 Normal WB -> 0x701.
-    Tbl[I] = ((UINT64)I << 30) | ((I < 2) ? 0x709u : 0x701u);
+    // block[1:0]=01, AP[2:1]=01 (RW, unprivileged allowed), SH=11 (IS), AF=1.
+    // AP[1] (bit 6) is required: PCIe DMA reaches the SMMU as an unprivileged
+    // transaction, and a privileged-only page permission-faults every access
+    // (p12: QCA6390 PBL "image transfer failed", ERROR_DBG1 = the firmware
+    // buffer's PA). Linux io-pgtable-arm sets ARM_LPAE_PTE_AP_UNPRIV likewise.
+    // 0..2 GB is MMIO on SM8250 (GICv2m MSI doorbell 0x17A10000): AttrIndx=2
+    // Device-nGnRE -> 0x749. DDR from 0x80000000: AttrIndx=0 Normal WB -> 0x741.
+    Tbl[I] = ((UINT64)I << 30) | ((I < 2) ? 0x749u : 0x741u);
   }
   ArmDataSynchronizationBarrier ();
 

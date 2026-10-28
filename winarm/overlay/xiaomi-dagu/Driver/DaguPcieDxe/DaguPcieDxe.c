@@ -158,7 +158,7 @@ STATIC UINT32  mFail;   // first failing step, 0 = all good
 // Values repeated in the final summary (the only screen held long enough to
 // photograph; earlier lines scroll away).
 STATIC UINT32  mSumLnk, mSumId1, mSumScr0, mSumSmr = 0xFFFFFFFFu, mSumSmrNew = 0xFFFFFFFFu;
-STATIC UINT32  mSumBarSz, mSumMhi[4], mSumAtu0, mSumAtu1, mSumCb = 0xFFFFFFFFu;
+STATIC UINT32  mSumBarSz, mSumMhi[4], mSumAtu0, mSumAtu1, mSumCb = 0xFFFFFFFFu, mSumSmrOk;
 
 // ---- helpers ---------------------------------------------------------------
 STATIC VOID
@@ -676,22 +676,59 @@ SmmuBypassPcie0 (
     } else {
       DEBUG ((DEBUG_ERROR, "DaguPcie: reuse UFS context bank %u (SMR %u)\n", Cb, Src));
     }
+    // Sixth boot: S2CR (TRANS, cb 3) stuck, but the masked SMR 0x80011C00
+    // read back 0. Do exactly what Linux arm_smmu_write_sme() does for the
+    // pcie0 iommu-map (two single SIDs, mask 0): S2CR then SMR per stream,
+    // then the arm_smmu_device_reset tail: clear sGFSR, TLBIALLNSNH,
+    // TLBGSYNC, rewrite sCR0 (an emulating hypervisor may commit there).
+    (VOID)Want;
     mSumSmrNew = 0xFFFFFFFEu;
-    for (I = 0; I < N && I < 128; I++) {
-      if (MmioRead32 (SMMU + SMMU_SMR (I)) & SMR_VALID) {
-        continue;
+    {
+      STATIC CONST UINT32  Sids[2] = { 0x1C00u, 0x1C01u };
+      UINT32               K, Slot[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu }, Ok = 0, T;
+
+      I = 0;
+      for (K = 0; K < 2; K++) {
+        for (; I < N && I < 128; I++) {
+          if (!(MmioRead32 (SMMU + SMMU_SMR (I)) & SMR_VALID)) {
+            break;
+          }
+        }
+        if (I >= N || I >= 128) {
+          break;
+        }
+        Slot[K] = I;
+        MmioWrite32 (SMMU + SMMU_S2CR (I), Cb);              // TRANS -> cb, PRIVCFG default
+        MmioWrite32 (SMMU + SMMU_SMR (I), SMR_VALID | Sids[K]);
+        I++;
       }
-      MmioWrite32 (SMMU + SMMU_S2CR (I), Cb);  // TYPE_TRANS, CBNDX, PRIVCFG default
-      MmioWrite32 (SMMU + SMMU_SMR (I), Want);
-      Smr = MmioRead32 (SMMU + SMMU_SMR (I));
-      S2 = MmioRead32 (SMMU + SMMU_S2CR (I));
-      DEBUG ((DEBUG_ERROR, "DaguPcie: SMR %u <- %08x: SMR %08x S2CR %08x\n", I, Want, Smr, S2));
-      if (Smr == Want && S2 == Cb) {
-        mSumSmrNew = I;
-      } else {
-        MmioWrite32 (SMMU + SMMU_SMR (I), 0);
+      MmioWrite32 (SMMU + 0x48, MmioRead32 (SMMU + 0x48));   // sGFSR: write-1-to-clear
+      MmioWrite32 (SMMU + 0x6C, 0);                           // TLBIALLNSNH
+      MmioWrite32 (SMMU + 0x70, 0);                           // TLBGSYNC
+      for (T = 0; T < 1000 && (MmioRead32 (SMMU + 0x74) & 1u); T++) {   // sTLBGSTATUS.GSACTIVE
+        StallUs (1);
       }
-      break;                                   // first free slot only
+      MmioWrite32 (SMMU + SMMU_SCR0, Scr0);                   // same value: commit
+      for (K = 0; K < 2; K++) {
+        if (Slot[K] == 0xFFFFFFFFu) {
+          continue;
+        }
+        Smr = MmioRead32 (SMMU + SMMU_SMR (Slot[K]));
+        S2 = MmioRead32 (SMMU + SMMU_S2CR (Slot[K]));
+        DEBUG ((
+          DEBUG_ERROR, "DaguPcie: SID %x -> SMR %u: SMR %08x S2CR %08x\n",
+          Sids[K], Slot[K], Smr, S2
+          ));
+        if (Smr == (SMR_VALID | Sids[K]) && (S2 & 0x300FFu) == Cb) {
+          Ok++;
+          if (mSumSmrNew == 0xFFFFFFFEu) {
+            mSumSmrNew = Slot[K];
+          }
+        }
+      }
+      mSumSmrOk = Ok;
+      DEBUG ((DEBUG_ERROR, "DaguPcie: %u/2 PCIe0 stream entries held, sCR0 now %08x\n",
+              Ok, MmioRead32 (SMMU + SMMU_SCR0)));
     }
     mSumCb = Cb;
   }
@@ -872,10 +909,10 @@ DaguPcieDxeInitialize (
     DEBUG_ERROR,
     "\n=== SUMMARY  link %a  dev %08x  atu0 %08x atu1 %08x\n"
     "=== BAR0 size %x  MHIREGLEN %08x MHIVER %08x MHICFG %08x BHIOFF %08x\n"
-    "=== SMMU sCR0 %08x (CLIENTPD %u USFCFG %u)  SMR hit %d new %d  cb %d\n",
+    "=== SMMU sCR0 %08x (CLIENTPD %u USFCFG %u)  SMR hit %d new %d  cb %d  held %u/2\n",
     mSumLnk ? "UP" : "DOWN", mSumId1, mSumAtu0, mSumAtu1,
     mSumBarSz, mSumMhi[0], mSumMhi[1], mSumMhi[2], mSumMhi[3],
-    mSumScr0, mSumScr0 & 1u, (mSumScr0 >> 10) & 1u, (INT32)mSumSmr, (INT32)mSumSmrNew, (INT32)mSumCb
+    mSumScr0, mSumScr0 & 1u, (mSumScr0 >> 10) & 1u, (INT32)mSumSmr, (INT32)mSumSmrNew, (INT32)mSumCb, mSumSmrOk
     ));
   if (Up) {
     SmmuDumpBypass ();

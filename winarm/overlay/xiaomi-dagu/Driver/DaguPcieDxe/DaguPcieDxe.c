@@ -158,7 +158,7 @@ STATIC UINT32  mFail;   // first failing step, 0 = all good
 // Values repeated in the final summary (the only screen held long enough to
 // photograph; earlier lines scroll away).
 STATIC UINT32  mSumLnk, mSumId1, mSumScr0, mSumSmr = 0xFFFFFFFFu, mSumSmrNew = 0xFFFFFFFFu;
-STATIC UINT32  mSumBarSz, mSumMhi[4], mSumAtu0, mSumAtu1;
+STATIC UINT32  mSumBarSz, mSumMhi[4], mSumAtu0, mSumAtu1, mSumCb = 0xFFFFFFFFu;
 
 // ---- helpers ---------------------------------------------------------------
 STATIC VOID
@@ -641,33 +641,59 @@ SmmuBypassPcie0 (
     DEBUG ((DEBUG_ERROR, "DaguPcie: no free SMR, PCIe DMA will fault\n"));
     return;
   }
-  // Fourth boot: writing the highest free slot (86) did not stick (SMR read
-  // back 0, S2CR 0x20000 = fault): the hypervisor keeps some slots. Linux
-  // arm-smmu allocates from the lowest free index; do the same, read back,
-  // and move on to the next free slot until one holds.
+  // Fifth boot: S2CR type BYPASS is refused by the hypervisor in every slot
+  // (reads back 0x20000 = FAULT, SMR stays 0), and all boot-time streams
+  // (UFS 0xE0, ...) are TRANS to a context bank whose translation is off.
+  // That is the Linux arm-smmu-qcom "bypass_quirk". Do the same: point
+  // stream 0x1c00 TRANS at the context bank UFS already uses (the bootloader
+  // set it up as pass-through); if no UFS stream is found, build one the
+  // Linux way in the last context bank (SCTLR=0, CBAR S1_TRANS_S2_BYPASS).
   {
-    UINT32  Tries = 0, Want = SMR_VALID | (PCIE0_SID_MASK << 16) | PCIE0_SID;
+    UINT32  Want = SMR_VALID | (PCIE0_SID_MASK << 16) | PCIE0_SID;
+    UINT32  Cb = 0xFFFFFFFFu, Src = 0xFFFFFFFFu, Id1, PgShift, NumPage, NumCb, S2;
 
-    for (I = 0; I < N && I < 128 && Tries < 12; I++) {
+    for (I = 0; I < N && I < 128; I++) {
+      Smr = MmioRead32 (SMMU + SMMU_SMR (I));
+      S2 = MmioRead32 (SMMU + SMMU_S2CR (I));
+      if ((Smr & SMR_VALID) && (Smr & 0x7FFFu) == 0xE0u && ((S2 >> 16) & 3u) == 0) {
+        Cb = S2 & 0xFFu;                       // UFS context bank
+        Src = I;
+        break;
+      }
+    }
+    if (Cb == 0xFFFFFFFFu) {
+      Id1 = MmioRead32 (SMMU + 0x24);
+      PgShift = (Id1 & BIT31) ? 16 : 12;
+      NumPage = 1u << (((Id1 >> 28) & 7u) + 1);
+      NumCb = Id1 & 0xFFu;
+      Cb = NumCb - 1;
+      MmioWrite32 (SMMU + ((NumPage + Cb) << PgShift) + 0x0, 0);          // CB SCTLR: MMU off
+      MmioWrite32 (SMMU + (1u << PgShift) + 4u * Cb, 1u << 16);           // GR1 CBAR: S1_TRANS_S2_BYPASS
+      DEBUG ((
+        DEBUG_ERROR, "DaguPcie: no UFS stream, quirk CB %u (ID1 %08x) CBAR %08x\n",
+        Cb, Id1, MmioRead32 (SMMU + (1u << PgShift) + 4u * Cb)
+        ));
+    } else {
+      DEBUG ((DEBUG_ERROR, "DaguPcie: reuse UFS context bank %u (SMR %u)\n", Cb, Src));
+    }
+    mSumSmrNew = 0xFFFFFFFEu;
+    for (I = 0; I < N && I < 128; I++) {
       if (MmioRead32 (SMMU + SMMU_SMR (I)) & SMR_VALID) {
         continue;
       }
-      Tries++;
-      MmioWrite32 (SMMU + SMMU_S2CR (I), S2CR_BYPASS);
+      MmioWrite32 (SMMU + SMMU_S2CR (I), Cb);  // TYPE_TRANS, CBNDX, PRIVCFG default
       MmioWrite32 (SMMU + SMMU_SMR (I), Want);
       Smr = MmioRead32 (SMMU + SMMU_SMR (I));
-      DEBUG ((
-        DEBUG_ERROR, "DaguPcie: try SMR %u: SMR %08x S2CR %08x\n",
-        I, Smr, MmioRead32 (SMMU + SMMU_S2CR (I))
-        ));
-      if (Smr == Want && ((MmioRead32 (SMMU + SMMU_S2CR (I)) >> 16) & 3u) == 1u) {
+      S2 = MmioRead32 (SMMU + SMMU_S2CR (I));
+      DEBUG ((DEBUG_ERROR, "DaguPcie: SMR %u <- %08x: SMR %08x S2CR %08x\n", I, Want, Smr, S2));
+      if (Smr == Want && S2 == Cb) {
         mSumSmrNew = I;
-        DEBUG ((DEBUG_ERROR, "DaguPcie: PCIe0 bypass in SMR %u\n", I));
-        return;
+      } else {
+        MmioWrite32 (SMMU + SMMU_SMR (I), 0);
       }
-      MmioWrite32 (SMMU + SMMU_SMR (I), 0);      // undo, try the next
+      break;                                   // first free slot only
     }
-    mSumSmrNew = 0xFFFFFFFEu;                    // tried, none held
+    mSumCb = Cb;
   }
 }
 
@@ -687,8 +713,8 @@ SmmuDumpBypass (
       continue;
     }
     S2cr = MmioRead32 (SMMU + SMMU_S2CR (I));
-    if (Shown < 24) {
-      DEBUG ((DEBUG_ERROR, " %u:%x/%u", I, Smr & 0x7FFFFFFFu, (S2cr >> 16) & 3u));
+    if (Shown < 16) {
+      DEBUG ((DEBUG_ERROR, " %u:%x/%x", I, Smr & 0x7FFFFFFFu, S2cr));
     }
     Shown++;
   }
@@ -846,10 +872,10 @@ DaguPcieDxeInitialize (
     DEBUG_ERROR,
     "\n=== SUMMARY  link %a  dev %08x  atu0 %08x atu1 %08x\n"
     "=== BAR0 size %x  MHIREGLEN %08x MHIVER %08x MHICFG %08x BHIOFF %08x\n"
-    "=== SMMU sCR0 %08x (CLIENTPD %u USFCFG %u)  SMR hit %d new %d\n",
+    "=== SMMU sCR0 %08x (CLIENTPD %u USFCFG %u)  SMR hit %d new %d  cb %d\n",
     mSumLnk ? "UP" : "DOWN", mSumId1, mSumAtu0, mSumAtu1,
     mSumBarSz, mSumMhi[0], mSumMhi[1], mSumMhi[2], mSumMhi[3],
-    mSumScr0, mSumScr0 & 1u, (mSumScr0 >> 10) & 1u, (INT32)mSumSmr, (INT32)mSumSmrNew
+    mSumScr0, mSumScr0 & 1u, (mSumScr0 >> 10) & 1u, (INT32)mSumSmr, (INT32)mSumSmrNew, (INT32)mSumCb
     ));
   if (Up) {
     SmmuDumpBypass ();

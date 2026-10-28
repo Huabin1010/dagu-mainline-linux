@@ -24,6 +24,7 @@
   IoLib
   PrintLib
   UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
   UefiDriverEntryPoint
 
 [Guids]

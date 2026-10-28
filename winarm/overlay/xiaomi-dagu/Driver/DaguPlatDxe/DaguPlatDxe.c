@@ -27,6 +27,7 @@
 #include <Library/IoLib.h>
 #include <Library/PrintLib.h>
 #include <Library/UefiBootServicesTableLib.h>
+#include <Library/UefiRuntimeServicesTableLib.h>
 #include <Library/UefiDriverEntryPoint.h>
 
 // Target MHz per EPSS domain: 0 = A55 x4 (LUT max 1805), 1 = A77 x3 (2419),
@@ -329,6 +330,93 @@ WriteEspFile (
   gBS->FreePool (Handles);
 }
 
+// ---- Windows -> fastboot bridge -------------------------------------------
+// Windows cannot write the Qualcomm reboot-reason cookie itself (no SPMI
+// driver in the WoA stack). Instead it drops an empty file \dagu-fastboot on
+// its ESP (over SSH: `ni X:\dagu-fastboot`, or `S:\dagu-fastboot`) and does a
+// normal restart. This runs before Windows is launched: if the flag is there,
+// delete it and cold-reset with the FASTBOOT_MODE reason, exactly like
+// QcomModulePkg RebootDevice(). ResetRuntimeDxe writes the PMIC cookie and
+// XBL/ABL comes up in fastboot. Deleting the flag first means we never loop.
+#pragma pack(1)
+typedef struct {
+  CHAR16  DataBuffer[12];            // L"RESET_PARAM"
+  UINT8   Bdata;                     // reboot reason
+} DAGU_RESET_DATA;
+#pragma pack()
+#define DAGU_FASTBOOT_MODE  0x02u
+
+STATIC VOID
+CheckFastbootFlag (
+  VOID
+  )
+{
+  EFI_STATUS                       Status;
+  EFI_HANDLE                       *Handles;
+  UINTN                            Count, I;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
+  EFI_FILE_PROTOCOL                *Root, *Probe, *Flag;
+  DAGU_RESET_DATA                  Rd;
+
+  if (EFI_ERROR (gBS->LocateHandleBuffer (
+                        ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles)))
+  {
+    return;
+  }
+  for (I = 0; I < Count; I++) {
+    if (EFI_ERROR (gBS->HandleProtocol (Handles[I], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs)) ||
+        EFI_ERROR (Fs->OpenVolume (Fs, &Root)))
+    {
+      continue;
+    }
+    // Only act on the Windows ESP (the volume with the boot manager).
+    if (EFI_ERROR (Root->Open (Root, &Probe, L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+                               EFI_FILE_MODE_READ, 0)))
+    {
+      Root->Close (Root);
+      continue;
+    }
+    Probe->Close (Probe);
+    Status = Root->Open (Root, &Flag, L"\\dagu-fastboot",
+                         EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
+    DEBUG ((DEBUG_ERROR, "DaguPlat: ESP found (%u fs), flag open %r\n", (UINT32)Count, Status));
+    if (EFI_ERROR (Status)) {
+      Root->Close (Root);
+      break;                           // found the ESP, no flag: boot normally
+    }
+    Status = Flag->Delete (Flag);      // clears the handle; persists on FAT
+    Root->Close (Root);
+    gBS->FreePool (Handles);
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_ERROR, "DaguPlat: fastboot flag delete %r, not resetting\n", Status));
+      return;
+    }
+    DEBUG ((DEBUG_ERROR, "DaguPlat: fastboot flag set -> cold reset into fastboot\n"));
+    ZeroMem (&Rd, sizeof (Rd));
+    CopyMem (Rd.DataBuffer, L"RESET_PARAM", sizeof (L"RESET_PARAM"));
+    Rd.Bdata = DAGU_FASTBOOT_MODE;
+    gRT->ResetSystem (EfiResetCold, EFI_SUCCESS, sizeof (Rd), &Rd);
+    CpuDeadLoop ();                     // does not return
+    return;
+  }
+  gBS->FreePool (Handles);
+}
+
+// The ESP's filesystem is connected during BDS, after this driver's DXE
+// entry, so a single scan at entry misses it. Re-run the flag check whenever
+// any SimpleFileSystem is installed; the ESP shows up before bootmgfw starts.
+STATIC VOID   *mFsReg;
+
+STATIC VOID
+EFIAPI
+OnFsNotify (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  CheckFastbootFlag ();
+}
+
 STATIC VOID
 EFIAPI
 OnReadyToBoot (
@@ -336,6 +424,7 @@ OnReadyToBoot (
   IN VOID       *Context
   )
 {
+  CheckFastbootFlag ();                 // backstop: also catch it here
   if (mDone) {
     EpssApply (FALSE);
     return;
@@ -366,8 +455,15 @@ DaguPlatDxeInitialize (
   IN EFI_SYSTEM_TABLE  *SystemTable
   )
 {
-  EFI_EVENT   Ev;
+  EFI_EVENT   Ev, FsEv;
   EFI_STATUS  Status;
+
+  // Windows -> fastboot: fire the flag check as each filesystem mounts.
+  Status = gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, OnFsNotify, NULL, &FsEv);
+  if (!EFI_ERROR (Status)) {
+    gBS->RegisterProtocolNotify (&gEfiSimpleFileSystemProtocolGuid, FsEv, &mFsReg);
+  }
+  CheckFastbootFlag ();                 // in case a filesystem is already up
 
   Status = gBS->CreateEventEx (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, OnReadyToBoot,
                                NULL, &gEfiEventReadyToBootGuid, &Ev);

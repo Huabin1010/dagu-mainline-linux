@@ -1,17 +1,23 @@
 ; dagu QUP0 SE6 GENI UART, SerCx2 PIO controller (QCA6390 Bluetooth bottom).
-; Binds the dedicated ACPI id DAGU0006 that bluetooth.asl puts on UAR6, so it
-; never contends with the stock qcuart8250 (ACPI\QCOM2518). The QCA transport
-; qcbtfmuart_hst8180 (ACPI\QCOM0471) opens this through the Resource Hub.
+;
+; Binds ACPI\QCOM2518 -- the UART node Windows already validates and boots
+; with -- REPLACING the stock qcuart8250 (which starts but cannot open the SE
+; without the Qualcomm PEP; every CreateFile returns 0xC00000A3). Uninstall
+; qcuart first (pnputil /delete-driver ... /uninstall) so only this driver
+; matches QCOM2518. The QCA transport qcbtfmuart_hst8180 (ACPI\QCOM0471) opens
+; this through the Resource Hub.
 ;
 ; Self-contained KMDF + SerCx2 driver; no Qualcomm PEP, no GPI DMA. The .sys
-; carries an embedded Authenticode test signature (tools/winarm/sign-driver.sh)
-; and is installed with DISM /ForceUnsigned, so there is no CatalogFile.
+; carries an embedded Authenticode test signature (tools/winarm/sign-driver.sh).
+; For online install (pnputil) a test-signed catalog is needed; build it with
+; tools/winarm/make-driver-cat.sh. Offline (WinPE DISM /ForceUnsigned) it is not.
 [Version]
 Signature   = "$WINDOWS NT$"
 Class       = Ports
 ClassGuid   = {4D36E978-E325-11CE-BFC1-08002BE10318}
 Provider    = %Mfg%
-DriverVer   = 10/28/2026,1.0.0.1
+DriverVer   = 10/29/2026,1.0.0.2
+CatalogFile = dagu-geni-uart.cat
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -30,7 +36,7 @@ ExcludeFromSelect = *
 %Mfg% = Models, NTarm64
 
 [Models.NTarm64]
-%Desc% = Geni_Inst, ACPI\DAGU0006
+%Desc% = Geni_Inst, ACPI\QCOM2518
 
 [Geni_Inst.NT]
 CopyFiles   = Geni_Copy
@@ -66,11 +72,6 @@ KmdfService = dagu_geni_uart, Geni_wdfsect
 
 [Geni_wdfsect]
 KmdfLibraryVersion = 1.33
-
-; Optional tuning, read in DriverEntry (see dagu-geni-uart.c):
-;   Se6SourceHz  REG_DWORD  assumed gcc_qupv3_wrap0_s6_clk rate (default 102.4M)
-;   DebugPrint   REG_DWORD  1 = DbgPrintEx tracing on (default 1)
-[Geni_Inst.NT.Services.AddReg]
 
 [Strings]
 Mfg  = "dagu"

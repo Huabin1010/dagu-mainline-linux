@@ -78,10 +78,19 @@
 #define SE_GENI_RX_WATERMARK_REG    0x810
 #define SE_GENI_RX_RFR_WATERMARK_REG 0x814
 #define SE_GENI_IOS                 0x908
+#define SE_DMA_TX_IRQ_STAT          0xc40
 #define SE_DMA_TX_IRQ_CLR           0xc44
+#define SE_DMA_TX_IRQ_EN_CLR        0xc50
 #define SE_DMA_TX_FSM_RST           0xc58
+#define SE_DMA_RX_IRQ_STAT          0xd40
 #define SE_DMA_RX_IRQ_CLR           0xd44
+#define SE_DMA_RX_IRQ_EN_CLR        0xd50
 #define SE_DMA_RX_FSM_RST           0xd58
+#define DMA_TX_RESET_DONE           (1u << 3)
+#define DMA_RX_RESET_DONE           (1u << 3)
+/* SE_IRQ_EN: route only the GENI M/S engines to the line (FIFO mode). */
+#define SE_IRQ_EN_GENI_M            (1u << 2)
+#define SE_IRQ_EN_GENI_S            (1u << 3)
 #define SE_HW_PARAM_0               0xe24
 #define SE_HW_PARAM_1               0xe28
 #define SE_GSI_EVENT_EN             0xe18
@@ -169,7 +178,7 @@
 #define UART_RX_WM              2u
 #define BYTES_PER_FIFO_WORD     4u
 
-#define SE6_DEFAULT_SRC_HZ      102400000u  /* see DaguQupDxe; override via reg */
+#define SE6_DEFAULT_SRC_HZ      100000000u  /* see DaguQupDxe; override via reg */
 #define GENI_POLL_SPINS         20000       /* x1us poll bound (matches Linux)  */
 
 #define DAGU_TAG                'UneG'
@@ -348,7 +357,17 @@ static VOID SeInit(PGENI_UART_CONTEXT c)
     Wr(c, SE_GENI_S_IRQ_CLEAR, 0xFFFFFFFFu);
     Wr(c, SE_DMA_TX_IRQ_CLR, 0xFFFFFFFFu);
     Wr(c, SE_DMA_RX_IRQ_CLR, 0xFFFFFFFFu);
-    Wr(c, SE_IRQ_EN, 0xFFFFFFFFu);
+    /*
+     * This driver is FIFO-only and never programs the SE DMA engines, but
+     * DaguQupDxe (UEFI) enabled the DMA TX/RX IRQ sources (DMA_DONE,
+     * AHB_ERR, RESET_DONE, FLUSH_DONE) and routed them to the line. A
+     * DMA FSM reset (purge) then latches RESET_DONE in SE_DMA_*_IRQ_STAT,
+     * which keeps the level-triggered GIC 639 asserted. Turn those sources
+     * off and route only the GENI M/S engines.
+     */
+    Wr(c, SE_DMA_TX_IRQ_EN_CLR, 0xFFFFFFFFu);
+    Wr(c, SE_DMA_RX_IRQ_EN_CLR, 0xFFFFFFFFu);
+    Wr(c, SE_IRQ_EN, SE_IRQ_EN_GENI_M | SE_IRQ_EN_GENI_S);
 
     /* geni_se_io_init: CGC on, default output ctrl, force default. */
     SetB(c, SE_GENI_CGC_CTRL, 0x7Fu);
@@ -533,6 +552,14 @@ static VOID StartRx(PGENI_UART_CONTEXT c)
     Wr(c, SE_GENI_S_CMD0, s);
 }
 
+/* Discard whatever is left in the RX FIFO (bounded by the FIFO depth). */
+static VOID DrainRxFifo(PGENI_UART_CONTEXT c)
+{
+    ULONG n = c->RxFifoDepth + 1;
+    while (n-- && (Rd(c, SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC_MSK) != 0)
+        (VOID)Rd(c, SE_GENI_RX_FIFOn);
+}
+
 static VOID StopRx(PGENI_UART_CONTEXT c)
 {
     ULONG en = Rd(c, SE_GENI_S_IRQ_EN);
@@ -555,14 +582,19 @@ EvtSerCx2PurgeFifos(WDFDEVICE Device, BOOLEAN PurgeRx, BOOLEAN PurgeTx)
 {
     PGENI_UART_CONTEXT c = GeniGetContext(Device);
 
+    /*
+     * FIFO mode only: never reset the SE DMA FSMs here. A DMA FSM reset
+     * latches RESET_DONE in SE_DMA_*_IRQ_STAT; with the DMA sources that
+     * DaguQupDxe enabled, that held GIC 639 high (bugcheck 0x133).
+     * Mainline's FIFO flush path does not touch the DMA engine either.
+     */
     if (PurgeTx) {
         CancelMCmd(c);
-        Wr(c, SE_DMA_TX_FSM_RST, 1);
         c->TxRemaining = 0;
     }
     if (PurgeRx) {
         StopRx(c);
-        Wr(c, SE_DMA_RX_FSM_RST, 1);
+        DrainRxFifo(c);
     }
 }
 
@@ -858,7 +890,6 @@ EvtTxPurgeFifo(SERCX2PIOTRANSMIT PioTransmit, ULONG BytesAlreadyTransmitted)
     PGENI_UART_CONTEXT c = GeniGetPioContext(PioTransmit)->Ctx;
     UNREFERENCED_PARAMETER(BytesAlreadyTransmitted);
     CancelMCmd(c);
-    Wr(c, SE_DMA_TX_FSM_RST, 1);
     c->TxRemaining = 0;
     SerCx2PioTransmitPurgeFifoComplete(PioTransmit, 0);
 }
@@ -972,19 +1003,28 @@ static BOOLEAN
 EvtInterruptIsr(WDFINTERRUPT Interrupt, ULONG MessageID)
 {
     PGENI_UART_CONTEXT c = GeniGetContext(WdfInterruptGetDevice(Interrupt));
-    ULONG m, s, mEn;
+    ULONG m, s, dtx, drx, mEn;
     BOOLEAN queueDpc = FALSE;
 
     UNREFERENCED_PARAMETER(MessageID);
 
     m = Rd(c, SE_GENI_M_IRQ_STATUS);
     s = Rd(c, SE_GENI_S_IRQ_STATUS);
+    dtx = Rd(c, SE_DMA_TX_IRQ_STAT);
+    drx = Rd(c, SE_DMA_RX_IRQ_STAT);
     mEn = Rd(c, SE_GENI_M_IRQ_EN);
     Wr(c, SE_GENI_M_IRQ_CLEAR, m);
     Wr(c, SE_GENI_S_IRQ_CLEAR, s);
+    /*
+     * Ack every source that can hold the level line high, as mainline
+     * qcom_geni_serial_isr() does. Returning FALSE with DMA status still
+     * latched re-enters the ISR forever (DPC_WATCHDOG_VIOLATION).
+     */
+    Wr(c, SE_DMA_TX_IRQ_CLR, dtx);
+    Wr(c, SE_DMA_RX_IRQ_CLR, drx);
 
     if (m == 0 && s == 0)
-        return FALSE;
+        return (dtx | drx) != 0;
 
     /* TX: watermark wants more bytes, or command fully done. */
     if (m & mEn & (M_TX_FIFO_WATERMARK_EN | M_CMD_DONE_EN)) {

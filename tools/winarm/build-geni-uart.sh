@@ -33,6 +33,8 @@ inc="-nostdinc \
 clang -target aarch64-windows-msvc -c \
   -D_WIN64 -D_ARM64_ -DARM64 -D_KERNEL_MODE -DNTDDI_VERSION=0x0A000010 \
   -D_WINNT_WIN32=0x0A00 -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 \
+  -DKMDF_VERSION_MAJOR=1 -DKMDF_VERSION_MINOR=${KMDFVER#1.} \
+  -DKMDF_MINIMUM_VERSION_REQUIRED=${KMDFVER#1.} \
   -O1 -mcmodel=small -fno-stack-protector -fshort-wchar -fms-extensions \
   -Wno-everything $inc \
   -o /tmp/$NAME.obj $REL/$NAME.c

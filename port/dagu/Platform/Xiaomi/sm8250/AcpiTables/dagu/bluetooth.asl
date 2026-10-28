@@ -3,33 +3,35 @@
 // Two sibling nodes, MTP-style, with no _DEP on PEP0 (dagu has no working
 // Qualcomm PEP):
 //
-//   UAR6 - the UART controller. Bound by our own SerCx2 PIO driver
-//          (port/dagu/windows-drivers/dagu-geni-uart, ACPI\DAGU0006), NOT the
-//          stock qcuart8250. qcuart "starts" but every open returns
-//          0xC00000A3 because it needs qcpep8250 to power the SE at open time,
-//          and dagu cannot load that PEP. Our driver drives the SE-local GENI
-//          UART FIFO directly instead.
+//   UAR6 - the UART controller, ACPI id QCOM2518. This is the id the stock
+//          qcuart8250 binds, and the node Windows' ACPI validated and booted
+//          with. We keep this exact node (a brand-new _HID bugchecked acpi.sys
+//          with ACPI_BIOS_ERROR 0xA5) and instead REPLACE the driver: our own
+//          SerCx2 PIO driver (port/dagu/windows-drivers/dagu-geni-uart) binds
+//          ACPI\QCOM2518 after qcuart8250 is uninstalled. qcuart cannot work
+//          on dagu -- it needs qcpep8250 to power the SE at open time, so every
+//          CreateFile returns 0xC00000A3 -- but the ACPI node itself is fine.
+//          _UID 0x12 is qcuart's "Instance 18" (Bluetooth, PIO); harmless to
+//          our driver, kept so the AML is identical to the booting image.
 //
-//   BTH0 - the QCA6390 radio. Bound by the stock transport
-//          qcbtfmuart_hst8180 (ACPI\QCOM0471, _SUB MTPC8180), which speaks HCI
-//          and loads htbtfw20.tlv/htnv20.bin. It opens UAR6 through the
-//          UartSerialBusV2 connection + Resource Hub.
+//   BTH0 - the QCA6390 radio, bound by the stock transport qcbtfmuart_hst8180
+//          (ACPI\QCOM0471, _SUB MTPC8180), which speaks HCI and loads
+//          htbtfw20.tlv/htnv20.bin. It opens UAR6 through the UartSerialBusV2
+//          connection + Resource Hub.
 //
 // Pre-reqs done in UEFI before Windows: DaguQupDxe loads the UART protocol
-// firmware into SE6, muxes GPIO16..19 to qup6 and leaves the QUP clocks on
-// (gcc_qupv3_wrap0_s6_clk at a UART-friendly rate); DaguPcieDxe powers QCA6390
-// and asserts BT_EN GPIO21.
+// firmware into SE6, muxes GPIO16..19 to qup6 and sets gcc_qupv3_wrap0_s6_clk
+// to 100 MHz (a UART-friendly rate in the QUP s2 freq table); DaguPcieDxe
+// powers QCA6390 and asserts BT_EN GPIO21.
 //
 // Linux resources: 0x00998000/0x4000, GIC_SPI 607 -> ACPI interrupt 639.
-// There is no dagu-specific BT host-wake GPIO in the Linux board description,
-// so there is no GpioInt here (MTP's GPIO46 was tried and did not help).
 
 Device (UAR6)
 {
-    Name (_HID, "DAGU0006")      // our dagu-geni-uart SerCx2 controller
-    Name (_UID, 6)
+    Name (_HID, "QCOM2518")
+    Name (_UID, 0x12)
     Name (_CCA, Zero)
-    Method (_STA, 0) { Return (0x0F) }
+    Method (_STA, 0) { Return (0x0B) }
 
     Method (_CRS, 0, NotSerialized)
     {
@@ -40,6 +42,8 @@ Device (UAR6)
             {
                 639
             }
+            GpioInt (Edge, ActiveHigh, Exclusive, PullNone, 0,
+                "\\_SB.GIO0", 0, ResourceConsumer, , ) { 46 }
         })
         Return (RBUF)
     }
@@ -59,9 +63,8 @@ Device (BTH0)
     {
         Name (RBUF, ResourceTemplate ()
         {
-            // Initial speed is 115200. The QCA transport raises it (up to
-            // 3.2 Mbps) via IOCTL_SERIAL_SET_BAUD_RATE after ROM sync; our
-            // dagu-geni-uart driver reprograms the GENI serial divider.
+            // 115200 8N1 hardware flow. The transport may raise the baud after
+            // ROM sync; our dagu-geni-uart driver reprograms the GENI divider.
             UartSerialBusV2 (115200, DataBitsEight, StopBitsOne,
                 0xC0, LittleEndian, ParityTypeNone, FlowControlHardware,
                 0x20, 0x20, "\\_SB.UAR6",

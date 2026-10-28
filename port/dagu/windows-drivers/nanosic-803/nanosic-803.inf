@@ -1,47 +1,45 @@
-; Nanosic 803 @ ACPI\NANO0803. Not I2C-HID (no PNP0C50).
-; nabu USB filter does not apply; this is GENI I2C.
-
+; dagu folio keyboard (Nanosic 803 MCU). ACPI HID NANO0803.
+; Self-contained HIDCLASS minidriver: bit-banged I2C on gpio115/116, no SPB.
 [Version]
 Signature   = "$WINDOWS NT$"
 Class       = HIDClass
 ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
 Provider    = %Mfg%
-DriverVer   = 09/19/2026,1.0.0.0
-CatalogFile = nanosic-803.cat
+DriverVer   = 10/28/2026,1.0.0.1
+; No CatalogFile: the .sys carries an embedded Authenticode test signature
+; (tools/winarm/sign-driver.sh) and is added with DISM /ForceUnsigned.
 PnpLockdown = 1
-
 [Manufacturer]
 %Mfg% = Models, NTarm64
-
 [Models.NTarm64]
 %Desc% = Nanosic_Inst, ACPI\NANO0803
-
 [Nanosic_Inst.NT]
 CopyFiles = Nanosic_Copy
-
+Include   = hidclass.inf
+Needs     = HID_Inst.NT
 [Nanosic_Inst.NT.Services]
 AddService = dagu_nanosic, 0x00000002, Nanosic_Service
-
+Include    = hidclass.inf
+Needs      = HID_Inst.NT.Services
 [Nanosic_Service]
 DisplayName    = %Desc%
 ServiceType    = 1
 StartType      = 3
 ErrorControl   = 1
 ServiceBinary  = %13%\nanosic-803.sys
-
+AddReg         = Nanosic_Svc_AddReg
+[Nanosic_Svc_AddReg]
+; 1 = write \Windows\nanosic-diag.txt every ~2 s (bring-up). Set 0 later.
+HKR,,NanosicDiag,0x00010001,1
 [Nanosic_Copy]
 nanosic-803.sys
-
 [DestinationDirs]
 Nanosic_Copy = 13
-
 [SourceDisksNames]
 1 = %Disk%
-
 [SourceDisksFiles]
 nanosic-803.sys = 1
-
 [Strings]
 Mfg  = "dagu"
-Desc = "dagu Nanosic 803"
+Desc = "dagu Xiaomi Keyboard (Nanosic 803)"
 Disk = "dagu Nanosic"

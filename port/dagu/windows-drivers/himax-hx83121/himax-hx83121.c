@@ -150,11 +150,18 @@ typedef struct _HIMAX_EXT {
      * A small FIFO of pending IOCTL_HID_READ_REPORT IRPs. HIDCLASS keeps
      * more than one read outstanding to cut latency; the old single-slot
      * design returned STATUS_DEVICE_BUSY for the second one, which makes the
-     * HID read pump stall and shows up as touch jank. Ring drained on stop.
+     * HID read pump stall and shows up as touch jank. Drained on stop.
+     *
+     * The queue must be cancel-safe: on a D3 SET_POWER (Modern Standby,
+     * screen off) HIDCLASS cancels its outstanding reads and waits for them
+     * before passing the power IRP down. A plain ring with no cancel routine
+     * never completed them, the D3 IRP hung, and Windows bugchecked 0x9F/3
+     * with the IRP parked at dagu_himax.
      */
-    PIRP PendRing[HIMAX_PENDING_MAX];
-    ULONG PendHead;
-    ULONG PendTail;
+    IO_CSQ Csq;
+    KSPIN_LOCK CsqLock;
+    LIST_ENTRY PendList;
+    ULONG PendCount;
     BOOLEAN Down;
     BOOLEAN Run;
     ULONG Depth;
@@ -457,11 +464,62 @@ FillReport(const UCHAR *Buf, PHIMAX_REPORT Rpt, BOOLEAN *Down)
     *Down = active != 0;
 }
 
+/* ---- cancel-safe queue of pending IOCTL_HID_READ_REPORT IRPs ---- */
+#define CSQ_EXT(c) CONTAINING_RECORD((c), HIMAX_EXT, Csq)
+
+static VOID
+CsqInsert(PIO_CSQ Csq, PIRP Irp)
+{
+    PHIMAX_EXT ext = CSQ_EXT(Csq);
+
+    InsertTailList(&ext->PendList, &Irp->Tail.Overlay.ListEntry);
+    ext->PendCount++;
+}
+
+static VOID
+CsqRemove(PIO_CSQ Csq, PIRP Irp)
+{
+    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+    CSQ_EXT(Csq)->PendCount--;
+}
+
+static PIRP
+CsqPeekNext(PIO_CSQ Csq, PIRP Irp, PVOID PeekContext)
+{
+    PHIMAX_EXT ext = CSQ_EXT(Csq);
+    PLIST_ENTRY next = Irp ? Irp->Tail.Overlay.ListEntry.Flink : ext->PendList.Flink;
+
+    UNREFERENCED_PARAMETER(PeekContext);
+    return next == &ext->PendList ? NULL : CONTAINING_RECORD(next, IRP, Tail.Overlay.ListEntry);
+}
+
+_IRQL_raises_(DISPATCH_LEVEL)
+static VOID
+CsqAcquire(PIO_CSQ Csq, PKIRQL Irql)
+{
+    KeAcquireSpinLock(&CSQ_EXT(Csq)->CsqLock, Irql);
+}
+
+_IRQL_requires_(DISPATCH_LEVEL)
+static VOID
+CsqRelease(PIO_CSQ Csq, KIRQL Irql)
+{
+    KeReleaseSpinLock(&CSQ_EXT(Csq)->CsqLock, Irql);
+}
+
+static VOID
+CsqCompleteCanceled(PIO_CSQ Csq, PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(Csq);
+    Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
 static VOID
 CompleteRead(PHIMAX_EXT Ext, const HIMAX_REPORT *Rpt)
 {
     PIRP irp;
-    KIRQL irql;
     PVOID buf;
     LARGE_INTEGER now;
 
@@ -481,17 +539,9 @@ CompleteRead(PHIMAX_EXT Ext, const HIMAX_REPORT *Rpt)
     }
     Ext->LastReportQpc = now.QuadPart;
 
-    KeAcquireSpinLock(&Ext->Lock, &irql);
-    if (Ext->PendHead == Ext->PendTail) {
-        KeReleaseSpinLock(&Ext->Lock, irql);
-        return;                 /* no reader waiting; drop this frame */
-    }
-    irp = Ext->PendRing[Ext->PendHead];
-    Ext->PendRing[Ext->PendHead] = NULL;
-    Ext->PendHead = (Ext->PendHead + 1) % HIMAX_PENDING_MAX;
-    KeReleaseSpinLock(&Ext->Lock, irql);
+    irp = IoCsqRemoveNextIrp(&Ext->Csq, NULL);
     if (!irp)
-        return;
+        return;                 /* no reader waiting; drop this frame */
     buf = irp->UserBuffer;
     if (buf) {
         RtlCopyMemory(buf, Rpt, sizeof(*Rpt));
@@ -846,21 +896,10 @@ StopDevice(PHIMAX_EXT Ext)
         Ext->ThreadHandle = NULL;
         Ext->Run = FALSE;
     }
-    for (;;) {
-        KeAcquireSpinLock(&Ext->Lock, &irql);
-        if (Ext->PendHead == Ext->PendTail) {
-            KeReleaseSpinLock(&Ext->Lock, irql);
-            break;
-        }
-        irp = Ext->PendRing[Ext->PendHead];
-        Ext->PendRing[Ext->PendHead] = NULL;
-        Ext->PendHead = (Ext->PendHead + 1) % HIMAX_PENDING_MAX;
-        KeReleaseSpinLock(&Ext->Lock, irql);
-        if (irp) {
-            irp->IoStatus.Status = STATUS_DEVICE_REMOVED;
-            irp->IoStatus.Information = 0;
-            IoCompleteRequest(irp, IO_NO_INCREMENT);
-        }
+    while ((irp = IoCsqRemoveNextIrp(&Ext->Csq, NULL)) != NULL) {
+        irp->IoStatus.Status = STATUS_DEVICE_REMOVED;
+        irp->IoStatus.Information = 0;
+        IoCompleteRequest(irp, IO_NO_INCREMENT);
     }
     if (Ext->SeMap)
         MmUnmapIoSpace(Ext->SeMap, SE4_SIZE);
@@ -888,6 +927,10 @@ AddDevice(_In_ PDRIVER_OBJECT DriverObject, _In_ PDEVICE_OBJECT Fdo)
     RtlZeroMemory(ext, sizeof(*ext));
     ext->Fdo = Fdo;
     KeInitializeSpinLock(&ext->Lock);
+    KeInitializeSpinLock(&ext->CsqLock);
+    InitializeListHead(&ext->PendList);
+    IoCsqInitialize(&ext->Csq, CsqInsert, CsqRemove, CsqPeekNext,
+                    CsqAcquire, CsqRelease, CsqCompleteCanceled);
     Fdo->Flags &= ~DO_DEVICE_INITIALIZING;
     return STATUS_SUCCESS;
 }
@@ -1008,17 +1051,12 @@ InternalIoctl(_In_ PDEVICE_OBJECT Fdo, _In_ PIRP Irp)
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
-        KeAcquireSpinLock(&ext->Lock, &irql);
-        if ((ext->PendTail + 1) % HIMAX_PENDING_MAX == ext->PendHead) {
-            KeReleaseSpinLock(&ext->Lock, irql);
-            status = STATUS_DEVICE_BUSY;    /* ring full: should not happen */
+        if (ext->PendCount >= HIMAX_PENDING_MAX) {
+            status = STATUS_DEVICE_BUSY;    /* queue full: should not happen */
             break;
         }
-        IoMarkIrpPending(Irp);
-        ext->PendRing[ext->PendTail] = Irp;
-        ext->PendTail = (ext->PendTail + 1) % HIMAX_PENDING_MAX;
         ext->DiagReadIrp++;
-        KeReleaseSpinLock(&ext->Lock, irql);
+        IoCsqInsertIrp(&ext->Csq, Irp, NULL);   /* marks the IRP pending */
         return STATUS_PENDING;
     case IOCTL_HID_ACTIVATE_DEVICE:
         status = StartDevice(ext);

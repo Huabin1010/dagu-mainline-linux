@@ -117,10 +117,16 @@ typedef struct _NANO_EXT {
     BOOLEAN Run;
     /* Read IRPs waiting for a report, and reports waiting for a read IRP.
      * Keyboard key-ups must not be dropped, so reports queue when HIDCLASS
-     * has no read outstanding. */
+     * has no read outstanding.
+     * Read IRPs sit in a cancel-safe queue: on D3 (Modern Standby) HIDCLASS
+     * cancels its reads and waits for them before passing the power IRP
+     * down; an uncancelable queue hangs that IRP -> bugcheck 0x9F/3.
+     * Lock order: Lock (report ring) -> CsqLock (IRP queue). */
     KSPIN_LOCK Lock;
-    PIRP Pend[PEND_RING];
-    ULONG PendHead, PendTail;
+    IO_CSQ Csq;
+    KSPIN_LOCK CsqLock;
+    LIST_ENTRY PendList;
+    ULONG PendCount;
     RPT Ring[RPT_RING];
     ULONG RingHead, RingTail;
     /* LED output report (Caps Lock), sent by the poll thread. */
@@ -391,17 +397,67 @@ Cmd176x(PNANO_EXT X, UCHAR Op, UCHAR A, UCHAR B)
 }
 
 /* ============================ report queue ============================== */
+#define CSQ_EXT(c) CONTAINING_RECORD((c), NANO_EXT, Csq)
+
+static VOID
+CsqInsert(PIO_CSQ Csq, PIRP Irp)
+{
+    PNANO_EXT X = CSQ_EXT(Csq);
+
+    InsertTailList(&X->PendList, &Irp->Tail.Overlay.ListEntry);
+    X->PendCount++;
+}
+
+static VOID
+CsqRemove(PIO_CSQ Csq, PIRP Irp)
+{
+    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+    CSQ_EXT(Csq)->PendCount--;
+}
+
+static PIRP
+CsqPeekNext(PIO_CSQ Csq, PIRP Irp, PVOID PeekContext)
+{
+    PNANO_EXT X = CSQ_EXT(Csq);
+    PLIST_ENTRY next = Irp ? Irp->Tail.Overlay.ListEntry.Flink : X->PendList.Flink;
+
+    UNREFERENCED_PARAMETER(PeekContext);
+    return next == &X->PendList ? NULL : CONTAINING_RECORD(next, IRP, Tail.Overlay.ListEntry);
+}
+
+_IRQL_raises_(DISPATCH_LEVEL)
+static VOID
+CsqAcquire(PIO_CSQ Csq, PKIRQL Irql)
+{
+    KeAcquireSpinLock(&CSQ_EXT(Csq)->CsqLock, Irql);
+}
+
+_IRQL_requires_(DISPATCH_LEVEL)
+static VOID
+CsqRelease(PIO_CSQ Csq, KIRQL Irql)
+{
+    KeReleaseSpinLock(&CSQ_EXT(Csq)->CsqLock, Irql);
+}
+
+static VOID
+CsqCompleteCanceled(PIO_CSQ Csq, PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(Csq);
+    Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
 static VOID
 Emit(PNANO_EXT X, const UCHAR *B, UCHAR Len)
 {
     KIRQL irql;
-    PIRP irp = NULL;
+    PIRP irp;
 
     KeAcquireSpinLock(&X->Lock, &irql);
-    if (X->PendHead != X->PendTail) {
-        irp = X->Pend[X->PendHead];
-        X->Pend[X->PendHead] = NULL;
-        X->PendHead = (X->PendHead + 1) % PEND_RING;
+    irp = IoCsqRemoveNextIrp(&X->Csq, NULL);
+    if (irp) {
+        /* a reader was waiting: complete it below, outside the lock */
     } else if ((X->RingTail + 1) % RPT_RING != X->RingHead) {
         X->Ring[X->RingTail].Len = Len;
         RtlCopyMemory(X->Ring[X->RingTail].B, B, Len);
@@ -918,21 +974,14 @@ StopDevice(PNANO_EXT X)
         X->ThreadHandle = NULL;
         X->Run = FALSE;
     }
-    for (;;) {
-        KeAcquireSpinLock(&X->Lock, &irql);
-        if (X->PendHead == X->PendTail) {
-            X->RingHead = X->RingTail = 0;
-            KeReleaseSpinLock(&X->Lock, irql);
-            break;
-        }
-        irp = X->Pend[X->PendHead];
-        X->Pend[X->PendHead] = NULL;
-        X->PendHead = (X->PendHead + 1) % PEND_RING;
-        KeReleaseSpinLock(&X->Lock, irql);
+    while ((irp = IoCsqRemoveNextIrp(&X->Csq, NULL)) != NULL) {
         irp->IoStatus.Status = STATUS_DEVICE_REMOVED;
         irp->IoStatus.Information = 0;
         IoCompleteRequest(irp, IO_NO_INCREMENT);
     }
+    KeAcquireSpinLock(&X->Lock, &irql);
+    X->RingHead = X->RingTail = 0;
+    KeReleaseSpinLock(&X->Lock, irql);
     if (X->I2c) MmUnmapIoSpace(X->I2c, I2C_SIZE);
     if (X->Irq) MmUnmapIoSpace(X->Irq, IRQ_SIZE);
     X->I2c = X->Irq = NULL;
@@ -959,6 +1008,10 @@ AddDevice(_In_ PDRIVER_OBJECT Drv, _In_ PDEVICE_OBJECT Fdo)
     RtlZeroMemory(X, sizeof(*X));
     X->Fdo = Fdo;
     KeInitializeSpinLock(&X->Lock);
+    KeInitializeSpinLock(&X->CsqLock);
+    InitializeListHead(&X->PendList);
+    IoCsqInitialize(&X->Csq, CsqInsert, CsqRemove, CsqPeekNext,
+                    CsqAcquire, CsqRelease, CsqCompleteCanceled);
     Fdo->Flags &= ~DO_DEVICE_INITIALIZING;
     return STATUS_SUCCESS;
 }
@@ -1047,14 +1100,14 @@ InternalIoctl(_In_ PDEVICE_OBJECT Fdo, _In_ PIRP Irp)
             KeReleaseSpinLock(&X->Lock, irql);
             break;
         }
-        if ((X->PendTail + 1) % PEND_RING == X->PendHead) {
+        if (X->PendCount >= PEND_RING) {
             KeReleaseSpinLock(&X->Lock, irql);
             st = STATUS_DEVICE_BUSY;
             break;
         }
-        IoMarkIrpPending(Irp);
-        X->Pend[X->PendTail] = Irp;
-        X->PendTail = (X->PendTail + 1) % PEND_RING;
+        /* Insert while still holding Lock so Emit cannot queue a report in
+         * between (it would wait in the ring until the next event). */
+        IoCsqInsertIrp(&X->Csq, Irp, NULL);    /* marks the IRP pending */
         KeReleaseSpinLock(&X->Lock, irql);
         return STATUS_PENDING;
     case IOCTL_HID_WRITE_REPORT:

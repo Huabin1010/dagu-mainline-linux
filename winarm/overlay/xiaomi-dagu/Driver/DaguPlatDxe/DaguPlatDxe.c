@@ -29,6 +29,7 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiRuntimeServicesTableLib.h>
 #include <Library/UefiDriverEntryPoint.h>
+#include <Library/ArmSmcLib.h>
 
 // Target MHz per EPSS domain: 0 = A55 x4 (LUT max 1805), 1 = A77 x3 (2419),
 // 2 = A77 prime (3187). The highest LUT entry <= target is used. Below the
@@ -333,18 +334,40 @@ WriteEspFile (
 // ---- Windows -> fastboot bridge -------------------------------------------
 // Windows cannot write the Qualcomm reboot-reason cookie itself (no SPMI
 // driver in the WoA stack). Instead it drops an empty file \dagu-fastboot on
-// its ESP (over SSH: `ni X:\dagu-fastboot`, or `S:\dagu-fastboot`) and does a
-// normal restart. This runs before Windows is launched: if the flag is there,
-// delete it and cold-reset with the FASTBOOT_MODE reason, exactly like
-// QcomModulePkg RebootDevice(). ResetRuntimeDxe writes the PMIC cookie and
-// XBL/ABL comes up in fastboot. Deleting the flag first means we never loop.
-#pragma pack(1)
+// its ESP (over SSH: `break > S:\dagu-fastboot`) and does a normal restart.
+// Before Windows is launched we notice the flag, delete it (so we never loop),
+// and reboot into fastboot the way Linux qcom-pon does: write the PMIC
+// PON_SOFT_RB_SPARE cookie (bootloader magic 0x2 << GEN2 shift 1 = 0x04, mask
+// bits[7:1]=0xFE) via the PmicDxe PON protocol, then PSCI SYSTEM_RESET over
+// SMC. XBL reads that cookie and comes up in fastboot. The earlier
+// EfiResetCold+RESET_PARAM path (QcomModulePkg RebootDevice) did not work on
+// dagu -- its XBL reads the PON cookie, not the ResetRuntimeDxe reason.
+//
+// Detection and the reset are split: the filesystem notify (TPL_CALLBACK) may
+// catch the flag first, but the PMIC protocol is only known to work at the
+// TPL_APPLICATION of ReadyToBoot (WcnCensus uses it there). So detection just
+// sets mFastbootPending; TryFastbootReset() performs the PMIC write + reset
+// and simply returns if the PMIC write is not possible yet, to retry later.
+#define EFI_PMICPON_PROTOCOL_GUID \
+  { 0x97044b58, 0xfea4, 0x4ad0, { 0x9d, 0x0b, 0xe4, 0x17, 0xd6, 0x0f, 0x11, 0xa1 } }
+
+typedef enum {
+  DAGU_PON_PERPH_SPARE, DAGU_PON_DVDD_SPARE, DAGU_PON_XVDD_SPARE, DAGU_PON_SOFT_SPARE
+} DAGU_PON_SPARE_REG;
+
+typedef EFI_STATUS (EFIAPI *DAGU_PON_GET_SPARE)(UINT32, UINT32, UINT8 *);
+typedef EFI_STATUS (EFIAPI *DAGU_PON_SET_SPARE)(UINT32, UINT32, UINT8, UINT8);
+
 typedef struct {
-  CHAR16  DataBuffer[12];            // L"RESET_PARAM"
-  UINT8   Bdata;                     // reboot reason
-} DAGU_RESET_DATA;
-#pragma pack()
-#define DAGU_FASTBOOT_MODE  0x02u
+  UINT64              Revision;
+  DAGU_PON_GET_SPARE  GetSpareReg;
+  DAGU_PON_SET_SPARE  SetSpareReg;
+} DAGU_PON_PROTOCOL;
+
+STATIC EFI_GUID  mPonGuid = EFI_PMICPON_PROTOCOL_GUID;
+STATIC BOOLEAN   mFastbootPending;
+
+#define PSCI_SYSTEM_RESET  0x84000009u
 
 STATIC VOID
 CheckFastbootFlag (
@@ -356,7 +379,6 @@ CheckFastbootFlag (
   UINTN                            Count, I;
   EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
   EFI_FILE_PROTOCOL                *Root, *Probe, *Flag;
-  DAGU_RESET_DATA                  Rd;
 
   if (EFI_ERROR (gBS->LocateHandleBuffer (
                         ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles)))
@@ -386,20 +408,46 @@ CheckFastbootFlag (
     }
     Status = Flag->Delete (Flag);      // clears the handle; persists on FAT
     Root->Close (Root);
-    gBS->FreePool (Handles);
-    if (EFI_ERROR (Status)) {
-      DEBUG ((DEBUG_ERROR, "DaguPlat: fastboot flag delete %r, not resetting\n", Status));
-      return;
+    if (!EFI_ERROR (Status)) {
+      mFastbootPending = TRUE;         // actual reset is done by TryFastbootReset
+      DEBUG ((DEBUG_ERROR, "DaguPlat: fastboot flag seen, pending reset\n"));
+    } else {
+      DEBUG ((DEBUG_ERROR, "DaguPlat: fastboot flag delete %r\n", Status));
     }
-    DEBUG ((DEBUG_ERROR, "DaguPlat: fastboot flag set -> cold reset into fastboot\n"));
-    ZeroMem (&Rd, sizeof (Rd));
-    CopyMem (Rd.DataBuffer, L"RESET_PARAM", sizeof (L"RESET_PARAM"));
-    Rd.Bdata = DAGU_FASTBOOT_MODE;
-    gRT->ResetSystem (EfiResetCold, EFI_SUCCESS, sizeof (Rd), &Rd);
-    CpuDeadLoop ();                     // does not return
-    return;
+    break;
   }
   gBS->FreePool (Handles);
+}
+
+STATIC VOID
+TryFastbootReset (
+  VOID
+  )
+{
+  EFI_STATUS         Status;
+  DAGU_PON_PROTOCOL  *Pon;
+  ARM_SMC_ARGS       Smc;
+
+  if (!mFastbootPending) {
+    return;
+  }
+  Status = gBS->LocateProtocol (&mPonGuid, NULL, (VOID **)&Pon);
+  if (EFI_ERROR (Status) || (Pon->SetSpareReg == NULL)) {
+    DEBUG ((DEBUG_ERROR, "DaguPlat: PON protocol %r, defer fastboot reset\n", Status));
+    return;                            // retry from a later (safe-TPL) caller
+  }
+  // Linux qcom-pon: PON_SOFT_RB_SPARE = bootloader(0x2) << GEN2 shift(1) = 0x04.
+  Status = Pon->SetSpareReg (0, DAGU_PON_SOFT_SPARE, 0x04u, 0xFEu);
+  DEBUG ((DEBUG_ERROR, "DaguPlat: PON SetSpareReg SOFT=0x04 %r -> PSCI reset\n", Status));
+  if (EFI_ERROR (Status)) {
+    return;                            // leave pending; try again later
+  }
+  mFastbootPending = FALSE;
+  ZeroMem (&Smc, sizeof (Smc));
+  Smc.Arg0 = PSCI_SYSTEM_RESET;
+  ArmCallSmc (&Smc);                   // full SoC reset; PMIC cookie survives
+  gRT->ResetSystem (EfiResetCold, EFI_SUCCESS, 0, NULL);   // just in case
+  CpuDeadLoop ();
 }
 
 // The ESP's filesystem is connected during BDS, after this driver's DXE
@@ -415,6 +463,7 @@ OnFsNotify (
   )
 {
   CheckFastbootFlag ();
+  TryFastbootReset ();                  // may succeed here; else ReadyToBoot retries
 }
 
 STATIC VOID
@@ -425,6 +474,7 @@ OnReadyToBoot (
   )
 {
   CheckFastbootFlag ();                 // backstop: also catch it here
+  TryFastbootReset ();                  // TPL_APPLICATION: PMIC write works here
   if (mDone) {
     EpssApply (FALSE);
     return;

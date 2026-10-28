@@ -18,6 +18,7 @@
   ArmPkg/ArmPkg.dec
 
 [LibraryClasses]
+  ArmSmcLib
   BaseLib
   BaseMemoryLib
   DebugLib

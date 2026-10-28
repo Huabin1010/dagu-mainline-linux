@@ -139,8 +139,14 @@ IASL="$(command -v iasl || true)"
 [ -x "$IASL" ] || { echo "no iasl (install acpica-tools)" >&2; exit 1; }
 ASL_TMP="$(mktemp -d)"
 cp "$ASL_SRC"/*.asl "$ASL_TMP/"
-# Bisection: DSDT_ONLY="ufs Pep_lpi" keeps only those Include()s in
-# dsdt_common.asl (the set alioth/lmi/elish boot Windows with); empty = all.
+# DSDT_ONLY keeps only those Include()s in dsdt_common.asl. The default is the
+# set Windows actually boots with on dagu. The full table (DSDT_ONLY=all)
+# bugchecks Windows with ACPI_BIOS_ERROR (0xA5): it carries PEP0 and ~60 other
+# nodes (MDSS, ADSP, PMIC, SPMI, ...) whose dependencies dagu cannot satisfy.
+# A plain rebuild once silently produced that full table and bricked boot, so
+# never fall back to "all" implicitly. Add a node here only after it is tested.
+DSDT_ONLY="${DSDT_ONLY:-ufs Pep_lpi gpio himax keyboard bluetooth}"
+[ "$DSDT_ONLY" = all ] && DSDT_ONLY=""
 if [ -n "${DSDT_ONLY:-}" ]; then
 	keep="$(printf '%s\n' $DSDT_ONLY | sed 's/$/.asl/' | paste -sd'|')"
 	sed -Ei "/Include\(\"($keep)\"\)/! s|^(\s*)Include\(|\1// Include(|" "$ASL_TMP/dsdt_common.asl"

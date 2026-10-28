@@ -142,6 +142,7 @@ typedef struct _NANO_EXT {
           Touch, Vendor, Queued, Dropped, InitErr, ReadIrps, Edges, Empty,
           SeqGap, Drain;
     ULONG IntCfg;
+    ULONG TicksPerUs;
     /* Last KHIST keyboard records as [seq, mods, k1, k2] (diag). */
     UCHAR KHist[KHIST][4];
     ULONG KHistN;
@@ -167,22 +168,58 @@ Lvl(PNANO_EXT X, ULONG Off)
     return READ_REGISTER_ULONG((PULONG)(X->I2c + Off + 4)) & 1u;
 }
 
-#define HALF()  KeStallExecutionProcessor(3)
+/*
+ * Timing comes from the ARM generic timer (CNTVCT_EL0), not
+ * KeStallExecutionProcessor, whose calibration on this HAL is unknown.
+ * Half period 5 us = 100 kHz, the Linux i2c-gpio "delay-us = <5>" of this
+ * bus. Each whole transaction runs at DISPATCH_LEVEL (see Xfer*) so the
+ * scheduler cannot park the bus mid-byte.
+ */
+static ULONG64 gTicksPerUs = 19;      /* 19.2 MHz until read from CNTFRQ */
+#define HALF_US 5u
+
+static __forceinline ULONG64
+Cnt(VOID)
+{
+    ULONG64 v;
+
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+
+static VOID
+DelayUs(ULONG Us)
+{
+    ULONG64 end = Cnt() + Us * gTicksPerUs + 1;
+
+    while (Cnt() < end)
+        ;
+}
+
+#define HALF()  DelayUs(HALF_US)
+
+/* Release a line and wait (bounded) until the pull-up has taken it high,
+ * so a slow rise is never sampled as a 0. Returns FALSE if it stays low
+ * (another device is driving it: ACK, data 0, or clock stretching). */
+static BOOLEAN
+Release(PNANO_EXT X, ULONG Off, ULONG MaxUs)
+{
+    ULONG64 end;
+
+    Cfg(X, Off, FALSE);
+    if (Lvl(X, Off))
+        return TRUE;
+    end = Cnt() + MaxUs * gTicksPerUs;
+    while (Cnt() < end)
+        if (Lvl(X, Off))
+            return TRUE;
+    return FALSE;
+}
 
 static VOID SdaLo(PNANO_EXT X) { Cfg(X, SDA_OFF, TRUE); }
-static VOID SdaHi(PNANO_EXT X) { Cfg(X, SDA_OFF, FALSE); }
+static VOID SdaHi(PNANO_EXT X) { Release(X, SDA_OFF, 2); }
 static VOID SclLo(PNANO_EXT X) { Cfg(X, SCL_OFF, TRUE); }
-
-static BOOLEAN
-SclHi(PNANO_EXT X)
-{
-    ULONG n;
-
-    Cfg(X, SCL_OFF, FALSE);
-    for (n = 0; n < 1000 && !Lvl(X, SCL_OFF); n++)   /* clock stretching */
-        KeStallExecutionProcessor(1);
-    return Lvl(X, SCL_OFF) != 0;
-}
+static BOOLEAN SclHi(PNANO_EXT X) { return Release(X, SCL_OFF, 2000); } /* stretching */
 
 static VOID
 I2cInitPins(PNANO_EXT X)
@@ -289,7 +326,9 @@ NanoRead(PNANO_EXT X, UCHAR *Buf)
 {
     ULONG i;
     BOOLEAN ok;
+    KIRQL old;
 
+    KeRaiseIrql(DISPATCH_LEVEL, &old);     /* ~7 ms: no preemption mid-byte */
     I2cStart(X);
     ok = I2cPut(X, NANO_ADDR << 1) && I2cPut(X, NANO_ADDR);
     if (ok) {
@@ -300,6 +339,7 @@ NanoRead(PNANO_EXT X, UCHAR *Buf)
         for (i = 0; i < NANO_READ_LEN; i++)
             Buf[i] = I2cGet(X, i + 1 < NANO_READ_LEN);
     I2cStop(X);
+    KeLowerIrql(old);
     if (!ok)
         X->Nak++;
     return ok;
@@ -310,12 +350,15 @@ NanoWrite(PNANO_EXT X, const UCHAR *Payload, ULONG Len)
 {
     ULONG i;
     BOOLEAN ok;
+    KIRQL old;
 
+    KeRaiseIrql(DISPATCH_LEVEL, &old);
     I2cStart(X);
     ok = I2cPut(X, NANO_ADDR << 1) && I2cPut(X, NANO_ADDR);
     for (i = 0; ok && i < NANO_WRITE_LEN; i++)
         ok = I2cPut(X, i < Len ? Payload[i] : 0);
     I2cStop(X);
+    KeLowerIrql(old);
     if (!ok)
         X->Nak++;
     return ok;
@@ -634,6 +677,8 @@ WriteDiag(PNANO_EXT X)
         { " seqgap=", FIELD_OFFSET(NANO_EXT, SeqGap) },
         { " kbdempty=", FIELD_OFFSET(NANO_EXT, Empty) },
         { " intcfg=", FIELD_OFFSET(NANO_EXT, IntCfg) },
+        { " tpus=", FIELD_OFFSET(NANO_EXT, TicksPerUs) },
+        { " readerr=", FIELD_OFFSET(NANO_EXT, ReadErr) },
     };
     UNICODE_STRING name;
     OBJECT_ATTRIBUTES oa;
@@ -726,20 +771,24 @@ KeyHeld(PNANO_EXT X)
     return X->LastKbd[1] != 0 || X->LastKbd[3] != 0;
 }
 
-static VOID
+static BOOLEAN
 ReadOne(PNANO_EXT X)
 {
     UCHAR buf[NANO_READ_LEN];
+    KIRQL old;
 
     X->Reads++;
     RtlZeroMemory(buf, sizeof(buf));
     if (NanoRead(X, buf)) {
         RtlCopyMemory(X->LastPkt, buf, sizeof(X->LastPkt));
         Parse(X, buf, FALSE);
-    } else {
-        X->ReadErr++;
-        I2cRecover(X);
+        return TRUE;
     }
+    X->ReadErr++;
+    KeRaiseIrql(DISPATCH_LEVEL, &old);
+    I2cRecover(X);
+    KeLowerIrql(old);
+    return FALSE;
 }
 
 static VOID
@@ -747,9 +796,14 @@ ThreadMain(PVOID Ctx)
 {
     PNANO_EXT X = Ctx;
     LARGE_INTEGER wait;
-    ULONG idle = 0, n;
+    ULONG idle = 0, n, fails = 0, skip = 0;
     ULONG cfg;
+    ULONG64 frq;
 
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frq));
+    if (frq >= 1000000)
+        gTicksPerUs = frq / 1000000;
+    X->TicksPerUs = (ULONG)gTicksPerUs;
     ExSetTimerResolution(10000, TRUE);
     /* GPIO83: gpio, input, no pull (DT bias-disable); low = packet ready. */
     WRITE_REGISTER_ULONG((PULONG)X->Irq, 0);
@@ -780,13 +834,22 @@ ThreadMain(PVOID Ctx)
             Cmd176x(X, 0x26, 0x01, (X->LedWant & 2u) ? 1 : 0);   /* Caps Lock */
         if (LineLow(X))
             X->IrqLow++;
+        if (skip) {                       /* bus failing: back off */
+            skip--;
+            continue;
+        }
         if (EdgeLatched(X) || LineLow(X)) {
             /* Read; if another edge came in meanwhile or the line is still
              * low, the MCU has the next packet ready: drain it now. */
-            ReadOne(X);
-            for (n = 1; n < DRAIN_MAX && (EdgeLatched(X) || LineLow(X)); n++) {
-                X->Drain++;
-                ReadOne(X);
+            if (ReadOne(X)) {
+                fails = 0;
+                for (n = 1; n < DRAIN_MAX && (EdgeLatched(X) || LineLow(X)); n++) {
+                    X->Drain++;
+                    if (!ReadOne(X))
+                        break;
+                }
+            } else if (++fails >= 4) {
+                skip = 50;                /* retry in ~50 ms, do not spin */
             }
             idle = 0;
         } else if (++idle >= (KeyHeld(X) ? 25u : 200u)) {

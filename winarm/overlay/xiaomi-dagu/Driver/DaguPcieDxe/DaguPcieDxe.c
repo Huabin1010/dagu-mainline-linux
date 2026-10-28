@@ -32,6 +32,7 @@
 #include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
 #include <Library/IoLib.h>
+#include <Library/ArmLib.h>
 #include <Library/DxeServicesTableLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiDriverEntryPoint.h>
@@ -157,8 +158,9 @@ STATIC UINT32  mFail;   // first failing step, 0 = all good
 
 // Values repeated in the final summary (the only screen held long enough to
 // photograph; earlier lines scroll away).
-STATIC UINT32  mSumLnk, mSumId1, mSumScr0, mSumSmr = 0xFFFFFFFFu, mSumSmrNew = 0xFFFFFFFFu;
-STATIC UINT32  mSumBarSz, mSumMhi[4], mSumAtu0, mSumAtu1, mSumCb = 0xFFFFFFFFu, mSumSmrOk;
+STATIC UINT32  mSumLnk, mSumId1, mSumScr0, mSumSmr = 0xFFFFFFFFu;
+STATIC UINT32  mSumBarSz, mSumMhi[4], mSumAtu0, mSumAtu1, mSumSmrOk;
+STATIC UINT32  mSumCb = 0xFFFFFFFFu, mSumCbSctlr, mSumCbTtbr;
 
 // ---- helpers ---------------------------------------------------------------
 STATIC VOID
@@ -580,158 +582,175 @@ MapMmio (
 }
 
 // ---- SMMU: let PCIe0 DMA through -------------------------------------------------
-// Windows runs without an SMMU driver, but every DMA/MSI write from the
-// QCA6390 still passes the apps SMMU (SMMU-500 at 0x15000000) with stream
-// ID 0x1c00 (sm8250.dtsi pcie0 iommu-map: 0x1c00..0x1c01). With sCR0.USFCFG
-// set, an unmatched stream faults, so the MHI firmware download and MSIs
-// die and qcwlan fails MiniportInitialize (Code 10). If no stream match
-// entry covers 0x1c00, add a BYPASS S2CR for it in a free SMR slot; global
-// bypass is not changed.
+// Windows has no SMMU driver, yet every DMA/MSI write from the QCA6390 passes
+// the apps SMMU (MMU-500 @ 0x15000000) with stream IDs 0x1c00/0x1c01
+// (sm8250.dtsi pcie0 iommu-map). sCR0.USFCFG=1 faults unmatched streams, so
+// the MHI firmware download (device->host DMA) and MSIs die and qcwlan aborts
+// MiniportInitialize -> NDIS event 5006 "version incorrect" -> Code 10.
+//
+// The hypervisor (QHEE) owns the SMMU: it REVERTS global writes (confirmed:
+// sCR0.USFCFG stays 1) and S2CR type=BYPASS. It DOES allow per-stream S2CR
+// type=TRANS to a context bank -- that is how the bootloader set up UFS
+// (cb3/SID 0xE0), and our TRANS writes have stuck. So build a dedicated
+// stage-1 context bank with a 1:1 (identity) page table and point the PCIe0
+// streams at it: identity translation == effective bypass, as a legitimate
+// translating CB QHEE permits. A 512-entry L1 table (one 4 KB page, 1 GB
+// blocks) maps 0..512 GB 1:1, covering both the DMA buffers and the GICv2m
+// MSI doorbell (0x17A10000). The table lives in Reserved memory so it stays
+// valid after ExitBootServices. Register offsets per Linux arm-smmu.h.
 #define SMMU            0x15000000u
 #define SMMU_SCR0       0x000
 #define SMMU_IDR0       0x020
+#define SMMU_IDR1       0x024
 #define SMMU_SMR(n)     (0x800u + 4u * (n))
 #define SMMU_S2CR(n)    (0xC00u + 4u * (n))
 #define SMR_VALID       BIT31
-#define S2CR_BYPASS     (1u << 16)
-#define PCIE0_SID       0x1C00u
-#define PCIE0_SID_MASK  0x0001u
+#define PCIE0_SID0      0x1C00u
+#define PCIE0_SID1      0x1C01u
+#define SMMU_WIN        0xD0000u          // SMMU register window mapped by PlatformMemoryMapLib
 
 STATIC VOID
 SmmuBypassPcie0 (
   VOID
   )
 {
-  UINT32  Scr0, Idr0, N, I, Smr, Id, Mask, FreeSlot = 0xFFFFFFFFu, Hit = 0xFFFFFFFFu;
+  UINT32                Scr0, Idr0, Idr1, NSmr, NCb, I, Smr, S2, PgShift, NumPage, Used = 0;
+  UINT32                Cb = 0xFFFFFFFFu, Slot0 = 0xFFFFFFFFu, Slot1 = 0xFFFFFFFFu, Held = 0, Hit = 0xFFFFFFFFu;
+  UINTN                 CbBase, Gr1;
+  UINT64                *Tbl;
+  EFI_PHYSICAL_ADDRESS  TblPa;
+  EFI_STATUS            St;
 
   Scr0 = MmioRead32 (SMMU + SMMU_SCR0);
   Idr0 = MmioRead32 (SMMU + SMMU_IDR0);
+  Idr1 = MmioRead32 (SMMU + SMMU_IDR1);
   mSumScr0 = Scr0;
-  N = Idr0 & 0xFFu;
-  for (I = 0; I < N && I < 128; I++) {
+  NSmr     = Idr0 & 0xFFu;
+  NCb      = Idr1 & 0xFFu;
+  PgShift  = (Idr1 & BIT31) ? 16u : 12u;
+  NumPage  = 1u << (((Idr1 >> 28) & 7u) + 1u);
+
+  // Scan SMRs: note any existing 0x1c00 match, free slots, and used context banks.
+  for (I = 0; I < NSmr && I < 128; I++) {
     Smr = MmioRead32 (SMMU + SMMU_SMR (I));
     if (!(Smr & SMR_VALID)) {
-      FreeSlot = I;                         // keep the highest free slot
+      if (Slot0 == 0xFFFFFFFFu) {
+        Slot0 = I;
+      } else if (Slot1 == 0xFFFFFFFFu) {
+        Slot1 = I;
+      }
       continue;
     }
-    Id = Smr & 0x7FFFu;
-    Mask = (Smr >> 16) & 0x7FFFu;
-    if (((Id ^ PCIE0_SID) & ~Mask & 0x7FFFu) == 0 && Hit == 0xFFFFFFFFu) {
+    if ((Smr & 0x7FFFu) == PCIE0_SID0 && Hit == 0xFFFFFFFFu) {
       Hit = I;
     }
+    S2 = MmioRead32 (SMMU + SMMU_S2CR (I));
+    if (((S2 >> 16) & 3u) == 0 && (S2 & 0xFFu) < 32u) {     // TRANS -> record used CB
+      Used |= 1u << (S2 & 0xFFu);
+    }
   }
+  mSumSmr = Hit;
+
   DEBUG ((
     DEBUG_ERROR,
-    "DaguPcie: SMMU sCR0 %08x (CLIENTPD %u USFCFG %u) IDR0 %08x smrs %u, sid %x %a%u\n",
-    Scr0, Scr0 & 1u, (Scr0 >> 10) & 1u, Idr0, N, PCIE0_SID,
-    (Hit != 0xFFFFFFFFu) ? "matched by SMR " : "unmatched, free SMR ",
-    (Hit != 0xFFFFFFFFu) ? Hit : FreeSlot
+    "DaguPcie: SMMU sCR0 %08x (USFCFG %u) IDR0 %08x IDR1 %08x NSmr %u NCb %u pg %u numpage %u matchSMR %d used %08x\n",
+    Scr0, (Scr0 >> 10) & 1u, Idr0, Idr1, NSmr, NCb, PgShift, NumPage, (INT32)Hit, Used
     ));
-  mSumSmr = Hit;
+
   if (Hit != 0xFFFFFFFFu) {
-    DEBUG ((DEBUG_ERROR, "DaguPcie: SMR %u S2CR %08x (left alone)\n",
-            Hit, MmioRead32 (SMMU + SMMU_S2CR (Hit))));
+    DEBUG ((DEBUG_ERROR, "DaguPcie: 0x1c00 already matched (SMR %u), left alone\n", Hit));
     return;
   }
   if ((Scr0 & 1u) || !((Scr0 >> 10) & 1u)) {
-    DEBUG ((DEBUG_ERROR, "DaguPcie: SMMU passes unmatched streams, nothing to do\n"));
+    DEBUG ((DEBUG_ERROR, "DaguPcie: SMMU already passes unmatched streams, nothing to do\n"));
     return;
   }
-  if (FreeSlot == 0xFFFFFFFFu) {
-    DEBUG ((DEBUG_ERROR, "DaguPcie: no free SMR, PCIe DMA will fault\n"));
+
+  // Pick a free context bank (skip boot-time cb 0..7) and two free SMR slots.
+  for (I = 8; I < NCb && I < 32; I++) {
+    if (!(Used & (1u << I))) {
+      Cb = I;
+      break;
+    }
+  }
+  mSumCb = Cb;
+  if (Cb == 0xFFFFFFFFu || Slot0 == 0xFFFFFFFFu || Slot1 == 0xFFFFFFFFu) {
+    DEBUG ((DEBUG_ERROR, "DaguPcie: no free CB/SMR (cb %d s0 %d s1 %d)\n",
+            (INT32)Cb, (INT32)Slot0, (INT32)Slot1));
     return;
   }
-  // Fifth boot: S2CR type BYPASS is refused by the hypervisor in every slot
-  // (reads back 0x20000 = FAULT, SMR stays 0), and all boot-time streams
-  // (UFS 0xE0, ...) are TRANS to a context bank whose translation is off.
-  // That is the Linux arm-smmu-qcom "bypass_quirk". Do the same: point
-  // stream 0x1c00 TRANS at the context bank UFS already uses (the bootloader
-  // set it up as pass-through); if no UFS stream is found, build one the
-  // Linux way in the last context bank (SCTLR=0, CBAR S1_TRANS_S2_BYPASS).
+
+  CbBase = SMMU + (UINTN)(NumPage + Cb) * ((UINTN)1u << PgShift);
+  Gr1    = SMMU + ((UINTN)1u << PgShift);
+  if ((CbBase + 0x1000u) > (SMMU + SMMU_WIN)) {
+    DEBUG ((DEBUG_ERROR, "DaguPcie: CB %u page %lx outside mapped window, abort\n", Cb, (UINT64)CbBase));
+    return;
+  }
+
+  // 512-entry identity L1 table (VA==PA, 1 GB blocks over 0..512 GB). Reserved
+  // memory so the SMMU table walker still sees it after Windows takes over.
+  St = gBS->AllocatePages (AllocateAnyPages, EfiReservedMemoryType, 1, &TblPa);
+  if (EFI_ERROR (St)) {
+    DEBUG ((DEBUG_ERROR, "DaguPcie: AllocatePages %r\n", St));
+    return;
+  }
+  Tbl = (UINT64 *)(UINTN)TblPa;
+  for (I = 0; I < 512; I++) {
+    // block[1:0]=01, AP=00 (RW), SH=11 (IS), AF=1. 0..2 GB is MMIO on SM8250
+    // (GICv2m MSI doorbell 0x17A10000): AttrIndx=2 Device-nGnRE -> 0x709.
+    // DDR from 0x80000000: AttrIndx=0 Normal WB -> 0x701.
+    Tbl[I] = ((UINT64)I << 30) | ((I < 2) ? 0x709u : 0x701u);
+  }
+  ArmDataSynchronizationBarrier ();
+
+  // Program the context bank: stage-1 AArch64, stage-2 bypass (offsets: Linux
+  // arm-smmu.h CB_SCTLR 0x0, TCR2 0x10, TTBR0 0x20, TCR 0x30, MAIR0 0x38,
+  // FSR 0x58; GR1 CBAR 0x0+4n, CBA2R 0x800+4n).
+  MmioWrite32 (Gr1 + 0x800u + 4u * Cb, 0x1u);              // CBA2R: VA64=1 (AArch64)
+  MmioWrite32 (Gr1 + 0x000u + 4u * Cb, 1u << 16);          // CBAR: TYPE=S1_TRANS_S2_BYPASS, VMID 0
+  MmioWrite32 (CbBase + 0x10u, 0x00038002u);              // TCR2: SEP=upstream, PASize=40-bit
+  MmioWrite32 (CbBase + 0x30u, 0x00803519u);              // TCR: T0SZ=25,IRGN/ORGN=WB,SH=IS,TG0=4K,EPD1
+  MmioWrite32 (CbBase + 0x38u, 0x000444FFu);              // MAIR0: attr0 WB, attr1 NC, attr2 Device
+  MmioWrite32 (CbBase + 0x3Cu, 0x0u);                     // MAIR1
+  MmioWrite32 (CbBase + 0x20u, (UINT32)TblPa);            // TTBR0 low
+  MmioWrite32 (CbBase + 0x24u, (UINT32)(TblPa >> 32));    // TTBR0 high
+  MmioWrite32 (CbBase + 0x58u, MmioRead32 (CbBase + 0x58u)); // FSR: write-1-to-clear
+  MmioWrite32 (CbBase + 0x00u, 0x00000067u);              // SCTLR: CFIE|CFRE|AFE|TRE|M (enable)
+
+  // Route PCIe0 streams to the new CB (TRANS), S2CR then SMR per Linux write_sme.
+  MmioWrite32 (SMMU + SMMU_S2CR (Slot0), Cb);             // TYPE=TRANS, CBNDX=Cb
+  MmioWrite32 (SMMU + SMMU_SMR (Slot0), SMR_VALID | PCIE0_SID0);
+  MmioWrite32 (SMMU + SMMU_S2CR (Slot1), Cb);
+  MmioWrite32 (SMMU + SMMU_SMR (Slot1), SMR_VALID | PCIE0_SID1);
+
+  // Invalidate TLBs and sync.
+  MmioWrite32 (SMMU + 0x68u, 0);                           // TLBIALLNSNH
+  MmioWrite32 (SMMU + 0x6Cu, 0);                           // TLBIALLH
+  MmioWrite32 (SMMU + 0x70u, 0);                           // TLBGSYNC
+  for (I = 0; I < 1000 && (MmioRead32 (SMMU + 0x74u) & 1u); I++) {
+    StallUs (1);
+  }
+  ArmDataSynchronizationBarrier ();
+
+  // Read back: did the CB programming and stream routing stick (vs QHEE revert)?
+  mSumCbSctlr = MmioRead32 (CbBase + 0x00u);
+  mSumCbTtbr  = MmioRead32 (CbBase + 0x20u);
+  if ((MmioRead32 (SMMU + SMMU_SMR (Slot0)) == (SMR_VALID | PCIE0_SID0)) &&
+      ((MmioRead32 (SMMU + SMMU_S2CR (Slot0)) & 0x300FFu) == Cb))
   {
-    UINT32  Want = SMR_VALID | (PCIE0_SID_MASK << 16) | PCIE0_SID;
-    UINT32  Cb = 0xFFFFFFFFu, Src = 0xFFFFFFFFu, Id1, PgShift, NumPage, NumCb, S2;
-
-    for (I = 0; I < N && I < 128; I++) {
-      Smr = MmioRead32 (SMMU + SMMU_SMR (I));
-      S2 = MmioRead32 (SMMU + SMMU_S2CR (I));
-      if ((Smr & SMR_VALID) && (Smr & 0x7FFFu) == 0xE0u && ((S2 >> 16) & 3u) == 0) {
-        Cb = S2 & 0xFFu;                       // UFS context bank
-        Src = I;
-        break;
-      }
-    }
-    if (Cb == 0xFFFFFFFFu) {
-      Id1 = MmioRead32 (SMMU + 0x24);
-      PgShift = (Id1 & BIT31) ? 16 : 12;
-      NumPage = 1u << (((Id1 >> 28) & 7u) + 1);
-      NumCb = Id1 & 0xFFu;
-      Cb = NumCb - 1;
-      MmioWrite32 (SMMU + ((NumPage + Cb) << PgShift) + 0x0, 0);          // CB SCTLR: MMU off
-      MmioWrite32 (SMMU + (1u << PgShift) + 4u * Cb, 1u << 16);           // GR1 CBAR: S1_TRANS_S2_BYPASS
-      DEBUG ((
-        DEBUG_ERROR, "DaguPcie: no UFS stream, quirk CB %u (ID1 %08x) CBAR %08x\n",
-        Cb, Id1, MmioRead32 (SMMU + (1u << PgShift) + 4u * Cb)
-        ));
-    } else {
-      DEBUG ((DEBUG_ERROR, "DaguPcie: reuse UFS context bank %u (SMR %u)\n", Cb, Src));
-    }
-    // Sixth boot: S2CR (TRANS, cb 3) stuck, but the masked SMR 0x80011C00
-    // read back 0. Do exactly what Linux arm_smmu_write_sme() does for the
-    // pcie0 iommu-map (two single SIDs, mask 0): S2CR then SMR per stream,
-    // then the arm_smmu_device_reset tail: clear sGFSR, TLBIALLNSNH,
-    // TLBGSYNC, rewrite sCR0 (an emulating hypervisor may commit there).
-    (VOID)Want;
-    mSumSmrNew = 0xFFFFFFFEu;
-    {
-      STATIC CONST UINT32  Sids[2] = { 0x1C00u, 0x1C01u };
-      UINT32               K, Slot[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu }, Ok = 0, T;
-
-      I = 0;
-      for (K = 0; K < 2; K++) {
-        for (; I < N && I < 128; I++) {
-          if (!(MmioRead32 (SMMU + SMMU_SMR (I)) & SMR_VALID)) {
-            break;
-          }
-        }
-        if (I >= N || I >= 128) {
-          break;
-        }
-        Slot[K] = I;
-        MmioWrite32 (SMMU + SMMU_S2CR (I), Cb);              // TRANS -> cb, PRIVCFG default
-        MmioWrite32 (SMMU + SMMU_SMR (I), SMR_VALID | Sids[K]);
-        I++;
-      }
-      MmioWrite32 (SMMU + 0x48, MmioRead32 (SMMU + 0x48));   // sGFSR: write-1-to-clear
-      MmioWrite32 (SMMU + 0x6C, 0);                           // TLBIALLNSNH
-      MmioWrite32 (SMMU + 0x70, 0);                           // TLBGSYNC
-      for (T = 0; T < 1000 && (MmioRead32 (SMMU + 0x74) & 1u); T++) {   // sTLBGSTATUS.GSACTIVE
-        StallUs (1);
-      }
-      MmioWrite32 (SMMU + SMMU_SCR0, Scr0);                   // same value: commit
-      for (K = 0; K < 2; K++) {
-        if (Slot[K] == 0xFFFFFFFFu) {
-          continue;
-        }
-        Smr = MmioRead32 (SMMU + SMMU_SMR (Slot[K]));
-        S2 = MmioRead32 (SMMU + SMMU_S2CR (Slot[K]));
-        DEBUG ((
-          DEBUG_ERROR, "DaguPcie: SID %x -> SMR %u: SMR %08x S2CR %08x\n",
-          Sids[K], Slot[K], Smr, S2
-          ));
-        if (Smr == (SMR_VALID | Sids[K]) && (S2 & 0x300FFu) == Cb) {
-          Ok++;
-          if (mSumSmrNew == 0xFFFFFFFEu) {
-            mSumSmrNew = Slot[K];
-          }
-        }
-      }
-      mSumSmrOk = Ok;
-      DEBUG ((DEBUG_ERROR, "DaguPcie: %u/2 PCIe0 stream entries held, sCR0 now %08x\n",
-              Ok, MmioRead32 (SMMU + SMMU_SCR0)));
-    }
-    mSumCb = Cb;
+    Held++;
   }
+  if ((MmioRead32 (SMMU + SMMU_SMR (Slot1)) == (SMR_VALID | PCIE0_SID1)) &&
+      ((MmioRead32 (SMMU + SMMU_S2CR (Slot1)) & 0x300FFu) == Cb))
+  {
+    Held++;
+  }
+  mSumSmrOk = Held;
+  DEBUG ((
+    DEBUG_ERROR,
+    "DaguPcie: identity CB %u @%lx SCTLR %08x TTBR0 %08x tbl %lx; SIDs->SMR %u/%u, %u/2 held\n",
+    Cb, (UINT64)CbBase, mSumCbSctlr, mSumCbTtbr, (UINT64)TblPa, Slot0, Slot1, Held
+    ));
 }
 
 // Show how existing streams (UFS works) are passed through: valid SMRs whose
@@ -802,7 +821,14 @@ ProbeBar0 (
   )
 {
   UINTN   Cfg = CFG_WIN;
-  UINT32  Lo, Hi, Sz, Base;
+  UINT32  Lo, Hi, Sz, Base, RpCmd, RpWin;
+
+  // Root-port command + memory window are restored at the end. Leaving the
+  // window at 0x60200000-0x63FFFFFF made Windows take it as the bridge's boot
+  // config: it then claimed all of PCI0's _CRS, the root port's own 4 KB BAR
+  // had no room -> root port Code 12, Wi-Fi never enumerated.
+  RpCmd = MmioRead32 (DBI + 0x04);
+  RpWin = MmioRead32 (DBI + 0x20);
 
   MmioWrite32 (Cfg + 0x10, 0xFFFFFFFFu);
   Lo = MmioRead32 (Cfg + 0x10);
@@ -832,10 +858,14 @@ ProbeBar0 (
     DEBUG_ERROR, "DaguPcie: BAR0 %08x size %x @%08x: MHIREGLEN %08x MHIVER %08x MHICFG %08x BHIOFF %08x\n",
     Lo, Sz, Base, mSumMhi[0], mSumMhi[1], mSumMhi[2], mSumMhi[3]
     ));
-  // Hand the device back unconfigured.
+  // Hand the device and the root port back unconfigured.
   MmioWrite32 (Cfg + 0x04, Hi & 0xFFFF0000u);
   MmioWrite32 (Cfg + 0x10, 0);
   MmioWrite32 (Cfg + 0x14, 0);
+  MmioWrite32 (DBI + 0x04, RpCmd);
+  MmioWrite32 (DBI + 0x20, RpWin);
+  DEBUG ((DEBUG_ERROR, "DaguPcie: root port restored: cmd %08x win %08x\n",
+          MmioRead32 (DBI + 0x04), MmioRead32 (DBI + 0x20)));
 }
 
 #pragma pack(1)
@@ -909,10 +939,10 @@ DaguPcieDxeInitialize (
     DEBUG_ERROR,
     "\n=== SUMMARY  link %a  dev %08x  atu0 %08x atu1 %08x\n"
     "=== BAR0 size %x  MHIREGLEN %08x MHIVER %08x MHICFG %08x BHIOFF %08x\n"
-    "=== SMMU sCR0 %08x (CLIENTPD %u USFCFG %u)  SMR hit %d new %d  cb %d  held %u/2\n",
+    "=== SMMU sCR0 %08x USFCFG %u  identity CB %d SCTLR %08x TTBR0 %08x  streams %u/2 held\n",
     mSumLnk ? "UP" : "DOWN", mSumId1, mSumAtu0, mSumAtu1,
     mSumBarSz, mSumMhi[0], mSumMhi[1], mSumMhi[2], mSumMhi[3],
-    mSumScr0, mSumScr0 & 1u, (mSumScr0 >> 10) & 1u, (INT32)mSumSmr, (INT32)mSumSmrNew, (INT32)mSumCb, mSumSmrOk
+    mSumScr0, (mSumScr0 >> 10) & 1u, (INT32)mSumCb, mSumCbSctlr, mSumCbTtbr, mSumSmrOk
     ));
   if (Up) {
     SmmuDumpBypass ();

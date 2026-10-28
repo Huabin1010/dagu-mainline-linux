@@ -41,6 +41,19 @@
 #define SCL_OFF         0x1000u
 #define IRQ_PHYS        0x0F953000ULL   /* gpio83 */
 #define IRQ_SIZE        0x1000u
+/* TLMM per-pin interrupt block (pinctrl-sm8250.c / pinctrl-msm.c):
+ * +0x8 INTR_CFG: bit0 enable (to the GIC), bit1 polarity, bits3:2 detection
+ * (2 = edge), bit4 RAW_STATUS (latch into STATUS even when not enabled),
+ * bits7:5 target. +0xC INTR_STATUS bit0, cleared by writing 0. Falling edge
+ * = detection 2 + polarity 1. Enable stays 0: nothing is routed to Windows'
+ * GIC, the latch is only polled. */
+#define INTR_CFG        0x8u
+#define INTR_STATUS     0xCu
+#define INTR_EN         (1u << 0)
+#define INTR_POL        (1u << 1)
+#define INTR_DET_MASK   (3u << 2)
+#define INTR_DET_EDGE   (2u << 2)
+#define INTR_RAW        (1u << 4)
 #define CFG_PULLUP      3u
 #define CFG_OE          (1u << 9)
 
@@ -60,6 +73,8 @@
 #define RPT_MAX         9
 #define RPT_RING        32
 #define PEND_RING       16
+#define KHIST           32              /* keyboard record history (diag) */
+#define DRAIN_MAX       4               /* back-to-back reads per wakeup */
 
 /* ---- report descriptor: the MCU's own (live Android dump, VID 15d9) ---- */
 static const UCHAR gReportDesc[] = {
@@ -124,7 +139,12 @@ typedef struct _NANO_EXT {
     UCHAR TpBtn;
     /* Diagnostics (\SystemRoot\nanosic-diag.txt when NanosicDiag=1). */
     ULONG Iter, IrqLow, Reads, ReadErr, Nak, Sync, Stale, Kbd, Cons, Mouse,
-          Touch, Vendor, Queued, Dropped, InitErr, ReadIrps;
+          Touch, Vendor, Queued, Dropped, InitErr, ReadIrps, Edges, Empty,
+          SeqGap, Drain;
+    ULONG IntCfg;
+    /* Last KHIST keyboard records as [seq, mods, k1, k2] (diag). */
+    UCHAR KHist[KHIST][4];
+    ULONG KHistN;
     UCHAR Version[21];
     UCHAR Hall;
     UCHAR LastPkt[24];
@@ -480,10 +500,21 @@ Parse(PNANO_EXT X, const UCHAR *D, BOOLEAN HostCmd)
     if (len != 0x39 && len != 0x4a && len != 0x5b && len != 0x6c)
         return;
     if (!HostCmd) {
-        if (X->HaveSeq && (CHAR)(D[1] - X->LastSeq) <= 0) {
-            X->Stale++;                     /* replayed packet */
+        /*
+         * Only an exact replay (re-reading the same MCU buffer) is stale.
+         * The MCU numbers every packet, keepalives included, so the counter
+         * can jump forward by any amount between two reads. The old
+         * "(CHAR)(seq - last) <= 0" test called every jump of more than 127
+         * stale and then dropped every packet after it -- key-ups and
+         * modifier changes included -- until the counter wrapped: keys
+         * auto-repeated and Win/Ctrl/Alt chords broke.
+         */
+        if (X->HaveSeq && D[1] == X->LastSeq) {
+            X->Stale++;
             return;
         }
+        if (X->HaveSeq && (UCHAR)(D[1] - X->LastSeq) != 1)
+            X->SeqGap++;
         X->LastSeq = D[1];
         X->HaveSeq = TRUE;
     }
@@ -504,16 +535,35 @@ Parse(PNANO_EXT X, const UCHAR *D, BOOLEAN HostCmd)
             Vendor(X, p, n);
         } else if (!HostCmd) {
             switch (t) {
-            case T_KBD:
+            case T_KBD: {
+                UCHAR *h = X->KHist[X->KHistN++ % KHIST];
+
+                h[0] = D[1]; h[1] = p[1]; h[2] = p[3]; h[3] = p[4];
                 /* All six slots 0x01 = ErrorRollOver: keep current keys. */
                 for (i = 3; i < 9 && p[i] == 0x01; i++)
                     ;
-                if (i < 9 && RtlCompareMemory(p, X->LastKbd, 9) != 9) {
-                    RtlCopyMemory(X->LastKbd, p, 9);
-                    X->Kbd++;
-                    Emit(X, p, 9);
+                if (i == 9)
+                    break;
+                /* The record is the whole keyboard state (boot protocol), so
+                 * forwarding the newest one always resyncs Windows. Byte 2
+                 * is reserved; do not let it hide a change or fake one. */
+                if (p[1] == X->LastKbd[1] &&
+                    RtlCompareMemory(p + 3, X->LastKbd + 3, 6) == 6)
+                    break;
+                RtlCopyMemory(X->LastKbd, p, 9);
+                X->LastKbd[2] = 0;
+                X->Kbd++;
+                {
+                    UCHAR k[9];
+
+                    RtlCopyMemory(k, p, 9);
+                    k[2] = 0;
+                    Emit(X, k, 9);
                 }
+                if (!p[1] && !p[3])
+                    X->Empty++;
                 break;
+            }
             case T_CONS: {
                 UCHAR c[3] = { T_CONS, p[1], p[2] };   /* 16-bit usage */
                 X->Cons++;
@@ -579,15 +629,20 @@ WriteDiag(PNANO_EXT X)
         { " dropped=", FIELD_OFFSET(NANO_EXT, Dropped) },
         { " initerr=", FIELD_OFFSET(NANO_EXT, InitErr) },
         { " readirp=", FIELD_OFFSET(NANO_EXT, ReadIrps) },
+        { " edges=", FIELD_OFFSET(NANO_EXT, Edges) },
+        { " drain=", FIELD_OFFSET(NANO_EXT, Drain) },
+        { " seqgap=", FIELD_OFFSET(NANO_EXT, SeqGap) },
+        { " kbdempty=", FIELD_OFFSET(NANO_EXT, Empty) },
+        { " intcfg=", FIELD_OFFSET(NANO_EXT, IntCfg) },
     };
     UNICODE_STRING name;
     OBJECT_ATTRIBUTES oa;
     IO_STATUS_BLOCK iosb;
     HANDLE h;
-    char buf[512], *p = buf, *e = buf + sizeof(buf);
-    ULONG i;
+    char buf[1024], *p = buf, *e = buf + sizeof(buf);
+    ULONG i, j, n;
 
-    AppS(&p, e, "nanosic diag v1\n");
+    AppS(&p, e, "nanosic diag v2\n");
     for (i = 0; i < ARRAYSIZE(f); i++) {
         AppS(&p, e, f[i].N);
         AppU(&p, e, *(PULONG)((PUCHAR)X + f[i].O));
@@ -600,6 +655,16 @@ WriteDiag(PNANO_EXT X)
     AppS(&p, e, "\n last=");
     for (i = 0; i < sizeof(X->LastPkt); i++)
         AppX(&p, e, X->LastPkt[i]);
+    /* Keyboard records, oldest first: seq mods k1 k2 | ... */
+    AppS(&p, e, "\n khist=");
+    n = X->KHistN < KHIST ? X->KHistN : KHIST;
+    for (i = 0; i < n; i++) {
+        const UCHAR *h = X->KHist[(X->KHistN - n + i) % KHIST];
+
+        for (j = 0; j < 4; j++)
+            AppX(&p, e, h[j]);
+        AppS(&p, e, "| ");
+    }
     AppS(&p, e, "\n");
 
     RtlInitUnicodeString(&name, L"\\SystemRoot\\nanosic-diag.txt");
@@ -638,46 +703,102 @@ InitMcu(PNANO_EXT X)
     }
 }
 
+/* GPIO83 falling edge since the last call? Reads and clears the TLMM latch. */
+static BOOLEAN
+EdgeLatched(PNANO_EXT X)
+{
+    if (!(READ_REGISTER_ULONG((PULONG)(X->Irq + INTR_STATUS)) & 1u))
+        return FALSE;
+    WRITE_REGISTER_ULONG((PULONG)(X->Irq + INTR_STATUS), 0);
+    X->Edges++;
+    return TRUE;
+}
+
+static BOOLEAN
+LineLow(PNANO_EXT X)
+{
+    return (READ_REGISTER_ULONG((PULONG)(X->Irq + 4)) & 1u) == 0;
+}
+
+static BOOLEAN
+KeyHeld(PNANO_EXT X)
+{
+    return X->LastKbd[1] != 0 || X->LastKbd[3] != 0;
+}
+
+static VOID
+ReadOne(PNANO_EXT X)
+{
+    UCHAR buf[NANO_READ_LEN];
+
+    X->Reads++;
+    RtlZeroMemory(buf, sizeof(buf));
+    if (NanoRead(X, buf)) {
+        RtlCopyMemory(X->LastPkt, buf, sizeof(X->LastPkt));
+        Parse(X, buf, FALSE);
+    } else {
+        X->ReadErr++;
+        I2cRecover(X);
+    }
+}
+
 static VOID
 ThreadMain(PVOID Ctx)
 {
     PNANO_EXT X = Ctx;
     LARGE_INTEGER wait;
-    UCHAR buf[NANO_READ_LEN];
-    ULONG sinceRead = 0;
-    BOOLEAN pending;
+    ULONG idle = 0, n;
+    ULONG cfg;
 
     ExSetTimerResolution(10000, TRUE);
     /* GPIO83: gpio, input, no pull (DT bias-disable); low = packet ready. */
     WRITE_REGISTER_ULONG((PULONG)X->Irq, 0);
+    /*
+     * The MCU signals each packet with a falling edge on GPIO83 (Linux:
+     * IRQ_TYPE_EDGE_FALLING). Sampling the level every few ms misses short
+     * pulses, and a missed key-up packet leaves the key down in Windows,
+     * which then auto-repeats it. Let the TLMM latch the edge instead:
+     * falling-edge detection with RAW_STATUS on and the GIC enable off, so
+     * INTR_STATUS records every edge and nothing is delivered to Windows.
+     */
+    cfg = READ_REGISTER_ULONG((PULONG)(X->Irq + INTR_CFG));
+    cfg &= ~(INTR_EN | INTR_DET_MASK | INTR_POL);
+    cfg |= INTR_RAW | INTR_DET_EDGE | INTR_POL;
+    WRITE_REGISTER_ULONG((PULONG)(X->Irq + INTR_CFG), cfg);
+    X->IntCfg = READ_REGISTER_ULONG((PULONG)(X->Irq + INTR_CFG));
+    WRITE_REGISTER_ULONG((PULONG)(X->Irq + INTR_STATUS), 0);
+
     InitMcu(X);
+    EdgeLatched(X);                   /* edges from the init replies */
     if (gDiag)
         WriteDiag(X);
 
-    wait.QuadPart = -2 * 10000;                       /* 2 ms */
+    wait.QuadPart = -1 * 10000;       /* 1 ms */
     while (KeWaitForSingleObject(&X->Stop, Executive, KernelMode, FALSE, &wait) == STATUS_TIMEOUT) {
         X->Iter++;
         if (InterlockedExchange(&X->LedPending, 0))
             Cmd176x(X, 0x26, 0x01, (X->LedWant & 2u) ? 1 : 0);   /* Caps Lock */
-        pending = (READ_REGISTER_ULONG((PULONG)(X->Irq + 4)) & 1u) == 0;
-        if (pending)
+        if (LineLow(X))
             X->IrqLow++;
-        /* Read when the data line says so. If it has never gone low (pin not
-         * readable here), fall back to a 40 ms poll; stale packets are
-         * rejected by sequence number. */
-        if (pending || (X->IrqLow == 0 && ++sinceRead >= 20)) {
-            sinceRead = 0;
-            X->Reads++;
-            RtlZeroMemory(buf, sizeof(buf));
-            if (NanoRead(X, buf)) {
-                RtlCopyMemory(X->LastPkt, buf, sizeof(X->LastPkt));
-                Parse(X, buf, FALSE);
-            } else {
-                X->ReadErr++;
-                I2cRecover(X);
+        if (EdgeLatched(X) || LineLow(X)) {
+            /* Read; if another edge came in meanwhile or the line is still
+             * low, the MCU has the next packet ready: drain it now. */
+            ReadOne(X);
+            for (n = 1; n < DRAIN_MAX && (EdgeLatched(X) || LineLow(X)); n++) {
+                X->Drain++;
+                ReadOne(X);
             }
+            idle = 0;
+        } else if (++idle >= (KeyHeld(X) ? 25u : 200u)) {
+            /*
+             * Safety read: every 25 ms while a key or modifier is down,
+             * every 200 ms otherwise. An exact replay is dropped by Parse;
+             * a newer packet (the lost key-up) resyncs the keyboard state.
+             */
+            ReadOne(X);
+            idle = 0;
         }
-        if (gDiag && (X->Iter & 1023) == 0)
+        if (gDiag && (X->Iter & 2047) == 0)
             WriteDiag(X);
     }
     ExSetTimerResolution(0, FALSE);

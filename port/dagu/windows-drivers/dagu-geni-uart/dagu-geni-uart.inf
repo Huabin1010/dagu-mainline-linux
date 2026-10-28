@@ -9,8 +9,10 @@
 ;
 ; Self-contained KMDF + SerCx2 driver; no Qualcomm PEP, no GPI DMA. The .sys
 ; carries an embedded Authenticode test signature (tools/winarm/sign-driver.sh).
-; For online install (pnputil) a test-signed catalog is needed; build it with
-; tools/winarm/make-driver-cat.sh. Offline (WinPE DISM /ForceUnsigned) it is not.
+; For online install (pnputil) a test-signed catalog is needed: run
+; New-FileCatalog -CatalogVersion 2.0 on the tablet over a dir holding only the
+; .inf and .sys, then sign the .cat with osslsigncode and the keys in
+; tools/winarm/signing/. Offline (WinPE DISM /ForceUnsigned) it is not needed.
 [Version]
 Signature   = "$WINDOWS NT$"
 Class       = Ports

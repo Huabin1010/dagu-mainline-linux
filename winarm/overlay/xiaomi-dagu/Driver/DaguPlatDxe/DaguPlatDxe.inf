@@ -1,0 +1,37 @@
+## @file
+#  dagu: CPU EPSS performance level for Windows + boot census to the ESP.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = DaguPlatDxe
+  FILE_GUID                      = 5e1c7a3d-92b4-4d6f-8a10-3c7f2e9b6d41
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = DaguPlatDxeInitialize
+
+[Sources.common]
+  DaguPlatDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  ArmPkg/ArmPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  IoLib
+  PrintLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Guids]
+  gEfiEventReadyToBootGuid
+  gEfiEventExitBootServicesGuid
+
+[Protocols]
+  gEfiSimpleFileSystemProtocolGuid
+
+[Depex]
+  TRUE

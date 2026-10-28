@@ -82,14 +82,6 @@ for i in range(0, len(data), 16):
     out.write("  " + ", ".join("0x%02x" % b for b in chunk) + ",\n")
 out.close()
 PY
-# DAGU_WCN_PROBE=1: one-off probe build that dumps the QCA6390 rail state on
-# screen + PStore and holds 90 s (DaguQupDxe ProbeWcnPower).
-if [ "${DAGU_WCN_PROBE:-0}" = 1 ]; then
-	sed -i 's/^#define DAGU_WCN_PROBE  0$/#define DAGU_WCN_PROBE  1/' "$DEV/xiaomi-dagu/Driver/DaguQupDxe/DaguQupDxe.c"
-	grep -q '^#define DAGU_WCN_PROBE  1$' "$DEV/xiaomi-dagu/Driver/DaguQupDxe/DaguQupDxe.c" || \
-		{ echo "DAGU_WCN_PROBE patch failed" >&2; exit 1; }
-	echo "==> DaguQupDxe: WCN power probe ON"
-fi
 grep -q DaguQupDxe "$DEV/xiaomi-dagu/DXE.inc" || \
 	sed -i "s|^\(\s*\)INF .*DaguBacklightDxe.inf|&\n\1INF $QUP_INF|" "$DEV/xiaomi-dagu/DXE.inc"
 grep -q DaguQupDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
@@ -100,6 +92,15 @@ grep -q DaguWdtProbeDxe "$DEV/xiaomi-dagu/DXE.inc" || \
 	sed -i "s|^\(\s*\)INF .*DaguQupDxe.inf|&\n\1INF $WDT_INF|" "$DEV/xiaomi-dagu/DXE.inc"
 grep -q DaguWdtProbeDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
 	sed -i "s|^\(\s*\).*DaguQupDxe.inf|&\n\1$WDT_INF|" "$DEV/xiaomi-dagu/DXE.dsc.inc"
+# CPU EPSS performance level for Windows (no PEP, no _CPC) + boot census
+# (EPSS, QCA6390 rails) written to \dagu-uefi-diag.txt on the ESP.
+PLAT_INF='$(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Driver/DaguPlatDxe/DaguPlatDxe.inf'
+grep -q DaguPlatDxe "$DEV/xiaomi-dagu/DXE.inc" || \
+	sed -i "s|^\(\s*\)INF .*DaguWdtProbeDxe.inf|&\n\1INF $PLAT_INF|" "$DEV/xiaomi-dagu/DXE.inc"
+grep -q DaguPlatDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
+	sed -i "s|^\(\s*\).*DaguWdtProbeDxe.inf|&\n\1$PLAT_INF|" "$DEV/xiaomi-dagu/DXE.dsc.inc"
+grep -q DaguPlatDxe "$DEV/xiaomi-dagu/DXE.inc" && grep -q DaguPlatDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
+	{ echo "DaguPlatDxe not registered" >&2; exit 1; }
 # DSDT: pipa ships a 0-byte DSDT.aml. AcpiPlatformDxe then reads the table
 # Length from an empty RAW section (garbage), asserts Size >= TableSize, and
 # AcpiPlatformChecksum walks off the end of mapped DDR (data abort at

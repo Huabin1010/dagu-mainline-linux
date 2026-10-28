@@ -90,67 +90,6 @@ struct _EFI_CLOCK_PROTOCOL {
 
 STATIC EFI_GUID  mClockProtocolGuid = EFI_CLOCK_PROTOCOL_GUID;
 
-// PMIC voltage-regulator protocol from edk2-msm EFIPmicVreg.h. Inlined for the
-// same reason as the clock protocol: QcomPkg is not on the Mu package path.
-// Consumed by this firmware's own UFSDxe/UsbConfigDxe, so it is published at
-// runtime. Used read-only here to learn which QCA6390 (Wi-Fi/BT) rails XBL
-// already left on and how the PMIC device index / LDO-SMPS id map, before any
-// enable sequence is written. Layout must match the binary vtable exactly.
-#define EFI_PMICVREG_PROTOCOL_GUID \
-  { 0x22d38d3d, 0xe8b6, 0x4f8f, { 0x9c, 0x26, 0xbc, 0xeb, 0x07, 0xd6, 0xcb, 0x68 } }
-
-typedef enum { EFI_PM_OFF, EFI_PM_ON, EFI_PM_INVALID } EFI_PM_ON_OFF_TYPE;
-typedef enum {
-  EFI_PM_PWR_SW_MODE_PFM = 0, EFI_PM_PWR_SW_MODE_BYPASS = 1,
-  EFI_PM_PWR_SW_MODE_AUTO = 2, EFI_PM_PWR_SW_MODE_NPM = 4,
-  EFI_PM_PWR_SW_MODE_INVALID
-} EFI_PM_PWR_SW_MODE_TYPE;
-
-typedef struct {
-  EFI_PM_ON_OFF_TYPE      PullDown;
-  EFI_PM_PWR_SW_MODE_TYPE SwMode;
-  EFI_PM_ON_OFF_TYPE      PinCtrled;
-  EFI_PM_ON_OFF_TYPE      SwEnable;
-  BOOLEAN                 VregOk;
-} EFI_PM_VREG_STATUS_TYPE;
-
-typedef struct _EFI_QCOM_PMIC_VREG_PROTOCOL EFI_QCOM_PMIC_VREG_PROTOCOL;
-
-typedef EFI_STATUS (EFIAPI *EFI_PM_VREG_CONTROL)(UINT32, UINT32, BOOLEAN);
-typedef EFI_STATUS (EFIAPI *EFI_PM_VREG_SET_LEVEL)(UINT32, UINT32, UINT32);
-typedef EFI_STATUS (EFIAPI *EFI_PM_VREG_GET_LEVEL)(UINT32, UINT32, UINT32 *);
-typedef EFI_STATUS (EFIAPI *EFI_PM_VREG_SET_PWR_MODE)(UINT32, UINT32, EFI_PM_PWR_SW_MODE_TYPE);
-typedef EFI_STATUS (EFIAPI *EFI_PM_VREG_MULTIPHASE_CTRL)(UINT32, UINT32, UINT32);
-typedef EFI_STATUS (EFIAPI *EFI_PM_VREG_GET_STATUS)(UINT32, UINT32, EFI_PM_VREG_STATUS_TYPE *);
-typedef EFI_STATUS (EFIAPI *EFI_PM_VREG_SET_LEVEL_UV)(UINT32, UINT32, UINT32);
-
-struct _EFI_QCOM_PMIC_VREG_PROTOCOL {
-  UINT64                      Revision;
-  EFI_PM_VREG_CONTROL         VregControl;
-  EFI_PM_VREG_SET_LEVEL       VregSetLevel;
-  EFI_PM_VREG_GET_LEVEL       VregGetLevel;
-  EFI_PM_VREG_SET_PWR_MODE    VregSetPwrMode;
-  EFI_PM_VREG_MULTIPHASE_CTRL VregMultiphaseCtrl;
-  EFI_PM_VREG_GET_STATUS      VregGetStatus;
-  EFI_PM_VREG_SET_LEVEL_UV    VregSetLevelUv;
-};
-
-STATIC EFI_GUID  mVregProtocolGuid = EFI_PMICVREG_PROTOCOL_GUID;
-
-// 1 = run ProbeWcnPower() on this boot. build-dagu-uefi.sh rewrites this line
-// in the build copy when DAGU_WCN_PROBE=1; the committed default is off.
-#define DAGU_WCN_PROBE  0
-
-// EFI_PM_VREG_ID_TYPE: LDO_1..33 are 0..32, then LDO_INVALID (33), then
-// SMPS_1.. starts at 34. Index the enum arithmetically to avoid pasting all
-// 60 names. dagu QCA6390 rails (sm8250-xiaomi-dagu.dts): vreg_s5a (2.0V
-// override), vreg_s4a_1p8, vreg_s6a_0p95, vreg_s8c_1p35, vreg_l16a_3p0
-// (antenna switch vddasd, Linux enables it by hand). "a" = PM8150 primary,
-// "c" = PM8009. Which PMIC device index those map to is exactly what the
-// probe prints.
-#define VREG_LDO(n)   ((UINT32)((n) - 1))          // LDO_1 == 0
-#define VREG_SMPS(n)  ((UINT32)(33 + (n)))         // SMPS_1 == 34
-
 // Stock ELF, generated into DaguQupFw.inc by build-dagu-uefi.sh.
 STATIC CONST UINT8  mQupFw[] = {
   #include "DaguQupFw.inc"
@@ -889,101 +828,6 @@ ProbeHimax (
   DaguStallMs (60000);
 }
 
-// Read-only census of the QCA6390 (Wi-Fi + BT) power rails. Prints, per PMIC
-// device index, whether the candidate rails are enabled and at what level, so
-// the enable sequence can be written against real indices instead of guesses.
-// Also samples WLAN_EN gpio20 / BT_EN gpio21 before and after asserting them
-// (asserting a PMU enable with its rail off only half-powers the chip, it does
-// not damage it), so we can see the chip's own power-good feedback if any.
-// Held on screen; run only on a dedicated probe boot.
-STATIC VOID
-ProbeWcnPower (
-  VOID
-  )
-{
-  EFI_QCOM_PMIC_VREG_PROTOCOL  *Vreg;
-  EFI_STATUS                   Status;
-  UINT32                       Dev;
-  // (name, vreg-id) candidates for the WCN rails on SM8250 + dagu.
-  STATIC CONST struct { CONST CHAR8 *Name; UINT32 Id; } Rails[] = {
-    { "SMPS4", VREG_SMPS (4) },
-    { "SMPS5", VREG_SMPS (5) },
-    { "SMPS6", VREG_SMPS (6) },
-    { "SMPS8", VREG_SMPS (8) },
-    { "LDO9",  VREG_LDO (9)  },
-    { "LDO16", VREG_LDO (16) },
-  };
-  UINTN  R;
-
-  Status = gBS->LocateProtocol (&mVregProtocolGuid, NULL, (VOID **)&Vreg);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "\n=== DAGU WCN POWER: no PMIC VREG protocol (%r) ===\n", Status));
-    DEBUG ((DEBUG_ERROR, "    rails cannot be voted from UEFI; must rely on XBL leaving them on\n"));
-  } else {
-    DEBUG ((DEBUG_ERROR, "\n=== DAGU WCN POWER: PMIC VREG rev %016lx ===\n", Vreg->Revision));
-    for (Dev = 0; Dev < 4; Dev++) {
-      for (R = 0; R < ARRAY_SIZE (Rails); R++) {
-        EFI_PM_VREG_STATUS_TYPE  St;
-        UINT32                   Uv = 0;
-        EFI_STATUS               Ss, Ls;
-
-        Ss = Vreg->VregGetStatus (Dev, Rails[R].Id, &St);
-        Ls = Vreg->VregGetLevel (Dev, Rails[R].Id, &Uv);
-        if (EFI_ERROR (Ss) && EFI_ERROR (Ls)) {
-          continue;
-        }
-        DEBUG ((
-          DEBUG_ERROR,
-          "  pmic%u %a: en=%u ok=%u mode=%u lvl=%u (st %r lvl %r)\n",
-          Dev, Rails[R].Name,
-          EFI_ERROR (Ss) ? 9 : St.SwEnable,
-          EFI_ERROR (Ss) ? 9 : St.VregOk,
-          EFI_ERROR (Ss) ? 9 : St.SwMode,
-          Uv, Ss, Ls
-          ));
-      }
-    }
-  }
-
-  // gpio20/21 live level before/after assert. BB_IO reads TLMM +4 bit0.
-  DEBUG ((
-    DEBUG_ERROR,
-    "  gpio20=%u gpio21=%u (pre-assert)\n",
-    MmioRead32 (TLMM_NORTH + 0x1000u * 20u + 4u) & 1u,
-    MmioRead32 (TLMM_NORTH + 0x1000u * 21u + 4u) & 1u
-    ));
-  GpioCfg (TLMM_NORTH, 20, 0, 0, GPIO_DRV_2MA, TRUE, TRUE);   // WLAN_EN high
-  GpioCfg (TLMM_NORTH, 21, 0, 0, GPIO_DRV_2MA, TRUE, TRUE);   // BT_EN high
-  DaguStallMs (50);
-  DEBUG ((
-    DEBUG_ERROR,
-    "  gpio20=%u gpio21=%u (post-assert) ===\n",
-    MmioRead32 (TLMM_NORTH + 0x1000u * 20u + 4u) & 1u,
-    MmioRead32 (TLMM_NORTH + 0x1000u * 21u + 4u) & 1u
-    ));
-  DEBUG ((DEBUG_ERROR, "=== DAGU WCN POWER: holding 90 s, then boot continues ===\n"));
-  DaguStallMs (90000);
-}
-
-STATIC EFI_EVENT  mVregEvent;
-STATIC VOID       *mVregReg;
-
-STATIC VOID
-EFIAPI
-OnVregInstalled (
-  IN EFI_EVENT  Event,
-  IN VOID       *Context
-  )
-{
-  VOID  *Vreg;
-
-  if (EFI_ERROR (gBS->LocateProtocol (&mVregProtocolGuid, mVregReg, &Vreg))) {
-    return;
-  }
-  gBS->CloseEvent (Event);
-  ProbeWcnPower ();
-}
-
 STATIC VOID
 MuxQup (
   VOID
@@ -1109,27 +953,6 @@ DaguQupDxeInitialize (
     LoadSe (SE6_BASE, PROTO_UART, "SE6");
   } else {
     DEBUG ((DEBUG_ERROR, "DaguQup SE6: clocks off, MMIO skipped\n"));
-  }
-
-  // Wi-Fi/BT rail census, only in a probe build (DAGU_WCN_PROBE=1 in
-  // build-dagu-uefi.sh). This driver is APRIORI-dispatched before PmicDxe, so
-  // the VREG protocol does not exist yet: wait for PmicDxe to install it.
-  // That also runs the probe before QcomWDogDxe arms the HW watchdog, so the
-  // long on-screen hold cannot get bitten.
-  if (DAGU_WCN_PROBE) {
-    VOID  *Probe;
-
-    if (!EFI_ERROR (gBS->LocateProtocol (&mVregProtocolGuid, NULL, &Probe))) {
-      ProbeWcnPower ();
-    } else {
-      Status = gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
-                                 OnVregInstalled, NULL, &mVregEvent);
-      if (!EFI_ERROR (Status)) {
-        Status = gBS->RegisterProtocolNotify (&mVregProtocolGuid, mVregEvent,
-                                              &mVregReg);
-      }
-      DEBUG ((DEBUG_ERROR, "DaguQup WCN probe: waiting for PMIC VREG (%r)\n", Status));
-    }
   }
 
   return EFI_SUCCESS;

@@ -78,3 +78,9 @@ backups/gpt-*/
 
 # WOA driver test-signing material (generated locally; keys must never be committed)
 tools/winarm/signing/
+
+# WDK/SDK NuGet packages for the Linux cross-build (tools/winarm/fetch-wdk.sh, ~1.5 GB)
+winarm/wdk/
+
+# Built (test-signed) Windows driver binaries; rebuild with tools/winarm/build-himax-sys.sh
+port/dagu/windows-drivers/*/*.sys

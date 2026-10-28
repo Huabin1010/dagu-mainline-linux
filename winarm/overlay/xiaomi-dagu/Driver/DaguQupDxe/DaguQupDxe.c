@@ -685,6 +685,76 @@ SpiXfer (
   return FALSE;
 }
 
+// Delay that does not depend on the firmware TimerLib (MicroSecondDelay is a
+// no-op this early in DXE, which made the touch probe flash past). Busy-wait on
+// the ARM generic timer counter (CNTVCT_EL0), which is always running.
+STATIC VOID
+DaguStallMs (
+  IN UINT32  Ms
+  )
+{
+  UINT64  Freq, Now, Target;
+
+  __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (Freq));
+  __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (Now));
+  Target = Now + (Freq * (UINT64)Ms) / 1000ULL;
+  do {
+    __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (Now));
+  } while (Now < Target);
+}
+
+// Bit-banged SPI on the CAF pins, like the Linux production "spi-gpio" node
+// (the GENI engine is the disabled experiment and only ever returns 0xFF).
+// gpio8=MISO gpio9=MOSI gpio10=SCK gpio11=CS(active-low), all NORTH tile.
+// Mode 3: SCK idles high, MOSI shifted on the falling edge, MISO sampled on
+// the rising edge, MSB first. TLMM: +0 cfg, +4 bit1=OUT / bit0=IN.
+#define BB_MISO  8u
+#define BB_MOSI  9u
+#define BB_SCK   10u
+#define BB_CS    11u
+#define BB_IO(g) (TLMM_NORTH + 0x1000u * (g) + 4u)
+
+STATIC VOID
+BbOut (
+  UINT32  Gpio,
+  UINT32  Level
+  )
+{
+  MmioWrite32 (BB_IO (Gpio), Level ? BIT1 : 0);
+}
+
+STATIC VOID
+BitBangXfer (
+  CONST UINT8  *Tx,
+  UINT8        *Rx,
+  UINT32       Len
+  )
+{
+  UINT32  I, B, Out, In;
+
+  GpioCfg (TLMM_NORTH, BB_MOSI, 0, 0, GPIO_DRV_2MA, TRUE, TRUE);
+  GpioCfg (TLMM_NORTH, BB_SCK, 0, 0, GPIO_DRV_2MA, TRUE, TRUE);     // idle high
+  GpioCfg (TLMM_NORTH, BB_CS, 0, 0, GPIO_DRV_2MA, TRUE, TRUE);      // idle high
+  GpioCfg (TLMM_NORTH, BB_MISO, GPIO_PULL_UP, 0, GPIO_DRV_2MA, FALSE, FALSE);
+
+  BbOut (BB_SCK, 1);
+  BbOut (BB_CS, 1);
+  BbOut (BB_CS, 0);                               // assert CS (active low)
+  for (I = 0; I < Len; I++) {
+    Out = Tx[I];
+    In = 0;
+    for (B = 0; B < 8; B++) {
+      BbOut (BB_SCK, 0);                          // falling edge: shift
+      BbOut (BB_MOSI, (Out & 0x80u) ? 1u : 0u);
+      Out <<= 1;
+      BbOut (BB_SCK, 1);                          // rising edge: sample
+      In = (In << 1) | (MmioRead32 (BB_IO (BB_MISO)) & BIT0);
+    }
+    Rx[I] = (UINT8)In;
+  }
+  BbOut (BB_CS, 1);                               // deassert CS
+}
+
 STATIC VOID
 ProbeHimax (
   VOID
@@ -692,8 +762,11 @@ ProbeHimax (
 {
   UINT8    Tx[HIMAX_XFER_LEN];
   UINT8    Rx[HIMAX_XFER_LEN];
-  UINT32   Sum, I, Rev, Level;
-  BOOLEAN  Ok;
+  UINT8    Cap[HIMAX_EVENT_LEN];
+  UINT32   Rev, Level, Round, I, J, Score, BestScore, IrqLowN;
+  BOOLEAN  Ok, CapSeen;
+
+  (VOID)SpiXfer;   // GENI path kept compiled but unused; bit-bang drives touch
 
   Rev = MmioRead32 (SE4_BASE + GENI_FW_REVISION_RO);
   if (((Rev >> 8) & 0xFFu) != PROTO_SPI) {
@@ -701,22 +774,58 @@ ProbeHimax (
     return;
   }
 
-  SetMem (Tx, sizeof (Tx), 0);
-  SetMem (Rx, sizeof (Rx), 0);
-  Tx[0] = 0xF3;
-  Tx[1] = 0x30;
-  Ok = SpiXfer (SE4_BASE, Tx, Rx, HIMAX_XFER_LEN);
-  Sum = 0;
-  for (I = 3; I < HIMAX_XFER_LEN; I++) {
-    Sum += Rx[I];
+  // Diagnostic: capture the himax event frame (bit-banged) with the most data
+  // with the most data bytes and dump its 56 raw bytes, so the real coordinate
+  // layout can be decoded (the parser's payload[0..3]/[52] gives 0xFFFF). Hold
+  // the dump on screen 60 s. DaguStallMs since MicroSecondDelay is a no-op here.
+  SetMem (Cap, sizeof (Cap), 0);
+  CapSeen = FALSE;
+  BestScore = 0;
+  IrqLowN = 0;
+  DEBUG ((DEBUG_ERROR, "\n=== DAGU TOUCH CAPTURE: press & hold a finger on the screen (~12s) ===\n"));
+  for (Round = 0; Round < 240; Round++) {
+    SetMem (Tx, sizeof (Tx), 0);
+    SetMem (Rx, sizeof (Rx), 0);
+    Tx[0] = 0xF3;
+    Tx[1] = 0x30;
+    BitBangXfer (Tx, Rx, HIMAX_XFER_LEN);
+    Ok = TRUE;
+    Level = MmioRead32 (TLMM_SOUTH + 0x1000u * 39u + 4u) & 1u;
+    if (Level == 0) {
+      IrqLowN++;
+    }
+    if (Ok) {
+      Score = 0;
+      for (I = 0; I < HIMAX_EVENT_LEN; I++) {
+        if ((Rx[3 + I] != 0x00) && (Rx[3 + I] != 0xFF)) {
+          Score++;
+        }
+      }
+      if (Score >= BestScore) {
+        BestScore = Score;
+        for (I = 0; I < HIMAX_EVENT_LEN; I++) {
+          Cap[I] = Rx[3 + I];
+        }
+        CapSeen = TRUE;
+      }
+    }
+    DaguStallMs (50);
   }
-  Level = MmioRead32 (TLMM_SOUTH + 0x1000u * 39u + 4u) & 1u;
   DEBUG ((
     DEBUG_ERROR,
-    "DaguQup touch: %a irq=%u n52=%02x xy=%02x%02x %02x%02x sum=%02x\n",
-    Ok ? "read" : "fail", Level, Rx[3 + 52],
-    Rx[3], Rx[4], Rx[5], Rx[6], Sum & 0xFFu
+    "\n=== DAGU TOUCH CAPTURE: seen=%u irqLowReads=%u dataBytes=%u (56-byte frame below, held 60s) ===\n",
+    CapSeen, IrqLowN, BestScore
     ));
+  for (J = 0; J < HIMAX_EVENT_LEN; J += 14) {
+    DEBUG ((
+      DEBUG_ERROR,
+      "CAP[%02u]: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+      J, Cap[J + 0], Cap[J + 1], Cap[J + 2], Cap[J + 3], Cap[J + 4], Cap[J + 5],
+      Cap[J + 6], Cap[J + 7], Cap[J + 8], Cap[J + 9], Cap[J + 10], Cap[J + 11],
+      Cap[J + 12], Cap[J + 13]
+      ));
+  }
+  DaguStallMs (60000);
 }
 
 STATIC VOID
@@ -815,8 +924,14 @@ DaguQupDxeInitialize (
     DEBUG ((DEBUG_ERROR, "DaguQup: exit-boot event %r\n", Status));
   }
 
-  Bus = ClockOn ("gcc_qupv3_wrap0_core_clk") &&
-        ClockOn ("gcc_qupv3_wrap_0_s_ahb_clk");
+  // The QUP wrapper AHB and core clocks are already running: SE MMIO reads
+  // work (the clock/probe prints below are MMIO) and Android used these
+  // engines. The UEFI clock protocol does not report them on by these exact
+  // names, so ClockOn() for the AHB/core returned FALSE and skipped every
+  // LoadSe -- which left SE4 without its SPI firmware, so the Himax saw no
+  // real SPI and every read came back all-zero. Gate LoadSe on the per-SE
+  // clock only (which the protocol does confirm); the AHB/core are on.
+  Bus = TRUE;
   MuxQup ();
 
   if (Bus && ClockOn ("gcc_qupv3_wrap0_s2_clk")) {
@@ -828,10 +943,11 @@ DaguQupDxeInitialize (
 
   if (Bus && ClockOn ("gcc_qupv3_wrap0_s4_clk")) {
     LoadSe (SE4_BASE, PROTO_SPI, "SE4");
-    ProbeHimax ();
   } else {
     DEBUG ((DEBUG_ERROR, "DaguQup SE4: clocks off, MMIO skipped\n"));
   }
+  // ProbeHimax ();  // held touch diagnostic (bit-bang confirmed working); disabled for normal boot
+  (VOID)ProbeHimax; // keep compiled without -Werror unused-function
 
   if (Bus && ClockOn ("gcc_qupv3_wrap0_s6_clk")) {
     LoadSe (SE6_BASE, PROTO_UART, "SE6");

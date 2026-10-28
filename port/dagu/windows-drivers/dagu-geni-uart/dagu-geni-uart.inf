@@ -1,0 +1,78 @@
+; dagu QUP0 SE6 GENI UART, SerCx2 PIO controller (QCA6390 Bluetooth bottom).
+; Binds the dedicated ACPI id DAGU0006 that bluetooth.asl puts on UAR6, so it
+; never contends with the stock qcuart8250 (ACPI\QCOM2518). The QCA transport
+; qcbtfmuart_hst8180 (ACPI\QCOM0471) opens this through the Resource Hub.
+;
+; Self-contained KMDF + SerCx2 driver; no Qualcomm PEP, no GPI DMA. The .sys
+; carries an embedded Authenticode test signature (tools/winarm/sign-driver.sh)
+; and is installed with DISM /ForceUnsigned, so there is no CatalogFile.
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Ports
+ClassGuid   = {4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider    = %Mfg%
+DriverVer   = 10/28/2026,1.0.0.1
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13      ; Driver Store
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+dagu-geni-uart.sys = 1
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Geni_Inst, ACPI\DAGU0006
+
+[Geni_Inst.NT]
+CopyFiles   = Geni_Copy
+AddProperty = Geni_DeviceCategory
+
+[Geni_Copy]
+dagu-geni-uart.sys
+
+; Mark as a SoC UART bus device (same device-category GUID the stock
+; qcuart8250 sets), so the serial stack treats it as a controller.
+[Geni_DeviceCategory]
+{5D078032-6378-437B-8DA5-9B32B7CA3FDD}, 2, 7,, 2
+
+[Geni_Inst.NT.HW]
+AddReg = Geni_HW_AddReg
+
+[Geni_HW_AddReg]
+HKR,, DeviceCharacteristics, 0x10001, 0x0100   ; FILE_DEVICE_SECURE_OPEN
+HKR,, Security,, "D:P(A;;GA;;;BA)(A;;GA;;;SY)(A;;GA;;;LS)(A;;GRGW;;;BU)"
+
+[Geni_Inst.NT.Services]
+AddService = dagu_geni_uart, 0x00000002, Geni_Service
+
+[Geni_Service]
+DisplayName   = %Desc%
+ServiceType   = 1   ; SERVICE_KERNEL_DRIVER
+StartType     = 3   ; SERVICE_DEMAND_START
+ErrorControl  = 1   ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\dagu-geni-uart.sys
+
+[Geni_Inst.NT.Wdf]
+KmdfService = dagu_geni_uart, Geni_wdfsect
+
+[Geni_wdfsect]
+KmdfLibraryVersion = 1.33
+
+; Optional tuning, read in DriverEntry (see dagu-geni-uart.c):
+;   Se6SourceHz  REG_DWORD  assumed gcc_qupv3_wrap0_s6_clk rate (default 102.4M)
+;   DebugPrint   REG_DWORD  1 = DbgPrintEx tracing on (default 1)
+[Geni_Inst.NT.Services.AddReg]
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu QCA6390 Bluetooth UART (GENI SE6)"
+Disk = "dagu GENI UART"

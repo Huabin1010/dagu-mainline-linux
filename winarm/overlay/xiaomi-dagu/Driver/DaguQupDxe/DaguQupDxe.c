@@ -214,7 +214,14 @@ STATIC QUP_CLK  mClocks[] = {
   { "gcc_qupv3_wrap_0_s_ahb_clk",   0,          0, FALSE },
   { "gcc_qupv3_wrap0_s2_clk",       19200000u,  0, FALSE },
   { "gcc_qupv3_wrap0_s4_clk",       19200000u,  0, FALSE },
-  { "gcc_qupv3_wrap0_s6_clk",       19200000u,  0, FALSE },
+  // SE6 is the Bluetooth UART. 19.2 MHz (TCXO) does not divide to 115200 or
+  // 3.2 Mbps, so the Windows dagu-geni-uart driver cannot hit those bauds.
+  // 102.4 MHz (GPLL0_OUT_EVEN * 128/375) divides exactly to 3.2 Mbps (/32)
+  // and within 0.8% of 115200, and the Windows driver reprograms only the
+  // SE-local GENI divider from this fixed source. The achieved rate is logged
+  // below; if the clock driver cannot make 102.4 MHz it falls back and the
+  // Windows side can be retuned via the Se6SourceHz registry value.
+  { "gcc_qupv3_wrap0_s6_clk",       102400000u, 0, FALSE },
 };
 
 STATIC EFI_CLOCK_PROTOCOL  *mClock;

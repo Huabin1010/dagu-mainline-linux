@@ -275,8 +275,12 @@ PowerQca6390 (
     RailOn (V, 0, VREG_SMPS (5), "S5A 2.0", 2000);
     RailOn (V, 0, VREG_SMPS (6), "S6A 0.95", 950);
     RailOn (V, 2, VREG_SMPS (8), "S8C 1.35", 1350);
-    RailOn (V, 0, VREG_LDO (16), "L16A 3.0", 3024);
+    // L16A (VDD_ASD, BT antenna switch) is NOT touched here: on the first
+    // device boot the PMIC VREG call for pmic0 LDO16 never returned and the
+    // boot hung right after the S8C line. Wi-Fi/PCIe does not need it; it is
+    // left for the Bluetooth bring-up through another path.
   }
+  DEBUG ((DEBUG_ERROR, "DaguPcie: rails done, asserting WLAN_EN/BT_EN\n"));
   // pwrseq-qcom-wcn: >= 100 ms between enable-gpio toggles, 60 ms power-up.
   Gpio (20, 0, 0, TRUE, TRUE);                     // WLAN_EN
   StallMs (100);
@@ -420,6 +424,7 @@ BringUpPcie0 (
   Gpio (81, 0, 0, FALSE, FALSE);
   StallMs (1);
 
+  DEBUG ((DEBUG_ERROR, "DaguPcie: step 2 GDSC (GDSCR %08x)\n", MmioRead32 (GCC_PCIE_0_GDSCR)));
   if (!GdscOn ()) {
     Fail (2, "pcie_0_gdsc");
     return FALSE;
@@ -427,11 +432,13 @@ BringUpPcie0 (
   ClocksOn (FALSE);
 
   // init_2_7_0: core block reset, then PARF.
+  DEBUG ((DEBUG_ERROR, "DaguPcie: step 2b core reset + PARF\n"));
   MmioWrite32 (GCC_PCIE_0_BCR, 1);
   StallMs (1);
   MmioWrite32 (GCC_PCIE_0_BCR, 0);
   StallMs (1);
 
+  DEBUG ((DEBUG_ERROR, "DaguPcie: PARF SYS_CTRL %08x\n", MmioRead32 (PARF + PARF_SYS_CTRL)));
   MmioWrite32 (PARF + PARF_DEVICE_TYPE, 0x4);                  // RC
   Clr32 (PARF + PARF_PHY_CTRL, BIT0);                          // PHY_TEST_PWR_DOWN
   MmioWrite32 (PARF + PARF_DBI_BASE_ADDR_V2, DBI);
@@ -444,11 +451,13 @@ BringUpPcie0 (
   Set32 (PARF + PARF_MHI_CLOCK_RESET_CTRL, BIT4);              // BYPASS
   Clr32 (PARF + PARF_PM_CTRL, BIT5);                           // REQ_NOT_ENTR_L1
   Set32 (PARF + PARF_AXI_MSTR_WR_ADDR_HALT_V2, BIT31);
+  DEBUG ((DEBUG_ERROR, "DaguPcie: PARF written, reading DBI\n"));
   DEBUG ((
     DEBUG_ERROR, "DaguPcie: PARF ok, DBI id %08x\n", MmioRead32 (DBI)
     ));
 
   // qmp_pcie_init + qmp_pcie_power_on (sm8250 gen3x1).
+  DEBUG ((DEBUG_ERROR, "DaguPcie: step 3 PHY reset + tables\n"));
   MmioWrite32 (GCC_PCIE_0_PHY_BCR, 1);
   StallUs (300);
   MmioWrite32 (GCC_PCIE_0_PHY_BCR, 0);
@@ -469,6 +478,7 @@ BringUpPcie0 (
   DEBUG ((DEBUG_ERROR, "DaguPcie: PHY up (%u writes)\n", (UINT32)ARRAY_SIZE (mQmp)));
 
   // post_init: no hot-plug capable slot.
+  DEBUG ((DEBUG_ERROR, "DaguPcie: step 4 root port + iATU\n"));
   Set32 (DBI + DBI_MISC_CONTROL_1, BIT0);                      // DBI RO write enable
   Cap = PcieCap ();
   if (Cap != 0) {
@@ -502,6 +512,7 @@ BringUpPcie0 (
   Clr32 (DBI + DBI_MISC_CONTROL_1, BIT0);
 
   // PERST# held >= 100 ms (PCIE_T_PVPERL_MS), then release and train.
+  DEBUG ((DEBUG_ERROR, "DaguPcie: step 4b PERST release + LTSSM\n"));
   StallMs (100);
   Gpio (79, 0, 0, TRUE, TRUE);
   StallMs (1);
@@ -537,6 +548,7 @@ ProbeConfig (
 {
   UINT32  Id0, Id1, Id1f1, Id1d1, Ss, Cls;
 
+  DEBUG ((DEBUG_ERROR, "DaguPcie: step 5 config read bus 1\n"));
   Id0 = MmioRead32 (DBI);
   Id1 = MmioRead32 (CFG_WIN);                       // bus 1 dev 0 fn 0
   Ss = MmioRead32 (CFG_WIN + 0x2C);

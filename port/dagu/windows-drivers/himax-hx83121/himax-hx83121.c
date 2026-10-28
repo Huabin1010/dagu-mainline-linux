@@ -70,6 +70,16 @@
 #define HIMAX_PAYLOAD   56
 #define HIMAX_XFER      59
 #define HIMAX_COUNT_AT  52
+#define HIMAX_PENDING_MAX 16
+
+/*
+ * Offline file-based diagnostics (\SystemRoot\himax-diag.txt) are off by
+ * default: writing them is a synchronous NTFS I/O inside the poll thread,
+ * which stalls the touch path for milliseconds. Flip the REG_DWORD value
+ * "HimaxDiag" under the driver service key to 1 to turn them back on when
+ * debugging; the value is read once in DriverEntry.
+ */
+static BOOLEAN gDiag = FALSE;
 
 /*
  * Parallel-mode Windows touch screen, 10 contacts, logical 1600 x 2560.
@@ -136,11 +146,29 @@ typedef struct _HIMAX_EXT {
     PKTHREAD Thread;
     KEVENT Stop;
     KSPIN_LOCK Lock;
-    PIRP Pending;
+    /*
+     * A small FIFO of pending IOCTL_HID_READ_REPORT IRPs. HIDCLASS keeps
+     * more than one read outstanding to cut latency; the old single-slot
+     * design returned STATUS_DEVICE_BUSY for the second one, which makes the
+     * HID read pump stall and shows up as touch jank. Ring drained on stop.
+     */
+    PIRP PendRing[HIMAX_PENDING_MAX];
+    ULONG PendHead;
+    ULONG PendTail;
     BOOLEAN Down;
     BOOLEAN Run;
     ULONG Depth;
     ULONG ClkDiv;
+    /* Poll/transfer timing, measured with KeQueryPerformanceCounter. */
+    LONGLONG QpcFreq;
+    LONGLONG LastReportQpc;
+    ULONG IntLastUs;
+    ULONG IntMinUs;
+    ULONG IntMaxUs;
+    ULONGLONG IntSumUs;
+    ULONG IntN;
+    ULONG SpiLastUs;
+    ULONG SpiMaxUs;
     /* Diagnostics, dumped to \SystemRoot\himax-diag.txt by the poll thread. */
     ULONG StartFlags;
     ULONG DiagIter;
@@ -435,10 +463,32 @@ CompleteRead(PHIMAX_EXT Ext, const HIMAX_REPORT *Rpt)
     PIRP irp;
     KIRQL irql;
     PVOID buf;
+    LARGE_INTEGER now;
+
+    /* Record how long since the previous report actually reached a reader. */
+    now = KeQueryPerformanceCounter(NULL);
+    if (Ext->LastReportQpc && Ext->QpcFreq) {
+        LONGLONG dt = now.QuadPart - Ext->LastReportQpc;
+        ULONG us = (ULONG)((dt * 1000000) / Ext->QpcFreq);
+
+        Ext->IntLastUs = us;
+        if (us > Ext->IntMaxUs)
+            Ext->IntMaxUs = us;
+        if (us < Ext->IntMinUs)
+            Ext->IntMinUs = us;
+        Ext->IntSumUs += us;
+        Ext->IntN++;
+    }
+    Ext->LastReportQpc = now.QuadPart;
 
     KeAcquireSpinLock(&Ext->Lock, &irql);
-    irp = Ext->Pending;
-    Ext->Pending = NULL;
+    if (Ext->PendHead == Ext->PendTail) {
+        KeReleaseSpinLock(&Ext->Lock, irql);
+        return;                 /* no reader waiting; drop this frame */
+    }
+    irp = Ext->PendRing[Ext->PendHead];
+    Ext->PendRing[Ext->PendHead] = NULL;
+    Ext->PendHead = (Ext->PendHead + 1) % HIMAX_PENDING_MAX;
     KeReleaseSpinLock(&Ext->Lock, irql);
     if (!irp)
         return;
@@ -513,7 +563,7 @@ WriteDiag(PHIMAX_EXT ext)
     char *end = buf + sizeof(buf);
     ULONG i;
 
-    DAppendS(&p, end, "himax diag v2\n flags=");
+    DAppendS(&p, end, "himax diag v3\n flags=");
     DAppendU(&p, end, ext->StartFlags);
     DAppendS(&p, end, " iter=");
     DAppendU(&p, end, ext->DiagIter);
@@ -555,6 +605,20 @@ WriteDiag(PHIMAX_EXT ext)
         DAppendHex(&p, end, (UCHAR)(ext->LowerStart >> (24 - 8 * i)));
     DAppendS(&p, end, " power=");
     DAppendU(&p, end, ext->PowerIrps);
+    DAppendS(&p, end, "\n intervalUs last=");
+    DAppendU(&p, end, ext->IntLastUs);
+    DAppendS(&p, end, " min=");
+    DAppendU(&p, end, ext->IntMinUs == 0xFFFFFFFFu ? 0 : ext->IntMinUs);
+    DAppendS(&p, end, " max=");
+    DAppendU(&p, end, ext->IntMaxUs);
+    DAppendS(&p, end, " avg=");
+    DAppendU(&p, end, ext->IntN ? (ULONG)(ext->IntSumUs / ext->IntN) : 0);
+    DAppendS(&p, end, " n=");
+    DAppendU(&p, end, ext->IntN);
+    DAppendS(&p, end, " spiUs=");
+    DAppendU(&p, end, ext->SpiLastUs);
+    DAppendS(&p, end, "/");
+    DAppendU(&p, end, ext->SpiMaxUs);
     DAppendS(&p, end, "\n touch=");
     DAppendU(&p, end, ext->DiagTouch);
     DAppendS(&p, end, " lastN=");
@@ -603,15 +667,31 @@ ThreadMain(PVOID Context)
 {
     PHIMAX_EXT ext = Context;
     LARGE_INTEGER wait;
+    LARGE_INTEGER freq;
     HIMAX_REPORT rpt;
     UCHAR payload[HIMAX_PAYLOAD];
     BOOLEAN down;
 
-    wait.QuadPart = -2 * 1000 * 10; /* 2 ms */
+    /*
+     * Default KeWaitForSingleObject granularity is the ~15.6 ms system clock
+     * tick, which capped polling at ~64 Hz and was the main source of touch
+     * lag. Pull the system timer down to 1 ms for the lifetime of the poll
+     * thread so a 1 ms relative wait actually fires near 1 ms. SpiRead itself
+     * (a bit-banged 59-byte transfer) then becomes the real rate limiter,
+     * which the perf counters below measure.
+     */
+    ExSetTimerResolution(10000, TRUE);          /* 10000 * 100 ns = 1 ms */
+    (VOID)KeQueryPerformanceCounter(&freq);     /* out-param = QPC frequency */
+    ext->QpcFreq = freq.QuadPart;
+    ext->IntMinUs = 0xFFFFFFFFu;
+
+    wait.QuadPart = -1 * 1000 * 10; /* 1 ms */
     while (KeWaitForSingleObject(&ext->Stop, Executive, KernelMode, FALSE, &wait) == STATUS_TIMEOUT) {
+        LARGE_INTEGER t0, t1;
+
         ext->DiagIter++;
         if (!ext->Gp) {
-            if ((ext->DiagIter & 127) == 0)
+            if (gDiag && (ext->DiagIter & 127) == 0)
                 WriteDiag(ext);
             continue;
         }
@@ -619,13 +699,20 @@ ThreadMain(PVOID Context)
             (READ_REGISTER_ULONG((PULONG)(ext->Irq + IRQ_OFF)) & 1u) == 0)
             ext->DiagIrqLow++;
         /*
-         * Poll the chip over bit-bang every 2 ms and let the frame itself
-         * decide: the Himax only returns a checksum-correct, non-0xFF event
-         * when it has data. Do not gate on gpio39 level -- that pin's mux
-         * state at Windows runtime is not under our control and a wrong
-         * reading would wedge the whole path.
+         * Poll the chip over bit-bang and let the frame itself decide: the
+         * Himax only returns a checksum-correct, non-0xFF event when it has
+         * data. Do not gate on gpio39 level -- that pin's mux state at
+         * Windows runtime is not under our control and a wrong reading would
+         * wedge the whole path.
          */
+        t0 = KeQueryPerformanceCounter(NULL);
         if (SpiRead(ext, payload)) {
+            t1 = KeQueryPerformanceCounter(NULL);
+            if (ext->QpcFreq) {
+                ext->SpiLastUs = (ULONG)(((t1.QuadPart - t0.QuadPart) * 1000000) / ext->QpcFreq);
+                if (ext->SpiLastUs > ext->SpiMaxUs)
+                    ext->SpiMaxUs = ext->SpiLastUs;
+            }
             ext->DiagSpiOk++;
             RtlCopyMemory(ext->LastPayload, payload, HIMAX_PAYLOAD);
             ext->LastRawX = (USHORT)((payload[0] << 8) | payload[1]);
@@ -657,8 +744,7 @@ ThreadMain(PVOID Context)
                         break;
                     }
                     ext->Down = TRUE;
-                    if (fresh)
-                        WriteDiag(ext);
+                    (VOID)fresh;    /* no file I/O on the touch-down path */
                     CompleteRead(ext, &rpt);
                 } else if (ext->Down) {
                     ext->Down = FALSE;
@@ -666,9 +752,10 @@ ThreadMain(PVOID Context)
                 }
             }
         }
-        if ((ext->DiagIter & 127) == 0)
+        if (gDiag && (ext->DiagIter & 127) == 0)
             WriteDiag(ext);
     }
+    ExSetTimerResolution(0, FALSE);             /* release the 1 ms request */
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -759,14 +846,21 @@ StopDevice(PHIMAX_EXT Ext)
         Ext->ThreadHandle = NULL;
         Ext->Run = FALSE;
     }
-    KeAcquireSpinLock(&Ext->Lock, &irql);
-    irp = Ext->Pending;
-    Ext->Pending = NULL;
-    KeReleaseSpinLock(&Ext->Lock, irql);
-    if (irp) {
-        irp->IoStatus.Status = STATUS_DEVICE_REMOVED;
-        irp->IoStatus.Information = 0;
-        IoCompleteRequest(irp, IO_NO_INCREMENT);
+    for (;;) {
+        KeAcquireSpinLock(&Ext->Lock, &irql);
+        if (Ext->PendHead == Ext->PendTail) {
+            KeReleaseSpinLock(&Ext->Lock, irql);
+            break;
+        }
+        irp = Ext->PendRing[Ext->PendHead];
+        Ext->PendRing[Ext->PendHead] = NULL;
+        Ext->PendHead = (Ext->PendHead + 1) % HIMAX_PENDING_MAX;
+        KeReleaseSpinLock(&Ext->Lock, irql);
+        if (irp) {
+            irp->IoStatus.Status = STATUS_DEVICE_REMOVED;
+            irp->IoStatus.Information = 0;
+            IoCompleteRequest(irp, IO_NO_INCREMENT);
+        }
     }
     if (Ext->SeMap)
         MmUnmapIoSpace(Ext->SeMap, SE4_SIZE);
@@ -915,13 +1009,14 @@ InternalIoctl(_In_ PDEVICE_OBJECT Fdo, _In_ PIRP Irp)
             break;
         }
         KeAcquireSpinLock(&ext->Lock, &irql);
-        if (ext->Pending) {
+        if ((ext->PendTail + 1) % HIMAX_PENDING_MAX == ext->PendHead) {
             KeReleaseSpinLock(&ext->Lock, irql);
-            status = STATUS_DEVICE_BUSY;
+            status = STATUS_DEVICE_BUSY;    /* ring full: should not happen */
             break;
         }
         IoMarkIrpPending(Irp);
-        ext->Pending = Irp;
+        ext->PendRing[ext->PendTail] = Irp;
+        ext->PendTail = (ext->PendTail + 1) % HIMAX_PENDING_MAX;
         ext->DiagReadIrp++;
         KeReleaseSpinLock(&ext->Lock, irql);
         return STATUS_PENDING;
@@ -971,10 +1066,38 @@ Unload(_In_ PDRIVER_OBJECT DriverObject)
     UNREFERENCED_PARAMETER(DriverObject);
 }
 
+static VOID
+ReadDiagFlag(PUNICODE_STRING RegistryPath)
+{
+    OBJECT_ATTRIBUTES oa;
+    UNICODE_STRING valName;
+    HANDLE key;
+    NTSTATUS st;
+    UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION info = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+    ULONG got;
+
+    InitializeObjectAttributes(&oa, RegistryPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               NULL, NULL);
+    st = ZwOpenKey(&key, KEY_READ, &oa);
+    if (!NT_SUCCESS(st))
+        return;
+    RtlInitUnicodeString(&valName, L"HimaxDiag");
+    st = ZwQueryValueKey(key, &valName, KeyValuePartialInformation,
+                         info, sizeof(buf), &got);
+    if (NT_SUCCESS(st) && info->Type == REG_DWORD &&
+        info->DataLength >= sizeof(ULONG) &&
+        *(PULONG)info->Data != 0)
+        gDiag = TRUE;
+    ZwClose(key);
+}
+
 NTSTATUS
 DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
 {
     HID_MINIDRIVER_REGISTRATION reg;
+
+    ReadDiagFlag(RegistryPath);
 
     DriverObject->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL] = InternalIoctl;
     DriverObject->MajorFunction[IRP_MJ_PNP] = PnpDispatch;

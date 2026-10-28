@@ -95,11 +95,35 @@ Windows 侧靠 WinPE 导入的根 CA 信任（和其它 dagu 驱动一样）。
 （和 `tools/winarm/wifi-debug/` 同一套）；关掉把 `Parameters\DebugPrint`
 设 0。
 
-## 现状（2026-10-28）
+## 现状（2026-10-29 00:20）
 
 - 驱动、INF、ACPI、`DaguQupDxe` 时钟改动都已写好；`.sys` 已交叉编译 + 测试
   签名通过，DSDT 编译 0 error。
-- **尚未上板验证**：当前平板在 Windows（`192.168.1.187`），没有接 fastboot
-  主机，改了 HID/时钟要先刷 UEFI 才能测。下次有 fastboot 通路时按上面的
-  部署步骤走一遍，重点看 PStore 里 `DaguQup clk gcc_qupv3_wrap0_s6_clk` 实际
-  拿到多少 Hz，必要时调 `Se6SourceHz`。
+- **上板第一次失败**：刷了带这套改动的 UEFI（`DAGU0006` DSDT + s6 102.4 MHz）
+  后 Windows 启动蓝屏 **ACPI BIOS ERROR**（0xA5），没留 dump（最新的
+  `MEMORY.DMP`/minidump 是 19:45 的旧的）。已回刷改动前的镜像
+  `winarm/out/boot-dagu-uefi-v3-prebt.img` + `vendor_boot-dagu-uefi-prebt.img`，
+  Windows 正常。所以平板现在跑的是旧 DSDT（`UAR6 = QCOM2518`），**蓝牙还不能用**。
+- 已排除的原因：
+  - DSDT 本身：iasl 编译/反编译都干净；`AcpiPlatformUpdateLib` 的 `Name()` 原地
+    补丁只命中表头那些名字（`SOID`…`SIDS`），碰不到 BT 节点；没有别的节点占用
+    IRQ 639 或 `0x998000`。
+- 还没定位：蓝屏参数（0xA5 第一个参数决定是哪类 ACPI 错误）。下一步要么拍下
+  蓝屏的完整参数，要么二分：先只换 DSDT（时钟保持 19.2 MHz），再只换时钟，
+  看是哪一项触发。
+
+## Windows Wi-Fi IP 每次启动都变（已修）
+
+原因：`qcwlan6800sc81.sys` 在 dagu 上没有 MAC 来源（高通 Windows 机器的 MAC
+存在 DPP 分区，dagu 没有），每次网卡启动都现编一个 `00:03:7F:12:xx:xx`（实测
+每次 `Restart-NetAdapter` 都换：`78:78 → C9:C9 → 65:65 → 92:92 …`），路由器把它当
+新设备，于是每次一个新 IP。
+
+试过、对这个驱动**无效**：`NetworkAddress` 高级属性、`enableMacRandom=0`、
+`MacLocation=0..3`、`System32\drivers\macaddress.txt`（驱动只写这个文件，不读）。
+真机 MAC 在 `linux-mainline/firmware/dagu/wlan_mac.bin`（不进仓库）。
+
+现在的办法：Windows 里给 `WLAN` 配静态地址 **`192.168.1.250/24`**，网关/DNS
+`192.168.1.1`（备用 DNS `223.5.5.5`），脚本 `tools/winarm/pin-wifi-ip.ps1`
+（以 SYSTEM 计划任务运行，30 s 内网关不通自动退回 DHCP）。`.250` 在路由器
+当前分配的 `.1xx` 段之外。以后 SSH 固定用 `ssh dagu@192.168.1.250`。

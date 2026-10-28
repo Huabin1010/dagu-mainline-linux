@@ -101,6 +101,27 @@ grep -q DaguPlatDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
 	sed -i "s|^\(\s*\).*DaguWdtProbeDxe.inf|&\n\1$PLAT_INF|" "$DEV/xiaomi-dagu/DXE.dsc.inc"
 grep -q DaguPlatDxe "$DEV/xiaomi-dagu/DXE.inc" && grep -q DaguPlatDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
 	{ echo "DaguPlatDxe not registered" >&2; exit 1; }
+# QCA6390 power + PCIe0 (Wi-Fi) bring-up. Publishes its own PCI0 SSDT and an
+# MCFG only when the link trains, so the PCI0 ASL is compiled into the driver.
+PCIE_INF='$(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Driver/DaguPcieDxe/DaguPcieDxe.inf'
+PCIE_DIR="$DEV/xiaomi-dagu/Driver/DaguPcieDxe"
+IASL_P="$(command -v iasl || find "$HERE/$MU/MU_BASECORE/BaseTools/Bin" -path '*Linux-x86/iasl' -type f 2>/dev/null | head -1)"
+[ -x "$IASL_P" ] || { echo "no iasl for Pcie0Ssdt.asl" >&2; exit 1; }
+(cd "$PCIE_DIR" && "$IASL_P" -p Pcie0Ssdt Pcie0Ssdt.asl >/dev/null) || { echo "Pcie0Ssdt.asl failed" >&2; exit 1; }
+python3 - "$PCIE_DIR/Pcie0Ssdt.aml" "$PCIE_DIR/Pcie0Ssdt.inc" <<'PY'
+import sys
+d = open(sys.argv[1], "rb").read()
+if d[:4] != b"SSDT":
+    sys.exit("Pcie0Ssdt.aml is not an SSDT")
+open(sys.argv[2], "w").write("".join("  " + ", ".join("0x%02x" % b for b in d[i:i + 16]) + ",\n"
+                                     for i in range(0, len(d), 16)))
+PY
+grep -q DaguPcieDxe "$DEV/xiaomi-dagu/DXE.inc" || \
+	sed -i "s|^\(\s*\)INF .*DaguPlatDxe.inf|&\n\1INF $PCIE_INF|" "$DEV/xiaomi-dagu/DXE.inc"
+grep -q DaguPcieDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
+	sed -i "s|^\(\s*\).*DaguPlatDxe.inf|&\n\1$PCIE_INF|" "$DEV/xiaomi-dagu/DXE.dsc.inc"
+grep -q DaguPcieDxe "$DEV/xiaomi-dagu/DXE.inc" && grep -q DaguPcieDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
+	{ echo "DaguPcieDxe not registered" >&2; exit 1; }
 # DSDT: pipa ships a 0-byte DSDT.aml. AcpiPlatformDxe then reads the table
 # Length from an empty RAW section (garbage), asserts Size >= TableSize, and
 # AcpiPlatformChecksum walks off the end of mapped DDR (data abort at
@@ -189,6 +210,10 @@ grep -q 'FACS.aml' "$ACPI_INC" || { echo "FACS patch failed" >&2; exit 1; }
 # dagu IORT once SMMU is owned by a working driver stack.
 sed -i '/QcomACPI\/8250\/builtin\/IORT\.aml/d' "$ACPI_INC"
 ! grep -q 'IORT\.aml' "$ACPI_INC" || { echo "IORT removal failed" >&2; exit 1; }
+# MCFG: the MTP table also lists PCIe1 (segment 1 at 0x40000000), which dagu
+# never powers. DaguPcieDxe installs a segment-0-only MCFG after link-up.
+sed -i '/QcomACPI\/8250\/builtin\/MCFG\.aml/d' "$ACPI_INC"
+! grep -q 'MCFG\.aml' "$ACPI_INC" || { echo "MCFG removal failed" >&2; exit 1; }
 
 # 4. Debug serial: screen (panel) + memory (PStore ring at 0xB0400000) --------
 sed -i 's/USE_SCREEN_FOR_SERIAL_OUTPUT    = 0/USE_SCREEN_FOR_SERIAL_OUTPUT    = 1/;

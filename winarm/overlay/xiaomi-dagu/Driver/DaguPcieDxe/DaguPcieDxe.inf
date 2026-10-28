@@ -1,0 +1,32 @@
+## @file
+#  dagu: QCA6390 power-on + PCIe0 bring-up; publishes PCI0 SSDT + MCFG on link-up.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = DaguPcieDxe
+  FILE_GUID                      = 9a4c2e71-6d3b-4f85-b1e0-7c5a3d8f2b96
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = DaguPcieDxeInitialize
+
+[Sources.common]
+  DaguPcieDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  ArmPkg/ArmPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  IoLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Protocols]
+  gEfiAcpiTableProtocolGuid
+
+[Depex]
+  gEfiAcpiTableProtocolGuid

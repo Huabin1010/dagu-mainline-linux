@@ -641,13 +641,58 @@ SmmuBypassPcie0 (
     DEBUG ((DEBUG_ERROR, "DaguPcie: no free SMR, PCIe DMA will fault\n"));
     return;
   }
-  mSumSmrNew = FreeSlot;
-  MmioWrite32 (SMMU + SMMU_S2CR (FreeSlot), S2CR_BYPASS);
-  MmioWrite32 (SMMU + SMMU_SMR (FreeSlot), SMR_VALID | (PCIE0_SID_MASK << 16) | PCIE0_SID);
-  DEBUG ((
-    DEBUG_ERROR, "DaguPcie: SMR %u = %08x, S2CR = %08x (bypass for PCIe0)\n",
-    FreeSlot, MmioRead32 (SMMU + SMMU_SMR (FreeSlot)), MmioRead32 (SMMU + SMMU_S2CR (FreeSlot))
-    ));
+  // Fourth boot: writing the highest free slot (86) did not stick (SMR read
+  // back 0, S2CR 0x20000 = fault): the hypervisor keeps some slots. Linux
+  // arm-smmu allocates from the lowest free index; do the same, read back,
+  // and move on to the next free slot until one holds.
+  {
+    UINT32  Tries = 0, Want = SMR_VALID | (PCIE0_SID_MASK << 16) | PCIE0_SID;
+
+    for (I = 0; I < N && I < 128 && Tries < 12; I++) {
+      if (MmioRead32 (SMMU + SMMU_SMR (I)) & SMR_VALID) {
+        continue;
+      }
+      Tries++;
+      MmioWrite32 (SMMU + SMMU_S2CR (I), S2CR_BYPASS);
+      MmioWrite32 (SMMU + SMMU_SMR (I), Want);
+      Smr = MmioRead32 (SMMU + SMMU_SMR (I));
+      DEBUG ((
+        DEBUG_ERROR, "DaguPcie: try SMR %u: SMR %08x S2CR %08x\n",
+        I, Smr, MmioRead32 (SMMU + SMMU_S2CR (I))
+        ));
+      if (Smr == Want && ((MmioRead32 (SMMU + SMMU_S2CR (I)) >> 16) & 3u) == 1u) {
+        mSumSmrNew = I;
+        DEBUG ((DEBUG_ERROR, "DaguPcie: PCIe0 bypass in SMR %u\n", I));
+        return;
+      }
+      MmioWrite32 (SMMU + SMMU_SMR (I), 0);      // undo, try the next
+    }
+    mSumSmrNew = 0xFFFFFFFEu;                    // tried, none held
+  }
+}
+
+// Show how existing streams (UFS works) are passed through: valid SMRs whose
+// S2CR is BYPASS. Compact, for the photo.
+STATIC VOID
+SmmuDumpBypass (
+  VOID
+  )
+{
+  UINT32  N = MmioRead32 (SMMU + SMMU_IDR0) & 0xFFu, I, Smr, S2cr, Shown = 0;
+
+  DEBUG ((DEBUG_ERROR, "=== SMMU valid SMRs (idx:smr/s2cr type):"));
+  for (I = 0; I < N && I < 128; I++) {
+    Smr = MmioRead32 (SMMU + SMMU_SMR (I));
+    if (!(Smr & SMR_VALID)) {
+      continue;
+    }
+    S2cr = MmioRead32 (SMMU + SMMU_S2CR (I));
+    if (Shown < 24) {
+      DEBUG ((DEBUG_ERROR, " %u:%x/%u", I, Smr & 0x7FFFFFFFu, (S2cr >> 16) & 3u));
+    }
+    Shown++;
+  }
+  DEBUG ((DEBUG_ERROR, "  (%u valid)\n", Shown));
 }
 
 // ---- 6. probe config space, publish ACPI -----------------------------------------
@@ -806,6 +851,9 @@ DaguPcieDxeInitialize (
     mSumBarSz, mSumMhi[0], mSumMhi[1], mSumMhi[2], mSumMhi[3],
     mSumScr0, mSumScr0 & 1u, (mSumScr0 >> 10) & 1u, (INT32)mSumSmr, (INT32)mSumSmrNew
     ));
+  if (Up) {
+    SmmuDumpBypass ();
+  }
   DEBUG ((
     DEBUG_ERROR,
     "=== DAGU PCIE0: %a (first failing step %u) - holding %u s ===\n",

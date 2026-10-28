@@ -74,6 +74,8 @@
 #define PARF_ATU_BASE_ADDR            0x634
 #define PARF_ATU_BASE_ADDR_HI         0x638
 #define PARF_DEVICE_TYPE              0x1000
+#define PARF_BDF_TO_SID_TABLE_N       0x2000
+#define PARF_BDF_TO_SID_CFG           0x2C00
 
 // DWC port logic (pcie-designware.h)
 #define DBI_PORT_DEBUG0         0x728
@@ -161,6 +163,7 @@ STATIC UINT32  mFail;   // first failing step, 0 = all good
 STATIC UINT32  mSumLnk, mSumId1, mSumScr0, mSumSmr = 0xFFFFFFFFu;
 STATIC UINT32  mSumBarSz, mSumMhi[4], mSumAtu0, mSumAtu1, mSumSmrOk;
 STATIC UINT32  mSumCb = 0xFFFFFFFFu, mSumCbSctlr, mSumCbTtbr;
+STATIC UINT32  mSumSidCfg0, mSumSidCfg, mSumSidEnt;
 
 // ---- helpers ---------------------------------------------------------------
 STATIC VOID
@@ -598,6 +601,70 @@ MapMmio (
 // blocks) maps 0..512 GB 1:1, covering both the DMA buffers and the GICv2m
 // MSI doorbell (0x17A10000). The table lives in Reserved memory so it stays
 // valid after ExitBootServices. Register offsets per Linux arm-smmu.h.
+// ---- PARF BDF->SID table (Linux qcom_pcie_config_sid_1_9_0) ---------------------
+// The controller boots with PARF_BDF_TO_SID_CFG.BYPASS set: the SMMU stream ID
+// of inbound (device->host) traffic is then not the sm8250 iommu-map value, so
+// the device's DMA never hits the 0x1c00/0x1c01 SMRs (p13: SMMU path correct,
+// QCA6390 PBL still "image transfer failed"). Program the table exactly like
+// Linux: hash = CRC8 (poly 0x07, MSB first) over the big-endian 16-bit BDF;
+// entry = BDF[31:16] | (SID - 0x1c00)[15:8] | NEXT[7:0]. iommu-map:
+// BDF 0x000 -> 0x1c00 (root port), BDF 0x100 -> 0x1c01 (QCA6390).
+STATIC UINT8
+Crc8Bdf (
+  UINT16  Bdf
+  )
+{
+  UINT8   Data[2] = { (UINT8)(Bdf >> 8), (UINT8)Bdf };
+  UINT8   Crc = 0;
+  UINTN   I, B;
+
+  for (I = 0; I < 2; I++) {
+    Crc ^= Data[I];
+    for (B = 0; B < 8; B++) {
+      Crc = (Crc & 0x80u) ? (UINT8)((Crc << 1) ^ 0x07u) : (UINT8)(Crc << 1);
+    }
+  }
+  return Crc;
+}
+
+STATIC VOID
+ConfigSidPcie0 (
+  VOID
+  )
+{
+  STATIC CONST UINT16  Bdf[2] = { 0x0000u, 0x0100u };
+  STATIC CONST UINT32  Off[2] = { 0u, 1u };              // SID - 0x1c00
+  UINTN                Tbl = PARF + PARF_BDF_TO_SID_TABLE_N;
+  UINT32               K, Val, Cur;
+  UINT8                Hash;
+
+  mSumSidCfg0 = MmioRead32 (PARF + PARF_BDF_TO_SID_CFG);
+  MmioWrite32 (PARF + PARF_BDF_TO_SID_CFG, mSumSidCfg0 & ~BIT0);   // BYPASS off
+  for (K = 0; K < 256; K++) {
+    MmioWrite32 (Tbl + 4u * K, 0);
+  }
+  for (K = 0; K < 2; K++) {
+    Hash = Crc8Bdf (Bdf[K]);
+    Val  = MmioRead32 (Tbl + 4u * Hash);
+    while (Val != 0) {                                     // collision: chain via NEXT
+      Cur = Hash++;
+      if ((Val & 0xFFu) == 0) {
+        MmioWrite32 (Tbl + 4u * Cur, Val | Hash);
+      }
+      Val = MmioRead32 (Tbl + 4u * Hash);
+    }
+    MmioWrite32 (Tbl + 4u * Hash, ((UINT32)Bdf[K] << 16) | (Off[K] << 8));
+  }
+  mSumSidCfg = MmioRead32 (PARF + PARF_BDF_TO_SID_CFG);
+  mSumSidEnt = MmioRead32 (Tbl + 4u * Crc8Bdf (0x0100u));
+  DEBUG ((
+    DEBUG_ERROR,
+    "DaguPcie: BDF->SID cfg %08x -> %08x, [%02x]=%08x (BDF 0) [%02x]=%08x (BDF 1:0.0)\n",
+    mSumSidCfg0, mSumSidCfg, Crc8Bdf (0), MmioRead32 (Tbl + 4u * Crc8Bdf (0)),
+    Crc8Bdf (0x0100u), mSumSidEnt
+    ));
+}
+
 #define SMMU            0x15000000u
 #define SMMU_SCR0       0x000
 #define SMMU_IDR0       0x020
@@ -936,6 +1003,7 @@ DaguPcieDxeInitialize (
   Up = BringUpPcie0 () && ProbeConfig ();
   if (Up) {
     ProbeBar0 ();
+    ConfigSidPcie0 ();
     SmmuBypassPcie0 ();
     PublishAcpi ();
   }
@@ -947,6 +1015,10 @@ DaguPcieDxeInitialize (
     mSumLnk ? "UP" : "DOWN", mSumId1, mSumAtu0, mSumAtu1,
     mSumBarSz, mSumMhi[0], mSumMhi[1], mSumMhi[2], mSumMhi[3],
     mSumScr0, (mSumScr0 >> 10) & 1u, (INT32)mSumCb, mSumCbSctlr, mSumCbTtbr, mSumSmrOk
+    ));
+  DEBUG ((
+    DEBUG_ERROR, "=== BDF->SID cfg %08x -> %08x  entry[0x%02x] %08x (want 01000100)\n",
+    mSumSidCfg0, mSumSidCfg, Crc8Bdf (0x0100u), mSumSidEnt
     ));
   if (Up) {
     SmmuDumpBypass ();

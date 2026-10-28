@@ -452,10 +452,10 @@ BringUpPcie0 (
   Set32 (PARF + PARF_MHI_CLOCK_RESET_CTRL, BIT4);              // BYPASS
   Clr32 (PARF + PARF_PM_CTRL, BIT5);                           // REQ_NOT_ENTR_L1
   Set32 (PARF + PARF_AXI_MSTR_WR_ADDR_HALT_V2, BIT31);
-  DEBUG ((DEBUG_ERROR, "DaguPcie: PARF written, reading DBI\n"));
-  DEBUG ((
-    DEBUG_ERROR, "DaguPcie: PARF ok, DBI id %08x\n", MmioRead32 (DBI)
-    ));
+  // Do NOT touch DBI yet: the DWC core runs off the PHY pipe clock, and a
+  // DBI read before the PHY is started stalls the bus (third device boot
+  // hung exactly here). Linux also only touches DBI after phy_power_on().
+  DEBUG ((DEBUG_ERROR, "DaguPcie: PARF written\n"));
 
   // qmp_pcie_init + qmp_pcie_power_on (sm8250 gen3x1).
   DEBUG ((DEBUG_ERROR, "DaguPcie: step 3 PHY reset + tables\n"));
@@ -470,13 +470,15 @@ BringUpPcie0 (
   ClocksOn (TRUE);                                             // pipe
   Clr32 (PHY_PCS + PCS_SW_RESET, BIT0);
   Set32 (PHY_PCS + PCS_START_CTRL, BIT0 | BIT1);               // SERDES_START | PCS_START
+  DEBUG ((DEBUG_ERROR, "DaguPcie: PHY started, waiting PHYSTATUS\n"));
   StallMs (2);
   if (!Poll (PHY_PCS + PCS_STATUS1, BIT6, 0, 10000)) {         // PHYSTATUS
     DEBUG ((DEBUG_ERROR, "DaguPcie: PHY status1 %08x\n", MmioRead32 (PHY_PCS + PCS_STATUS1)));
     Fail (3, "QMP PHY did not come up");
     return FALSE;
   }
-  DEBUG ((DEBUG_ERROR, "DaguPcie: PHY up (%u writes)\n", (UINT32)ARRAY_SIZE (mQmp)));
+  DEBUG ((DEBUG_ERROR, "DaguPcie: PHY up (%u writes), reading DBI\n", (UINT32)ARRAY_SIZE (mQmp)));
+  DEBUG ((DEBUG_ERROR, "DaguPcie: DBI id %08x\n", MmioRead32 (DBI)));
 
   // post_init: no hot-plug capable slot.
   DEBUG ((DEBUG_ERROR, "DaguPcie: step 4 root port + iATU\n"));

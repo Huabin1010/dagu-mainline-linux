@@ -148,6 +148,7 @@ python3 ../linux-mainline/scripts/fb-usb.py reboot
 
 - [woa-dagu-status-2026-10-26.md](woa-dagu-status-2026-10-26.md)：移植进度和启动链上已修掉的问题
 - [woa-dagu-touch-2026-10-28.md](woa-dagu-touch-2026-10-28.md)：Himax 触摸屏在 Windows 上的适配过程、驱动构建和快速替换方法、延迟问题
+- [woa-dagu-wifi-bt-rotation-2026-10-28.md](woa-dagu-wifi-bt-rotation-2026-10-28.md)：Wi-Fi / 蓝牙 / 屏幕旋转适配方案和分步计划
 - [dagu-lun4-gpt-recovery-2026-10-27.md](dagu-lun4-gpt-recovery-2026-10-27.md)：分区表损坏和恢复
 - [dagu-usb-serial-console.md](dagu-usb-serial-console.md)：串口控制台
 - [early-boot-troubleshooting.md](early-boot-troubleshooting.md)：早期启动现象对照

@@ -36,7 +36,7 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiDriverEntryPoint.h>
 
-#define DAGU_PCIE_HOLD_S  20u
+#define DAGU_PCIE_HOLD_S  30u
 
 // ---- addresses (sm8250.dtsi pcie@1c00000 / phy@1c06000, gcc-sm8250.c) ----
 #define PARF        0x01C00000u
@@ -154,6 +154,11 @@ STATIC CONST UINT8  mSsdt[] = {
 };
 
 STATIC UINT32  mFail;   // first failing step, 0 = all good
+
+// Values repeated in the final summary (the only screen held long enough to
+// photograph; earlier lines scroll away).
+STATIC UINT32  mSumLnk, mSumId1, mSumScr0, mSumSmr = 0xFFFFFFFFu, mSumSmrNew = 0xFFFFFFFFu;
+STATIC UINT32  mSumBarSz, mSumMhi[4], mSumAtu0, mSumAtu1;
 
 // ---- helpers ---------------------------------------------------------------
 STATIC VOID
@@ -535,6 +540,7 @@ BringUpPcie0 (
     (Sta & BIT13) ? "UP" : "DOWN", (UINT32)(I * 5), Sta,
     MmioRead32 (DBI + DBI_PORT_DEBUG0), MmioRead32 (DBI + DBI_PORT_DEBUG1)
     ));
+  mSumLnk = (Sta & BIT13) ? 1 : 0;
   if (!(Sta & BIT13)) {
     Fail (4, "link did not train");
     return FALSE;
@@ -600,6 +606,7 @@ SmmuBypassPcie0 (
 
   Scr0 = MmioRead32 (SMMU + SMMU_SCR0);
   Idr0 = MmioRead32 (SMMU + SMMU_IDR0);
+  mSumScr0 = Scr0;
   N = Idr0 & 0xFFu;
   for (I = 0; I < N && I < 128; I++) {
     Smr = MmioRead32 (SMMU + SMMU_SMR (I));
@@ -620,6 +627,7 @@ SmmuBypassPcie0 (
     (Hit != 0xFFFFFFFFu) ? "matched by SMR " : "unmatched, free SMR ",
     (Hit != 0xFFFFFFFFu) ? Hit : FreeSlot
     ));
+  mSumSmr = Hit;
   if (Hit != 0xFFFFFFFFu) {
     DEBUG ((DEBUG_ERROR, "DaguPcie: SMR %u S2CR %08x (left alone)\n",
             Hit, MmioRead32 (SMMU + SMMU_S2CR (Hit))));
@@ -633,6 +641,7 @@ SmmuBypassPcie0 (
     DEBUG ((DEBUG_ERROR, "DaguPcie: no free SMR, PCIe DMA will fault\n"));
     return;
   }
+  mSumSmrNew = FreeSlot;
   MmioWrite32 (SMMU + SMMU_S2CR (FreeSlot), S2CR_BYPASS);
   MmioWrite32 (SMMU + SMMU_SMR (FreeSlot), SMR_VALID | (PCIE0_SID_MASK << 16) | PCIE0_SID);
   DEBUG ((
@@ -661,6 +670,9 @@ ProbeConfig (
     "DaguPcie: bus0 %08x | bus1 dev0 %08x subsys %08x class %08x | fn1 %08x dev1 %08x\n",
     Id0, Id1, Ss, Cls, Id1f1, Id1d1
     ));
+  mSumId1 = Id1;
+  mSumAtu0 = MmioRead32 (ATU + ATU_CTRL2);
+  mSumAtu1 = MmioRead32 (ATU + 0x200 + ATU_CTRL2);
   if ((Id1 & 0xFFFF) != 0x17CB) {
     Fail (5, "no Qualcomm device on bus 1");
     return FALSE;
@@ -669,6 +681,53 @@ ProbeConfig (
     DEBUG ((DEBUG_ERROR, "DaguPcie: WARNING config aliasing (ECAM shift mode not effective)\n"));
   }
   return TRUE;
+}
+
+// What qcwlan does first: map BAR0 and read the MHI registers (MHIREGLEN
+// +0x0, MHIVER +0x8, MHICFG +0x10, BHIOFF +0x28). All-ones means the BAR
+// window does not reach the device; that alone would make the driver report
+// a bad MHI version. BAR and command register are restored to 0 afterwards
+// so Windows assigns resources itself.
+STATIC VOID
+ProbeBar0 (
+  VOID
+  )
+{
+  UINTN   Cfg = CFG_WIN;
+  UINT32  Lo, Hi, Sz, Base;
+
+  MmioWrite32 (Cfg + 0x10, 0xFFFFFFFFu);
+  Lo = MmioRead32 (Cfg + 0x10);
+  Sz = ~(Lo & 0xFFFFFFF0u) + 1;
+  mSumBarSz = Sz;
+  if (Lo == 0 || Lo == 0xFFFFFFFFu || Sz == 0 || Sz > 0x02000000u) {
+    DEBUG ((DEBUG_ERROR, "DaguPcie: BAR0 sizing read %08x, skip\n", Lo));
+    MmioWrite32 (Cfg + 0x10, 0);
+    return;
+  }
+  Base = (MEM_BASE + Sz - 1) & ~(Sz - 1);           // first aligned slot
+  MmioWrite32 (Cfg + 0x10, Base | (Lo & 0xF));
+  if ((Lo & 0x6) == 0x4) {                          // 64-bit BAR
+    MmioWrite32 (Cfg + 0x14, 0);
+  }
+  Hi = MmioRead32 (Cfg + 0x04);
+  MmioWrite32 (Cfg + 0x04, (Hi & 0xFFFF0000u) | 0x0006u);   // MEM | MASTER
+  // Root port: forward that window downstream.
+  MmioWrite32 (DBI + 0x20, ((MEM_LIMIT >> 16) & 0xFFF0u) << 16 | ((MEM_BASE >> 16) & 0xFFF0u));
+  MmioWrite32 (DBI + 0x04, (MmioRead32 (DBI + 0x04) & 0xFFFF0000u) | 0x0146u);
+  StallMs (1);
+  mSumMhi[0] = MmioRead32 (Base + 0x00);
+  mSumMhi[1] = MmioRead32 (Base + 0x08);
+  mSumMhi[2] = MmioRead32 (Base + 0x10);
+  mSumMhi[3] = MmioRead32 (Base + 0x28);
+  DEBUG ((
+    DEBUG_ERROR, "DaguPcie: BAR0 %08x size %x @%08x: MHIREGLEN %08x MHIVER %08x MHICFG %08x BHIOFF %08x\n",
+    Lo, Sz, Base, mSumMhi[0], mSumMhi[1], mSumMhi[2], mSumMhi[3]
+    ));
+  // Hand the device back unconfigured.
+  MmioWrite32 (Cfg + 0x04, Hi & 0xFFFF0000u);
+  MmioWrite32 (Cfg + 0x10, 0);
+  MmioWrite32 (Cfg + 0x14, 0);
 }
 
 #pragma pack(1)
@@ -734,9 +793,19 @@ DaguPcieDxeInitialize (
   PowerQca6390 ();
   Up = BringUpPcie0 () && ProbeConfig ();
   if (Up) {
+    ProbeBar0 ();
     SmmuBypassPcie0 ();
     PublishAcpi ();
   }
+  DEBUG ((
+    DEBUG_ERROR,
+    "\n=== SUMMARY  link %a  dev %08x  atu0 %08x atu1 %08x\n"
+    "=== BAR0 size %x  MHIREGLEN %08x MHIVER %08x MHICFG %08x BHIOFF %08x\n"
+    "=== SMMU sCR0 %08x (CLIENTPD %u USFCFG %u)  SMR hit %d new %d\n",
+    mSumLnk ? "UP" : "DOWN", mSumId1, mSumAtu0, mSumAtu1,
+    mSumBarSz, mSumMhi[0], mSumMhi[1], mSumMhi[2], mSumMhi[3],
+    mSumScr0, mSumScr0 & 1u, (mSumScr0 >> 10) & 1u, (INT32)mSumSmr, (INT32)mSumSmrNew
+    ));
   DEBUG ((
     DEBUG_ERROR,
     "=== DAGU PCIE0: %a (first failing step %u) - holding %u s ===\n",

@@ -10,6 +10,7 @@
 #   dagu-rescue.sh wait [秒]                  等任意一侧上线（默认 300 秒）
 #   dagu-rescue.sh rm-dsdt                    从 Linux 删掉 DSDT 覆盖表
 #   dagu-rescue.sh set-pep <0|1|3|4>          从 Linux 改 qcpep 的 Start
+#   dagu-rescue.sh disable-pep0               从 Linux 把 PEP0 设备设为禁用（保留 ACPI 节点）
 #   dagu-rescue.sh to-win                     进 fastboot，切 A 槽，重启
 #   dagu-rescue.sh auto                       等上线；若落到 Linux 就删覆盖表并切回 A
 #   dagu-rescue.sh hive-run <本地脚本>        把脚本推到 Linux 上以 root 执行
@@ -111,6 +112,30 @@ for k in Start Type Group ImagePath; do printf '  %s=%s\n' \"\$k\" \"\$(hivexget
 	unmount_win
 }
 
+# 离线把 PEP0 这个 PnP 设备设为禁用（ConfigFlags=1），这样开机时 PnP 不会加载 qcpep，
+# 但 ACPI 里的 PEP0 节点仍然保留，便于下次在系统跑起来之后再手动启用。
+cmd_disable_pep0() {
+	linux_up || { echo "Linux 不在线" >&2; return 1; }
+	mount_win || return 1
+	lsh "H=/mnt/w/Windows/System32/config/SYSTEM
+cp -f \"\$H\" /root/SYSTEM.bak-cfg-\$(date +%H%M%S)
+K='ControlSet001\\Enum\\ACPI\\QCOM2519\\2&daba3ff&0'
+cat > /tmp/cfg.txt <<'EOF'
+cd ControlSet001\\Enum\\ACPI\\QCOM2519\\2&daba3ff&0
+setval 3
+ConfigFlags
+dword:00000001
+Service
+string:qcpep
+Driver
+string:{4d36e97d-e325-11ce-bfc1-08002be10318}\\0025
+commit
+EOF
+hivexsh -w -f /tmp/cfg.txt \"\$H\" 2>&1 && echo PEP0_DISABLED
+echo \"  ConfigFlags=\$(hivexget \"\$H\" \"\$K\" ConfigFlags)\""
+	unmount_win
+}
+
 cmd_hive_run() {
 	local script="${1:?用法: hive-run <本地脚本>}"
 	linux_up || { echo "Linux 不在线" >&2; return 1; }
@@ -155,6 +180,7 @@ case "${1:-status}" in
 	wait)     cmd_wait "${2:-300}" ;;
 	rm-dsdt)  cmd_rm_dsdt ;;
 	set-pep)  cmd_set_pep "${2:-}" ;;
+	disable-pep0) cmd_disable_pep0 ;;
 	to-win)   cmd_to_win ;;
 	auto)     cmd_auto "${2:-300}" ;;
 	hive-run) cmd_hive_run "${2:-}" ;;

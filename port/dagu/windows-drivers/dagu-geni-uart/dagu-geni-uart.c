@@ -243,6 +243,15 @@ typedef struct _GENI_UART_CONTEXT {
 
     /* PIO receive transaction. */
     GENI_STATE         RxState;
+    /*
+     * The RX FIFO is word-wide (4 bytes) but SerCx2 may ask for fewer bytes
+     * (QcBluetooth reads the 3-byte HCI event header first). Bytes of a
+     * popped word that did not fit are kept here for the next read instead
+     * of being dropped.
+     */
+    UCHAR              RxCarry[BYTES_PER_FIFO_WORD];
+    ULONG              RxCarryN;
+    ULONG              RxCarryOff;
 
     /*
      * Telemetry. DbgPrint is not capturable on this board (DebugView's ARM64
@@ -647,6 +656,8 @@ EvtSerCx2PurgeFifos(WDFDEVICE Device, BOOLEAN PurgeRx, BOOLEAN PurgeTx)
     if (PurgeRx) {
         StopRx(c);
         DrainRxFifo(c);
+        c->RxCarryN = 0;
+        c->RxCarryOff = 0;
     }
 }
 
@@ -826,6 +837,13 @@ EvtTxInit(SERCX2PIOTRANSMIT PioTransmit, ULONG Length)
     Wr(c, SE_UART_TX_TRANS_LEN, Length);
     Wr(c, SE_GENI_TX_WATERMARK_REG, c->TxFifoDepth / 2);
     Wr(c, SE_GENI_M_CMD0, UART_START_TX << M_OPCODE_SHFT);
+    /*
+     * A driver that registers EvtSerCx2PioTransmitInitializeTransaction
+     * must report completion; until it does SerCx2 never calls
+     * EvtTxWriteBuffer, the write never completes, and the stuck request
+     * later blocks power-down (bugcheck 0xA0 / 0xF0).
+     */
+    SerCx2PioTransmitInitializeTransactionComplete(PioTransmit, TRUE);
 }
 
 static VOID
@@ -835,6 +853,7 @@ EvtTxCleanup(SERCX2PIOTRANSMIT PioTransmit)
     TmEv(c, EV_TXCLEAN, c->TxRemaining);
     c->TxState = STATE_STOPPED;
     c->TxRemaining = 0;
+    SerCx2PioTransmitCleanupTransactionComplete(PioTransmit);
 }
 
 static ULONG
@@ -970,6 +989,7 @@ EvtRxInit(SERCX2PIORECEIVE PioReceive, ULONG Length)
     TmEv(c, EV_RXINIT, Length);
     c->RxState = STATE_IDLE;
     StartRx(c);
+    SerCx2PioReceiveInitializeTransactionComplete(PioReceive, TRUE);
 }
 
 static VOID
@@ -978,46 +998,67 @@ EvtRxCleanup(SERCX2PIORECEIVE PioReceive)
     PGENI_UART_CONTEXT c = GeniGetPioContext(PioReceive)->Ctx;
     TmEv(c, EV_RXCLEAN, c->RxState);
     c->RxState = STATE_STOPPED;
-    StopRx(c);
+    /*
+     * Keep the GENI RX engine (UART_START_READ) running between
+     * transactions; only mask the RX interrupts. QcBluetooth reads the
+     * 3-byte HCI event header and the payload as two transactions.
+     * Cancelling the S command here dropped every payload byte that
+     * arrived during the cancel/restart gap, so each vendor command
+     * timed out. Mainline and SerPL011 also leave the receiver enabled.
+     */
+    ClrB(c, SE_GENI_S_IRQ_EN, S_RX_FIFO_WATERMARK_EN | S_RX_FIFO_LAST_EN);
+    SerCx2PioReceiveCleanupTransactionComplete(PioReceive);
 }
 
 static ULONG
 EvtRxReadBuffer(SERCX2PIORECEIVE PioReceive, PUCHAR Buffer, ULONG Length)
 {
     PGENI_UART_CONTEXT c = GeniGetPioContext(PioReceive)->Ctx;
-    ULONG read = 0, status, words, lastBytes, totalBytes;
+    ULONG read = 0, status, words, lastBytes;
 
     c->RxState = STATE_IDLE;
 
-    status = Rd(c, SE_GENI_RX_FIFO_STATUS);
-    words = status & RX_FIFO_WC_MSK;
-    if (words == 0) {
+    /* 1. Bytes left over from a word popped by a previous, shorter read. */
+    while (read < Length && c->RxCarryOff < c->RxCarryN)
+        Buffer[read++] = c->RxCarry[c->RxCarryOff++];
+
+    /*
+     * 2. Pop only as many FIFO words as this read needs. Popping the whole
+     *    FIFO and truncating to Length silently dropped the HCI event
+     *    payload after QcBluetooth's 3-byte header read, so every vendor
+     *    command timed out and was retried forever.
+     */
+    if (read < Length) {
+        status = Rd(c, SE_GENI_RX_FIFO_STATUS);
+        words = status & RX_FIFO_WC_MSK;
+        lastBytes = (status & RX_LAST_BYTE_VALID_MSK) >> RX_LAST_BYTE_VALID_SHFT;
+
+        while (read < Length && words > 0) {
+            ULONG word, n = BYTES_PER_FIFO_WORD, i;
+
+            if (words == 1 && (status & RX_LAST) && lastBytes &&
+                lastBytes < BYTES_PER_FIFO_WORD)
+                n = lastBytes;
+            word = Rd(c, SE_GENI_RX_FIFOn);
+            words--;
+
+            c->RxCarryN = 0;
+            c->RxCarryOff = 0;
+            for (i = 0; i < n; i++) {
+                UCHAR b = (UCHAR)(word & 0xFF);
+                word >>= 8;
+                if (read < Length)
+                    Buffer[read++] = b;
+                else
+                    c->RxCarry[c->RxCarryN++] = b;
+            }
+        }
+    }
+
+    if (read == 0) {
         TmEv(c, EV_RXREAD, Length & 0xFFF);
         return 0;
     }
-
-    lastBytes = (status & RX_LAST_BYTE_VALID_MSK) >> RX_LAST_BYTE_VALID_SHFT;
-    totalBytes = BYTES_PER_FIFO_WORD * (words - 1);
-    if ((status & RX_LAST) && lastBytes)
-        totalBytes += lastBytes;
-    else
-        totalBytes += BYTES_PER_FIFO_WORD;
-
-    while (read < totalBytes) {
-        ULONG word = Rd(c, SE_GENI_RX_FIFOn);
-        ULONG n = totalBytes - read;
-        ULONG i;
-        if (n > BYTES_PER_FIFO_WORD)
-            n = BYTES_PER_FIFO_WORD;
-        for (i = 0; i < n; i++) {
-            if (read < Length)
-                Buffer[read] = (UCHAR)(word & 0xFF);
-            read++;
-            word >>= 8;
-        }
-    }
-    if (read > Length)
-        read = Length;
     TmBytes(c->RxLog, &c->RxLogN, &c->RxBytes, Buffer, read);
     TmEv(c, EV_RXREAD, (read << 12) | (Length & 0xFFF));
     return read;
@@ -1035,8 +1076,13 @@ EvtRxEnableReady(SERCX2PIORECEIVE PioReceive)
         WdfInterruptReleaseLock(c->Interrupt);
         return;
     }
-    /* If data is already waiting, complete inline (the IRQ may not re-fire). */
-    if ((Rd(c, SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC_MSK) != 0) {
+    /*
+     * If data is already waiting, complete inline (the IRQ may not re-fire).
+     * Carried-over bytes from a partially consumed FIFO word count too: they
+     * are no longer in the FIFO, so no RX interrupt will ever announce them.
+     */
+    if (c->RxCarryOff < c->RxCarryN ||
+        (Rd(c, SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC_MSK) != 0) {
         c->RxState = STATE_COMPLETE;
         WdfInterruptReleaseLock(c->Interrupt);
         SerCx2PioReceiveReady(PioReceive);
@@ -1347,10 +1393,10 @@ EvtReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
     PGENI_UART_CONTEXT c = GeniGetContext(Device);
     UNREFERENCED_PARAMETER(Translated);
     /*
-     * The timer keeps running across D0Exit on purpose, so a removal that
-     * stalls between D0Exit and here is still visible. Stop it, let the
-     * last queued dump finish, then write one final snapshot while the SE
-     * is still mapped.
+     * The telemetry timer is already stopped in EvtD0Exit (it must not run
+     * while the device is in Dx). This is just belt-and-suspenders in case
+     * ReleaseHardware is reached without a preceding D0Exit; the stop/flush
+     * are idempotent. Take one final snapshot while the SE is still mapped.
      */
     if (c->TmTimer)
         WdfTimerStop(c->TmTimer, TRUE);
@@ -1371,6 +1417,8 @@ EvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
     PGENI_UART_CONTEXT c = GeniGetContext(Device);
 
     TmEv(c, EV_D0ENTRY, (ULONG)PreviousState);
+    c->RxCarryN = 0;
+    c->RxCarryOff = 0;
     ConfigPacking(c);
     SeInit(c);
     ProgramBaud(c, c->BaudRate ? c->BaudRate : 115200);
@@ -1386,8 +1434,22 @@ EvtD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
 {
     PGENI_UART_CONTEXT c = GeniGetContext(Device);
     TmEv(c, EV_D0EXIT, (ULONG)TargetState);
+    /*
+     * Stop the telemetry timer BEFORE the SE can lose power. On a system
+     * suspend (TargetState D3) the GENI clocks/power can go away, so a
+     * periodic work item that reads SE MMIO after this point would stall
+     * the power-down IRP and trip the suspend watchdog: bugcheck 0xA0 with
+     * parameter 1 = 0xF0 (power transition not completed in time). Stop the
+     * timer, flush any queued work item, then take one last snapshot while
+     * the SE is still mapped and powered.
+     */
+    if (c->TmTimer)
+        WdfTimerStop(c->TmTimer, TRUE);
+    if (c->TmWork)
+        WdfWorkItemFlush(c->TmWork);
     StopRx(c);
     CancelMCmd(c);
+    TmDump(c);
     return STATUS_SUCCESS;
 }
 

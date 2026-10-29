@@ -183,6 +183,16 @@
 
 #define DAGU_TAG                'UneG'
 
+/* Telemetry ring (see GENI_UART_CONTEXT). */
+#define TM_EV_N                 64
+#define TM_LOG_N                64
+enum {
+    EV_D0ENTRY = 1, EV_D0EXIT, EV_APPLYCFG, EV_PURGE, EV_SETWAIT, EV_CONTROL,
+    EV_TXINIT, EV_TXCLEAN, EV_TXWRITE, EV_TXENABLE, EV_TXCANCEL, EV_TXDRAIN,
+    EV_TXCANCELDRAIN, EV_TXPURGE, EV_RXINIT, EV_RXCLEAN, EV_RXREAD,
+    EV_RXENABLE, EV_RXCANCEL, EV_DPC_RX, EV_DPC_TX, EV_DPC_DRAIN, EV_DPC_WAIT,
+};
+
 /* ------------------------------------------------------------------ */
 /* Driver state.                                                       */
 /* ------------------------------------------------------------------ */
@@ -233,6 +243,27 @@ typedef struct _GENI_UART_CONTEXT {
 
     /* PIO receive transaction. */
     GENI_STATE         RxState;
+
+    /*
+     * Telemetry. DbgPrint is not capturable on this board (DebugView's ARM64
+     * kernel capture returns nothing), so every SerCx2 callback appends a
+     * code to a ring and a 1 s timer + work item dumps the ring, counters,
+     * the first bytes on the wire and a register snapshot into the device's
+     * "Device Parameters" registry key, readable from user mode.
+     */
+    WDFTIMER           TmTimer;
+    WDFWORKITEM        TmWork;
+    LONG               EvIdx;
+    ULONG              EvRing[TM_EV_N];
+    LONG               IsrCount;
+    LONG               IsrMOr;
+    LONG               IsrSOr;
+    LONG               TxBytes;
+    LONG               RxBytes;
+    LONG               TxLogN;
+    LONG               RxLogN;
+    UCHAR              TxLog[TM_LOG_N];
+    UCHAR              RxLog[TM_LOG_N];
 } GENI_UART_CONTEXT, *PGENI_UART_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(GENI_UART_CONTEXT, GeniGetContext)
@@ -251,6 +282,23 @@ static ULONG gDbg = 1;
 #define GLOG0(msg) \
     do { if (gDbg) DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, \
         "dagu-geni-uart: " msg "\n"); } while (0)
+
+/* Append one telemetry event: code in the top byte, a 24-bit argument. */
+static __forceinline VOID TmEv(PGENI_UART_CONTEXT c, ULONG code, ULONG arg)
+{
+    LONG i = InterlockedIncrement(&c->EvIdx) - 1;
+    c->EvRing[(ULONG)i % TM_EV_N] = (code << 24) | (arg & 0x00FFFFFFu);
+}
+
+/* Record the first TM_LOG_N bytes ever seen in one direction. */
+static VOID TmBytes(PUCHAR log, LONG *logN, LONG *total,
+                    const UCHAR *buf, ULONG n)
+{
+    ULONG i;
+    for (i = 0; i < n && *logN < TM_LOG_N; i++)
+        log[(*logN)++] = buf[i];
+    InterlockedExchangeAdd(total, (LONG)n);
+}
 
 /* ------------------------------------------------------------------ */
 /* Register helpers.                                                   */
@@ -574,7 +622,10 @@ static VOID StopRx(PGENI_UART_CONTEXT c)
 static NTSTATUS
 EvtSerCx2ApplyConfig(WDFDEVICE Device, PVOID ConnectionParameters)
 {
-    return ApplyConnectionDescriptor(GeniGetContext(Device), ConnectionParameters);
+    PGENI_UART_CONTEXT c = GeniGetContext(Device);
+    NTSTATUS st = ApplyConnectionDescriptor(c, ConnectionParameters);
+    TmEv(c, EV_APPLYCFG, NT_SUCCESS(st) ? (c->BaudRate / 100) : 0xFFFFFF);
+    return st;
 }
 
 static VOID
@@ -588,6 +639,7 @@ EvtSerCx2PurgeFifos(WDFDEVICE Device, BOOLEAN PurgeRx, BOOLEAN PurgeTx)
      * DaguQupDxe enabled, that held GIC 639 high (bugcheck 0x133).
      * Mainline's FIFO flush path does not touch the DMA engine either.
      */
+    TmEv(c, EV_PURGE, (PurgeRx ? 1u : 0u) | (PurgeTx ? 2u : 0u));
     if (PurgeTx) {
         CancelMCmd(c);
         c->TxRemaining = 0;
@@ -602,6 +654,7 @@ static VOID
 EvtSerCx2SetWaitMask(WDFDEVICE Device, WDFREQUEST Request, ULONG WaitMask)
 {
     PGENI_UART_CONTEXT c = GeniGetContext(Device);
+    TmEv(c, EV_SETWAIT, WaitMask);
     WdfInterruptAcquireLock(c->Interrupt);
     c->WaitMask = WaitMask;
     c->WaitEvents = 0;
@@ -746,6 +799,9 @@ EvtSerCx2Control(WDFDEVICE Device, WDFREQUEST Request,
         break;
     }
 
+    /* arg: IOCTL function code (bits 2..13) + 0x800000 if it failed. */
+    TmEv(c, EV_CONTROL, ((IoControlCode >> 2) & 0xFFF) |
+                        (NT_SUCCESS(status) ? 0u : 0x800000u));
     WdfRequestCompleteWithInformation(Request, status, info);
     return status;
 }
@@ -758,6 +814,7 @@ EvtTxInit(SERCX2PIOTRANSMIT PioTransmit, ULONG Length)
 {
     PGENI_UART_CONTEXT c = GeniGetPioContext(PioTransmit)->Ctx;
 
+    TmEv(c, EV_TXINIT, Length);
     /* Start one GENI TX command for the whole transaction length. */
     if (MainActive(c))
         CancelMCmd(c);
@@ -775,6 +832,7 @@ static VOID
 EvtTxCleanup(SERCX2PIOTRANSMIT PioTransmit)
 {
     PGENI_UART_CONTEXT c = GeniGetPioContext(PioTransmit)->Ctx;
+    TmEv(c, EV_TXCLEAN, c->TxRemaining);
     c->TxState = STATE_STOPPED;
     c->TxRemaining = 0;
 }
@@ -808,6 +866,8 @@ EvtTxWriteBuffer(SERCX2PIOTRANSMIT PioTransmit, PUCHAR Buffer, ULONG Length)
         c->TxRemaining = 0;
 
     Wr(c, SE_GENI_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
+    TmBytes(c->TxLog, &c->TxLogN, &c->TxBytes, Buffer, written);
+    TmEv(c, EV_TXWRITE, (written << 12) | (Length & 0xFFF));
     return written;
 }
 
@@ -824,6 +884,7 @@ EvtTxEnableReady(SERCX2PIOTRANSMIT PioTransmit)
     c->TxState = STATE_WAITING_FOR_INTERRUPT;
     SetB(c, SE_GENI_M_IRQ_EN, M_TX_FIFO_WATERMARK_EN | M_CMD_DONE_EN);
     WdfInterruptReleaseLock(c->Interrupt);
+    TmEv(c, EV_TXENABLE, Rd(c, SE_GENI_TX_FIFO_STATUS) & 0xFFFF);
 }
 
 static BOOLEAN
@@ -844,6 +905,7 @@ EvtTxCancelReady(SERCX2PIOTRANSMIT PioTransmit)
         cancelled = FALSE;
         break;
     }
+    TmEv(c, EV_TXCANCEL, ((ULONG)c->TxState << 8) | (cancelled ? 1u : 0u));
     WdfInterruptReleaseLock(c->Interrupt);
     return cancelled;
 }
@@ -854,6 +916,9 @@ EvtTxDrainFifo(SERCX2PIOTRANSMIT PioTransmit)
     PGENI_UART_CONTEXT c = GeniGetPioContext(PioTransmit)->Ctx;
 
     WdfInterruptAcquireLock(c->Interrupt);
+    TmEv(c, EV_TXDRAIN, ((ULONG)c->TxDrainState << 16) |
+                        ((Rd(c, SE_GENI_STATUS) & 0xFF) << 8) |
+                        (Rd(c, SE_GENI_TX_FIFO_STATUS) & 0xFF));
     if (c->TxDrainState == STATE_CANCELLED) {
         WdfInterruptReleaseLock(c->Interrupt);
         return;
@@ -880,6 +945,7 @@ EvtTxCancelDrainFifo(SERCX2PIOTRANSMIT PioTransmit)
         cancelled = FALSE;
         break;
     }
+    TmEv(c, EV_TXCANCELDRAIN, cancelled ? 1u : 0u);
     WdfInterruptReleaseLock(c->Interrupt);
     return cancelled;
 }
@@ -888,7 +954,7 @@ static VOID
 EvtTxPurgeFifo(SERCX2PIOTRANSMIT PioTransmit, ULONG BytesAlreadyTransmitted)
 {
     PGENI_UART_CONTEXT c = GeniGetPioContext(PioTransmit)->Ctx;
-    UNREFERENCED_PARAMETER(BytesAlreadyTransmitted);
+    TmEv(c, EV_TXPURGE, BytesAlreadyTransmitted);
     CancelMCmd(c);
     c->TxRemaining = 0;
     SerCx2PioTransmitPurgeFifoComplete(PioTransmit, 0);
@@ -901,7 +967,7 @@ static VOID
 EvtRxInit(SERCX2PIORECEIVE PioReceive, ULONG Length)
 {
     PGENI_UART_CONTEXT c = GeniGetPioContext(PioReceive)->Ctx;
-    UNREFERENCED_PARAMETER(Length);
+    TmEv(c, EV_RXINIT, Length);
     c->RxState = STATE_IDLE;
     StartRx(c);
 }
@@ -910,6 +976,7 @@ static VOID
 EvtRxCleanup(SERCX2PIORECEIVE PioReceive)
 {
     PGENI_UART_CONTEXT c = GeniGetPioContext(PioReceive)->Ctx;
+    TmEv(c, EV_RXCLEAN, c->RxState);
     c->RxState = STATE_STOPPED;
     StopRx(c);
 }
@@ -924,8 +991,10 @@ EvtRxReadBuffer(SERCX2PIORECEIVE PioReceive, PUCHAR Buffer, ULONG Length)
 
     status = Rd(c, SE_GENI_RX_FIFO_STATUS);
     words = status & RX_FIFO_WC_MSK;
-    if (words == 0)
+    if (words == 0) {
+        TmEv(c, EV_RXREAD, Length & 0xFFF);
         return 0;
+    }
 
     lastBytes = (status & RX_LAST_BYTE_VALID_MSK) >> RX_LAST_BYTE_VALID_SHFT;
     totalBytes = BYTES_PER_FIFO_WORD * (words - 1);
@@ -949,6 +1018,8 @@ EvtRxReadBuffer(SERCX2PIORECEIVE PioReceive, PUCHAR Buffer, ULONG Length)
     }
     if (read > Length)
         read = Length;
+    TmBytes(c->RxLog, &c->RxLogN, &c->RxBytes, Buffer, read);
+    TmEv(c, EV_RXREAD, (read << 12) | (Length & 0xFFF));
     return read;
 }
 
@@ -957,6 +1028,8 @@ EvtRxEnableReady(SERCX2PIORECEIVE PioReceive)
 {
     PGENI_UART_CONTEXT c = GeniGetPioContext(PioReceive)->Ctx;
 
+    TmEv(c, EV_RXENABLE, ((ULONG)c->RxState << 16) |
+                         (Rd(c, SE_GENI_RX_FIFO_STATUS) & 0xFFFF));
     WdfInterruptAcquireLock(c->Interrupt);
     if (c->RxState == STATE_CANCELLED) {
         WdfInterruptReleaseLock(c->Interrupt);
@@ -993,6 +1066,7 @@ EvtRxCancelReady(SERCX2PIORECEIVE PioReceive)
         break;
     }
     WdfInterruptReleaseLock(c->Interrupt);
+    TmEv(c, EV_RXCANCEL, ((ULONG)c->RxState << 8) | (cancelled ? 1u : 0u));
     return cancelled;
 }
 
@@ -1022,6 +1096,10 @@ EvtInterruptIsr(WDFINTERRUPT Interrupt, ULONG MessageID)
      */
     Wr(c, SE_DMA_TX_IRQ_CLR, dtx);
     Wr(c, SE_DMA_RX_IRQ_CLR, drx);
+
+    c->IsrCount++;
+    c->IsrMOr |= (LONG)m;
+    c->IsrSOr |= (LONG)s;
 
     if (m == 0 && s == 0)
         return (dtx | drx) != 0;
@@ -1088,6 +1166,15 @@ EvtInterruptDpc(WDFINTERRUPT Interrupt, WDFOBJECT AssociatedObject)
     WdfInterruptReleaseLock(c->Interrupt);
 
     if (rxReady)
+        TmEv(c, EV_DPC_RX, 0);
+    if (txReady)
+        TmEv(c, EV_DPC_TX, 0);
+    if (txDrain)
+        TmEv(c, EV_DPC_DRAIN, 0);
+    if (events)
+        TmEv(c, EV_DPC_WAIT, events);
+
+    if (rxReady)
         SerCx2PioReceiveReady(c->PioReceive);
     if (txReady)
         SerCx2PioTransmitReady(c->PioTransmit);
@@ -1095,6 +1182,89 @@ EvtInterruptDpc(WDFINTERRUPT Interrupt, WDFOBJECT AssociatedObject)
         SerCx2PioTransmitDrainFifoComplete(c->PioTransmit);
     if (events)
         SerCx2CompleteWait(c->Device, events);
+}
+
+/* ------------------------------------------------------------------ */
+/* Telemetry dump into Device Parameters (PASSIVE_LEVEL only).         */
+/* ------------------------------------------------------------------ */
+/* Register words copied into TmRegs, in this order. */
+static const USHORT TmRegOffs[] = {
+    SE_GENI_STATUS, SE_GENI_M_CMD0, SE_GENI_M_IRQ_STATUS, SE_GENI_M_IRQ_EN,
+    SE_GENI_S_CMD0, SE_GENI_S_IRQ_STATUS, SE_GENI_S_IRQ_EN,
+    SE_GENI_TX_FIFO_STATUS, SE_GENI_RX_FIFO_STATUS, SE_GENI_IOS,
+    SE_DMA_TX_IRQ_STAT, SE_DMA_RX_IRQ_STAT, SE_UART_TX_TRANS_LEN,
+};
+#define TM_NREG (sizeof(TmRegOffs) / sizeof(TmRegOffs[0]))
+
+static VOID TmPutUlong(WDFKEY key, PCWSTR name, ULONG v)
+{
+    UNICODE_STRING n;
+    RtlInitUnicodeString(&n, name);
+    (VOID)WdfRegistryAssignULong(key, &n, v);
+}
+
+static VOID TmPutBin(WDFKEY key, PCWSTR name, PVOID p, ULONG len)
+{
+    UNICODE_STRING n;
+    RtlInitUnicodeString(&n, name);
+    (VOID)WdfRegistryAssignValue(key, &n, REG_BINARY, len, p);
+}
+
+static VOID TmDump(PGENI_UART_CONTEXT c)
+{
+    WDFKEY key = NULL;
+    ULONG ring[TM_EV_N];
+    ULONG regs[TM_NREG + 8];
+    ULONG i;
+    LONG txn, rxn;
+
+    if (!NT_SUCCESS(WdfDeviceOpenRegistryKey(c->Device, PLUGPLAY_REGKEY_DEVICE,
+                                             KEY_WRITE,
+                                             WDF_NO_OBJECT_ATTRIBUTES, &key)))
+        return;
+
+    RtlCopyMemory(ring, c->EvRing, sizeof(ring));
+    for (i = 0; i < TM_NREG; i++)
+        regs[i] = c->Se ? Rd(c, TmRegOffs[i]) : 0xDEADDEADu;
+    /* Driver-side state after the register words. */
+    regs[TM_NREG + 0] = c->TxState;
+    regs[TM_NREG + 1] = c->TxDrainState;
+    regs[TM_NREG + 2] = c->RxState;
+    regs[TM_NREG + 3] = c->WaitMask;
+    regs[TM_NREG + 4] = c->WaitEvents;
+    regs[TM_NREG + 5] = c->TxRemaining;
+    regs[TM_NREG + 6] = c->BaudRate;
+    regs[TM_NREG + 7] = c->SourceHz;
+
+    txn = c->TxLogN;
+    rxn = c->RxLogN;
+
+    TmPutUlong(key, L"TmEvIdx", (ULONG)c->EvIdx);
+    TmPutBin(key, L"TmEvRing", ring, sizeof(ring));
+    TmPutUlong(key, L"TmIsr", (ULONG)c->IsrCount);
+    TmPutUlong(key, L"TmIsrMOr", (ULONG)c->IsrMOr);
+    TmPutUlong(key, L"TmIsrSOr", (ULONG)c->IsrSOr);
+    TmPutUlong(key, L"TmTxBytes", (ULONG)c->TxBytes);
+    TmPutUlong(key, L"TmRxBytes", (ULONG)c->RxBytes);
+    if (txn > 0)
+        TmPutBin(key, L"TmTxLog", c->TxLog, (ULONG)txn);
+    if (rxn > 0)
+        TmPutBin(key, L"TmRxLog", c->RxLog, (ULONG)rxn);
+    TmPutBin(key, L"TmRegs", regs, sizeof(regs));
+    WdfRegistryClose(key);
+}
+
+static VOID EvtTmWork(WDFWORKITEM WorkItem)
+{
+    TmDump(GeniGetContext((WDFDEVICE)WdfWorkItemGetParentObject(WorkItem)));
+}
+
+static VOID EvtTmTimer(WDFTIMER Timer)
+{
+    PGENI_UART_CONTEXT c =
+        GeniGetContext((WDFDEVICE)WdfTimerGetParentObject(Timer));
+    /* Enqueue is a no-op while the previous dump is still pending. */
+    WdfWorkItemEnqueue(c->TmWork);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1176,6 +1346,17 @@ EvtReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated)
 {
     PGENI_UART_CONTEXT c = GeniGetContext(Device);
     UNREFERENCED_PARAMETER(Translated);
+    /*
+     * The timer keeps running across D0Exit on purpose, so a removal that
+     * stalls between D0Exit and here is still visible. Stop it, let the
+     * last queued dump finish, then write one final snapshot while the SE
+     * is still mapped.
+     */
+    if (c->TmTimer)
+        WdfTimerStop(c->TmTimer, TRUE);
+    if (c->TmWork)
+        WdfWorkItemFlush(c->TmWork);
+    TmDump(c);
     if (c->SeMap) {
         MmUnmapIoSpace(c->SeMap, c->SeLen);
         c->SeMap = NULL;
@@ -1188,13 +1369,15 @@ static NTSTATUS
 EvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
 {
     PGENI_UART_CONTEXT c = GeniGetContext(Device);
-    UNREFERENCED_PARAMETER(PreviousState);
 
+    TmEv(c, EV_D0ENTRY, (ULONG)PreviousState);
     ConfigPacking(c);
     SeInit(c);
     ProgramBaud(c, c->BaudRate ? c->BaudRate : 115200);
     ProgramFormat(c);
     GLOG0("D0 entry: SE initialised");
+    /* 1 s periodic dump; WdfTimerStart on a running timer just re-arms. */
+    WdfTimerStart(c->TmTimer, WDF_REL_TIMEOUT_IN_MS(1000));
     return STATUS_SUCCESS;
 }
 
@@ -1202,7 +1385,7 @@ static NTSTATUS
 EvtD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
 {
     PGENI_UART_CONTEXT c = GeniGetContext(Device);
-    UNREFERENCED_PARAMETER(TargetState);
+    TmEv(c, EV_D0EXIT, (ULONG)TargetState);
     StopRx(c);
     CancelMCmd(c);
     return STATUS_SUCCESS;
@@ -1279,6 +1462,31 @@ EvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     RtlZeroMemory(c, sizeof(*c));
     c->Device = device;
     ReadParameters(Driver, c);
+
+    /* Telemetry: periodic timer (DISPATCH) -> work item (PASSIVE) -> reg. */
+    {
+        WDF_TIMER_CONFIG tcfg;
+        WDF_WORKITEM_CONFIG wcfg;
+        WDF_OBJECT_ATTRIBUTES tattr;
+
+        WDF_WORKITEM_CONFIG_INIT(&wcfg, EvtTmWork);
+        WDF_OBJECT_ATTRIBUTES_INIT(&tattr);
+        tattr.ParentObject = device;
+        status = WdfWorkItemCreate(&wcfg, &tattr, &c->TmWork);
+        if (!NT_SUCCESS(status)) {
+            GLOG("WdfWorkItemCreate %!STATUS!", status);
+            return status;
+        }
+
+        WDF_TIMER_CONFIG_INIT_PERIODIC(&tcfg, EvtTmTimer, 1000);
+        WDF_OBJECT_ATTRIBUTES_INIT(&tattr);
+        tattr.ParentObject = device;
+        status = WdfTimerCreate(&tcfg, &tattr, &c->TmTimer);
+        if (!NT_SUCCESS(status)) {
+            GLOG("WdfTimerCreate %!STATUS!", status);
+            return status;
+        }
+    }
 
     /* Interrupt (GIC SPI 639). The GPIO-wake line is not in this _CRS. */
     WDF_INTERRUPT_CONFIG_INIT(&intCfg, EvtInterruptIsr, EvtInterruptDpc);

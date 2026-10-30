@@ -87,13 +87,25 @@ Name (SKUV, 0x1)
         Include("cdsp.asl")
         Include("pmic.asl")
         Include("lpass.asl")
-        // SMMU devices stay out until the stack that owns them (IORT + qcsmmu
-        // + PEP) works. The boot-critical path is UFS0 -> storufs with direct
-        // DMA, as on the SM8250 phones that boot Windows (alioth, lmi, elish
-        // ship no IORT and no SMMU device). With the MTP IORT in the table set,
-        // \_SB.UFS0 is mapped behind the 0x15000000 SMMU and the boot disk
-        // never appears (bugcheck 0x7B, 0xC0000034).
-        // Include("smmu.asl")
+        // SMMU devices (MMU0 apps / MMU1 Adreno, both ACPI\QCOM2509 ->
+        // qcsmmu8250.sys, which binds ACPI\VEN_QCOM&DEV_2509&REV_0001/0002).
+        // Enabled in stage 8 because the GPU0.ENGS table ported into
+        // graphics-qcom253a.asl declares MMUINFO "ArmSmmuV2" for all five
+        // engines, and the old HIDs (QCOM24C2/QCOM24C3) matched no INF at all.
+        //
+        // How far the evidence goes: in qcdxkm8250.sys the SMMU-interface
+        // failure logs that were read are all on the Venus video engine path
+        // (VedInitSMMUInterface, "Unable to get SMMU Interface"), and their
+        // callers were not resolved. So "the GPU cannot init without SMMU" is
+        // not established; what is established is that ENGS asks for an
+        // ArmSmmuV2 interface that currently has no driver behind it.
+        //
+        // This only adds the devices. No IORT is added: boot still goes
+        // UFS0 -> storufs with direct DMA, as on the SM8250 phones that boot
+        // Windows (alioth, lmi, elish ship no IORT). With the MTP IORT in the
+        // table set, \_SB.UFS0 is mapped behind the 0x15000000 SMMU and the
+        // boot disk never appears (bugcheck 0x7B, 0xC0000034).
+        Include("smmu.asl")
         Include("ipcc.asl")
         Include("smem.asl")
         Include("qmp.asl")

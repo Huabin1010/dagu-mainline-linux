@@ -5,6 +5,7 @@
 #
 #   tools/winarm/build-kmdriver.sh nanosic-803
 # Builds port/dagu/windows-drivers/<name>/<name>.c -> <name>.sys (unsigned).
+# Extra import libraries: EXTRA_LIBS="battc.lib" tools/winarm/build-kmdriver.sh dagu-battery
 set -euo pipefail
 NAME="${1:?usage: $0 <driver-name>}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -16,7 +17,7 @@ SDK="winarm/wdk/ex/microsoft.windows.sdk.cpp/c"
 
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$ROOT:/work" -w /work mu-aloha:v1 \
   sh -euc '
-VER='"$VER"'; WDK='"$WDK"'; SDK='"$SDK"'; REL='"$REL"'; NAME='"$NAME"'
+VER='"$VER"'; WDK='"$WDK"'; SDK='"$SDK"'; REL='"$REL"'; NAME='"$NAME"'; EXTRA='"${EXTRA_LIBS:-}"'
 inc="-nostdinc \
  -isystem $WDK/include/$VER/km/crt \
  -isystem $WDK/include/$VER/km \
@@ -36,7 +37,7 @@ clang -target aarch64-windows-msvc -c \
 lld-link /OUT:/tmp/$NAME.sys /DLL /DRIVER /SUBSYSTEM:NATIVE \
   /ENTRY:DriverEntry /NODEFAULTLIB /Machine:ARM64 /IGNORE:4210 /OPT:REF \
   /LIBPATH:$WDK/lib/$VER/km/arm64 \
-  /tmp/$NAME.obj ntoskrnl.lib hal.lib hidclass.lib libcntpr.lib
+  /tmp/$NAME.obj ntoskrnl.lib hal.lib hidclass.lib libcntpr.lib $EXTRA
 cp /tmp/$NAME.sys $REL/$NAME.sys
 echo BUILT
 '

@@ -1,0 +1,56 @@
+; dagu battery (Xiaomi Pad 5 Pro 12.4): two BQ27Z561 gauges combined into one
+; Windows battery. ACPI HID DAGUB001 (battery.asl), no ACPI resources.
+; WDM Battery class miniport (battc.sys); bit-banged I2C on gpio28/29 and
+; gpio36/37, PM8150B charger status through SPMI observer reads only.
+; Diagnostics: \Windows\dagu-battery.txt, rewritten every ~10 s.
+;
+; Online install needs a test-signed catalog: New-FileCatalog -CatalogVersion 2.0
+; over a dir with only this .inf and the signed .sys, then sign the .cat with
+; osslsigncode and the keys in tools/winarm/signing/.
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Battery
+ClassGuid   = {72631e54-78a4-11d0-bcf7-00aa00b7b32a}
+Provider    = %Mfg%
+DriverVer   = 10/30/2026,1.0.0.2
+CatalogFile = dagu-battery.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+dagu-battery.sys = 1
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Bat_Inst, ACPI\DAGUB001
+
+[Bat_Inst.NT]
+CopyFiles = Bat_Copy
+
+[Bat_Copy]
+dagu-battery.sys
+
+[Bat_Inst.NT.Services]
+AddService = dagu_battery, 0x00000002, Bat_Service
+
+[Bat_Service]
+DisplayName   = %Desc%
+ServiceType   = 1   ; SERVICE_KERNEL_DRIVER
+StartType     = 3   ; SERVICE_DEMAND_START
+ErrorControl  = 1   ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\dagu-battery.sys
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu Dual BQ27Z561 Battery"
+Disk = "dagu battery"

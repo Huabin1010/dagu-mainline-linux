@@ -11,6 +11,7 @@
 #   dagu-rescue.sh rm-dsdt                    从 Linux 删掉 DSDT 覆盖表
 #   dagu-rescue.sh set-pep <0|1|3|4>          从 Linux 改 qcpep 的 Start
 #   dagu-rescue.sh disable-pep0               从 Linux 把 PEP0 设备设为禁用（保留 ACPI 节点）
+#   dagu-rescue.sh disable-qcdx               从 Linux 把 GPU 驱动服务 QCDX 设为禁用
 #   dagu-rescue.sh to-win                     进 fastboot，切 A 槽，重启
 #   dagu-rescue.sh auto                       等上线；若落到 Linux 就删覆盖表并切回 A
 #   dagu-rescue.sh hive-run <本地脚本>        把脚本推到 Linux 上以 root 执行
@@ -29,7 +30,10 @@ SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o LogLevel=ERROR -o ConnectTimeout=8)
 
 win_up() { ping -c1 -W2 "$WIN_IP" >/dev/null 2>&1; }
-linux_up() { ping -c1 -W2 "$LINUX_IP" >/dev/null 2>&1; }
+# 只 ping 会把局域网里占用同一地址的别的设备误判为平板，所以用 ssh 实际登录一次
+linux_up() {
+	sshpass -p "$LINUX_PW" ssh "${SSH_OPTS[@]}" -o ConnectTimeout=4 "root@$LINUX_IP" true >/dev/null 2>&1
+}
 
 lsh() { # 在平板 Linux 上以 root 跑一条命令
 	sshpass -p "$LINUX_PW" ssh "${SSH_OPTS[@]}" "root@$LINUX_IP" "$@"
@@ -62,10 +66,11 @@ mount_win() {
 mkdir -p /mnt/w
 mountpoint -q /mnt/w && umount /mnt/w || true
 which hivexsh >/dev/null 2>&1 || (apt-get -qq update && apt-get -qq install -y libhivex-bin >/dev/null)
-ntfs-3g '$WIN_PART' /mnt/w 2>/dev/null || {
-	ntfsfix -d '$WIN_PART' >/dev/null
-	ntfs-3g -o force,remove_hiberfile '$WIN_PART' /mnt/w
-}
+# 卷是脏的时候 ntfs-3g 会退回只读挂载且返回 0，之后 hivexsh commit 会失败。
+# 所以直接先 ntfsfix，再强制读写挂载，最后实测能否写入。
+ntfsfix -d '$WIN_PART' >/dev/null
+ntfs-3g -o force,remove_hiberfile '$WIN_PART' /mnt/w
+touch /mnt/w/.rescue-rw && rm -f /mnt/w/.rescue-rw || { echo 'NTFS 只读挂载，放弃' >&2; umount /mnt/w; exit 1; }
 mountpoint -q /mnt/w && echo MOUNT_OK"
 }
 
@@ -136,6 +141,40 @@ echo \"  ConfigFlags=\$(hivexget \"\$H\" \"\$K\" ConfigFlags)\""
 	unmount_win
 }
 
+# 离线把 GPU 驱动服务 QCDX 设为禁用（Start=4）。qcdxkm8250.sys 初始化卡死时，
+# Windows 停在启动阶段且不蓝屏，只能这样回滚。下面的值取自活系统（2026-10-30），
+# hivexsh 的 setval 会覆盖整个键的值（子键不受影响），所以全部写回。
+cmd_disable_qcdx() {
+	linux_up || { echo "Linux 不在线" >&2; return 1; }
+	mount_win || return 1
+	local tmp
+	tmp="$(mktemp)"
+	cat > "$tmp" <<'EOF'
+cd ControlSet001\Services\QCDX
+setval 6
+Type
+dword:00000001
+Start
+dword:00000004
+ErrorControl
+dword:00000000
+ImagePath
+expandstring:\SystemRoot\System32\DriverStore\FileRepository\qcdx8250.inf_arm64_a5505ccbf9897acf\qcdxkm8250.sys
+DisplayName
+string:@oem80.inf,%ServiceName%;Qualcomm(R) Adreno(TM) 640 GPU
+Owners
+hex:7:6f,00,65,00,6d,00,38,00,30,00,2e,00,69,00,6e,00,66,00,00,00,00,00
+commit
+EOF
+	lpush "$tmp" /tmp/qcdx.txt >/dev/null
+	rm -f "$tmp"
+	lsh "H=/mnt/w/Windows/System32/config/SYSTEM
+cp -f \"\$H\" /root/SYSTEM.bak-qcdx-\$(date +%H%M%S)
+hivexsh -w -f /tmp/qcdx.txt \"\$H\" 2>&1 && echo QCDX_DISABLED
+echo \"  Start=\$(hivexget \"\$H\" 'ControlSet001\\Services\\QCDX' Start)\""
+	unmount_win
+}
+
 cmd_hive_run() {
 	local script="${1:?用法: hive-run <本地脚本>}"
 	linux_up || { echo "Linux 不在线" >&2; return 1; }
@@ -181,6 +220,7 @@ case "${1:-status}" in
 	rm-dsdt)  cmd_rm_dsdt ;;
 	set-pep)  cmd_set_pep "${2:-}" ;;
 	disable-pep0) cmd_disable_pep0 ;;
+	disable-qcdx) cmd_disable_qcdx ;;
 	to-win)   cmd_to_win ;;
 	auto)     cmd_auto "${2:-300}" ;;
 	hive-run) cmd_hive_run "${2:-}" ;;

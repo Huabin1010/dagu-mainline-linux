@@ -129,6 +129,57 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
         Step(0x50);
         goto out;
     }
+    case 12: {
+        /* Change CBAR[0] (GR1 = page 1 = 0x1000, offset 0): sets CB0's type/VMID.
+         * QHEE owns the CBs; changing a CB's attribute is a strong reset candidate. */
+        volatile ULONG *rc = (volatile ULONG *)(s + 0x1000u);
+        ULONG p = READ_REGISTER_ULONG(rc);
+        Put(L"pre", p);
+        Put(L"wrval", (p & ~0x3u) | 0x1u);     /* set CBAR type field low bit */
+        Step(0x20);
+        WRITE_REGISTER_ULONG(rc, (p & ~0x3u) | 0x1u);
+        Step(0x30);
+        Put(L"readback", READ_REGISTER_ULONG(rc));
+        Step(0x40);
+        WRITE_REGISTER_ULONG(rc, p);
+        Step(0x50);
+        goto out;
+    }
+    case 10: {
+        /* Change sCR2 (GR0+0x8): BPVMID etc. A global control qcsmmu writes. */
+        volatile ULONG *rc = (volatile ULONG *)(s + 0x8u);
+        ULONG p = READ_REGISTER_ULONG(rc);
+        Put(L"pre", p);
+        Put(L"wrval", p ^ 0x1u);
+        Step(0x20);
+        WRITE_REGISTER_ULONG(rc, p ^ 0x1u);
+        Step(0x30);
+        Put(L"readback", READ_REGISTER_ULONG(rc));
+        Step(0x40);
+        WRITE_REGISTER_ULONG(rc, p);
+        Step(0x50);
+        goto out;
+    }
+    case 11: {
+        /* Global TLB invalidate-all + sync, with a bounded poll. qcsmmu does
+         * this during init; a sync that never completes on a half-set SMMU is a
+         * prime reset/hang candidate. TLBIALLH=0x6C, sTLBGSYNC=0x70, sGSTATUS=0x74. */
+        volatile ULONG *sync = (volatile ULONG *)(s + 0x70u);
+        volatile ULONG *stat = (volatile ULONG *)(s + 0x74u);
+        ULONG i, done = 0;
+        Step(0x20);
+        WRITE_REGISTER_ULONG((volatile ULONG *)(s + 0x6Cu), 0u); /* TLBIALLH */
+        Step(0x28);
+        WRITE_REGISTER_ULONG(sync, 0u);                          /* sTLBGSYNC */
+        Step(0x30);
+        for (i = 0; i < 1000000u; i++) {
+            if ((READ_REGISTER_ULONG(stat) & 1u) == 0) { done = 1; break; }
+        }
+        Put(L"sync_done", done);
+        Put(L"sync_iters", i);
+        Step(0x40);
+        goto out;
+    }
     case 9: {
         /* Route the REAL GPU stream (SID 0, per DT <&adreno_smmu 0 ...>):
          * SMR[0]=valid,ID=0,mask=0 ; S2CR[0]=translate->CB0. Earlier SMR test

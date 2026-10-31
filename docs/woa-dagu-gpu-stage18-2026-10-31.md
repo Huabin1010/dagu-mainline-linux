@@ -25,6 +25,9 @@
 | 6 | sCR0 清 USFCFG | 0x00260006 | 0x00260406 | **被还原**（bit10 保持 1） | 否 |
 | 7 | CB0.SCTLR 同值 | 0x32622100 | 0x32622100 | stuck | 否 |
 | 8 | CB0.TTBR0 改值 | pre^0x1000 | = 写入值 | **改进去了（stuck）** | 否 |
+| 10 | sCR2 (GR0+0x8) 改值 | 0x1 | 0x0 | 被还原 | 否 |
+| 11 | 全局 TLB 失效+同步 | TLBIALLH+sTLBGSYNC | sync 立即完成(iters=0) | 正常 | 否 |
+| 12 | CBAR[0] (GR1+0x0) 改值 | 0x1 | 0x0 | 被还原 | 否 |
 
 CB0.TTBR0 读到的原值 `0x4ef3eeca`——QHEE 给这个上下文组装了真实的页表基址，而我能改它。
 
@@ -50,6 +53,12 @@ CB0.TTBR0 可改。这三件都验证了能写进去、都不复位。换句话�
 写都放行了。真正的复位源还没定位，候选在 qcsmmu 的**完整序列**：sCR2 改写、全局 TLB 失效 + sTLBGSYNC
 在半配置态轮询挂死、或 enable 后对某条流做翻译走表进了 QHEE 保护内存才复位、或中断风暴。要用
 `dagu-smmuwt` 继续补测 sCR2、TLB 失效+同步来定位。
+
+补测结论（test 10/11/12）：sCR2、CBAR 也是“被还原不复位”，全局 TLB 失效+同步正常。**到此 qcsmmu 会碰的
+每一类寄存器都测过了，没有任何一条单写会复位。** 所以阶段 14 的复位几乎肯定不来自 SMMU 寄存器写本身，
+而来自 qcsmmu 驱动 init 的别处——最可能是：连了 SMMU 的 context-fault 中断（DT GIC SPI 672–685）后，
+被我们已上电的 CX 上正在跑的 **GMU（StreamID 5）** 的一笔事务在流被重配瞬间打出 fault、或 enable 后
+真正走表进了保护内存，才由 TZ/QHEE 复位。这条待后续用“配好流后观察 GMU 行为”定位。
 
 **既然 GPU 流能从 HLOS 完整路由，两条现实可做的路：**
 1. **UEFI 预配**：`DaguPlatDxe` 在 ExitBootServices 前就把 SMR[0]/S2CR[0]/CB0 配好（阶段 14 的 UEFI 写测

@@ -33,7 +33,7 @@ ready-to-boot mDone=1 ×8
 
 dagu 上 ReadyToBoot 在 ESP 文件系统挂载之前就触发了，`WriteEspFile()` 找不到 ESP 就静默返回。
 现在改为 ESP 首次出现时（fs-notify）写文件，实测 `diag file write: Success`。
-读变量的脚本：`/tmp/dagu/readdiag.ps1` 的写法见本节，要先开 `SeSystemEnvironmentPrivilege`。
+读变量：`tools/winarm/dagu-ps.sh - < tools/winarm/read-uefi-diag.ps1`（脚本里先开 `SeSystemEnvironmentPrivilege`）。绑核基准：`tools/winarm/core-bench.ps1`。
 
 ## 3. GPU CX 上电（已验证）
 

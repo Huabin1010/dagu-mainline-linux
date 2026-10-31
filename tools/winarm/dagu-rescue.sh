@@ -12,6 +12,7 @@
 #   dagu-rescue.sh set-pep <0|1|3|4>          从 Linux 改 qcpep 的 Start
 #   dagu-rescue.sh disable-pep0               从 Linux 把 PEP0 设备设为禁用（保留 ACPI 节点）
 #   dagu-rescue.sh disable-qcdx               从 Linux 把 GPU 驱动服务 QCDX 设为禁用
+#   dagu-rescue.sh disable-qcsmmu             从 Linux 把 SMMU 驱动服务 qcsmmu 设为禁用
 #   dagu-rescue.sh to-win                     进 fastboot，切 A 槽，重启
 #   dagu-rescue.sh auto                       等上线；若落到 Linux 就删覆盖表并切回 A
 #   dagu-rescue.sh hive-run <本地脚本>        把脚本推到 Linux 上以 root 执行
@@ -188,6 +189,41 @@ echo \"  Start=\$(hivexget \"\$H\" 'ControlSet001\\Services\\QCDX' Start)\""
 	unmount_win
 }
 
+# 离线把 SMMU 驱动服务 qcsmmu 设为禁用（Start=4）。阶段 10/12：只要 DSDT 里出现
+# QCOM2509（MMU0 或 MMU1），qcsmmu8250.sys 就会在启动时加载并把 Windows 卡死在
+# 转圈界面（无 dump、不复位）。禁用它之后，即便覆盖表里误带了 SMMU 节点也只会
+# 落成"设备无驱动"，不会再卡启动。值取自活系统（2026-10-31），setval 会覆盖整个键，所以全部写回。
+cmd_disable_qcsmmu() {
+	linux_up || { echo "Linux 不在线" >&2; return 1; }
+	mount_win || return 1
+	local tmp
+	tmp="$(mktemp)"
+	cat > "$tmp" <<'EOF'
+cd ControlSet001\Services\qcsmmu
+setval 6
+ImagePath
+expandstring:\SystemRoot\System32\DriverStore\FileRepository\qcsmmu8250.inf_arm64_326da5121bfa3145\qcsmmu8250.sys
+Type
+dword:00000001
+Start
+dword:00000004
+ErrorControl
+dword:00000000
+DisplayName
+string:@oem62.inf,%SMMU.SVCDESC%;Qualcomm(R) System MMU Device
+Owners
+hex:7:6f,00,65,00,6d,00,36,00,32,00,2e,00,69,00,6e,00,66,00,00,00,00,00
+commit
+EOF
+	lpush "$tmp" /tmp/qcsmmu.txt >/dev/null
+	rm -f "$tmp"
+	lsh "H=/mnt/w/Windows/System32/config/SYSTEM
+cp -f \"\$H\" /root/SYSTEM.bak-qcsmmu-\$(date +%H%M%S)
+hivexsh -w -f /tmp/qcsmmu.txt \"\$H\" 2>&1 && echo QCSMMU_DISABLED
+echo \"  Start=\$(hivexget \"\$H\" 'ControlSet001\\Services\\qcsmmu' Start)\""
+	unmount_win
+}
+
 cmd_hive_run() {
 	local script="${1:?用法: hive-run <本地脚本>}"
 	linux_up || { echo "Linux 不在线" >&2; return 1; }
@@ -234,6 +270,7 @@ case "${1:-status}" in
 	set-pep)  cmd_set_pep "${2:-}" ;;
 	disable-pep0) cmd_disable_pep0 ;;
 	disable-qcdx) cmd_disable_qcdx ;;
+	disable-qcsmmu) cmd_disable_qcsmmu ;;
 	to-win)   cmd_to_win ;;
 	auto)     cmd_auto "${2:-300}" ;;
 	hive-run) cmd_hive_run "${2:-}" ;;

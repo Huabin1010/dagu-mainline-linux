@@ -135,11 +135,21 @@ def main() -> int:
     ap.add_argument("--base", required=True, type=Path, help="live firmware DSDT .aml (dumped from the tablet)")
     ap.add_argument("--gpu", required=True, type=Path, help="GPU0 node .asl (bare Device)")
     ap.add_argument("--smmu", type=Path, help="SMMU nodes .asl (bare Device MMU0/MMU1)")
+    ap.add_argument("--allow-boot-hang", action="store_true",
+                    help="permit QCOM2509 (SMMU) nodes; see stage 10/12: they hang boot")
     ap.add_argument("--rev", type=int, default=4, help="OEM revision (default 4, must be > firmware's 3)")
     ap.add_argument("--out", required=True, type=Path, help="output overlay .aml")
     ns = ap.parse_args()
     if ns.rev < 4:
         sys.exit("--rev must be >= 4 to override the firmware (rev 3)")
+    # Stage 10 (MMU0, APPS SMMU) and stage 12 (MMU1, Adreno SMMU) both hard-hung
+    # Windows at the boot spinner with no dump and no reset: any QCOM2509 node
+    # makes PnP load qcsmmu8250.sys at boot, and it touches SMMU registers that
+    # are either owned by QHEE (0x15000000) or unclocked because nothing powers
+    # GPU_CX_GDSC on Windows (0x3DA0000). Recovery needs someone at the tablet.
+    if ns.smmu and not ns.allow_boot_hang:
+        sys.exit("refusing --smmu: QCOM2509 nodes hang Windows boot on dagu "
+                 "(docs/woa-dagu-gpu-stage12-*.md). Pass --allow-boot-hang to override.")
 
     base = ns.base.read_bytes()
     if base[:4] != b"DSDT":

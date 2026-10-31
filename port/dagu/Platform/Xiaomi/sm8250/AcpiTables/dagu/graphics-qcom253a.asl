@@ -17,7 +17,9 @@
 //
 // 地址来源：参考板 qcom-mtp8250 的 QCOM253A 节点 _CRS（BBUF 分支）。dagu 与
 // MTP8250 同为 SM8250，下列 11 段 MMIO 与 dagu 的 PlatformMemoryMapLib 逐一吻合
-// （MDSS 0x0AE00000、Venus 0x0AA00000、GPU_CC 0x02C90000 等）。参考 _CRS 用
+// （MDSS 0x0AE00000、Venus 0x0AA00000 等）。【阶段 12 更正】这句当时不成立：
+// GPU 三段（GFX_REGS/GFX_REG_CONT/GPU_CC）参考值是 SM8150 的 0x02Cxxxxx，dagu
+// 原厂 DT 是 0x03Dxxxxx，已在 _CRS 里改正。参考 _CRS 用
 // \_SB.SIDV 在 ABUF/BBUF 间二选一；dagu live 的 SIDV=0x00020000，SIDV<0x20000
 // 为假，本就返回 BBUF，故此处直接固定为 BBUF，省去无用分支。
 //
@@ -93,19 +95,25 @@ Device (GPU0)
 
     Method (_CRS, 0, NotSerialized)
     {
+        // 阶段 12：GPU 三段地址改为 SM8250 真实地址。参考板 BBUF 这三段是 SM8150 的
+        // 地址（0x02C00000 GPU / 0x02C60000 GMU 区 / 0x02C90000 GPU_CC），dagu 原厂 DT
+        // （FdtBlob_compat/dagu.dtb）与主线 Linux 实测都在 0x03Dxxxxx：
+        //   kgsl-3d0@3d00000、gmu@3d6a000、gpucc@3d90000、kgsl-smmu@3da0000。
+        // 0x02C0_0000..0x02D0_0000 在原厂 DT 里没有任何设备，访问它是悬空总线地址。
+        // 长度保持参考值不变；顺序与 RESI 的名字一一对应，不能动。
         Name (BBUF, ResourceTemplate ()
         {
-            Memory32Fixed (ReadWrite, 0x0AE00000, 0x00140000)  // MDSS 显示控制器
-            Memory32Fixed (ReadWrite, 0x088E0000, 0x000F4000)  // MDP throttle
-            Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, ,, ) { 0x00000073 }
-            Memory32Fixed (ReadWrite, 0x02C00000, 0x0003F010)  // GMU
-            Memory32Fixed (ReadWrite, 0x02C60000, 0x0003F000)  // GMU PDC
-            Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, ,, ) { 0x0000014C }
-            Memory32Fixed (ReadWrite, 0x0B290000, 0x0000FFFF)  // GPU SMMU
-            Memory32Fixed (ReadWrite, 0x0B490000, 0x00010000)
-            Memory32Fixed (ReadWrite, 0x02C90000, 0x00009000)  // GPU_CC
-            Memory32Fixed (ReadWrite, 0x0C200000, 0x0000FFFF)
-            Memory32Fixed (ReadWrite, 0x0AA00000, 0x00200000)  // Venus 视频编解码
+            Memory32Fixed (ReadWrite, 0x0AE00000, 0x00140000)  // MDP_REGS（原厂 mdss_mdp@ae00000）
+            Memory32Fixed (ReadWrite, 0x088E0000, 0x000F4000)  // DP_PHY_REGS
+            Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, ,, ) { 0x00000073 }  // VSYNC, SPI 83
+            Memory32Fixed (ReadWrite, 0x03D00000, 0x0003F010)  // GFX_REGS（原厂 kgsl-3d0@3d00000；参考 0x02C00000 是 SM8150）
+            Memory32Fixed (ReadWrite, 0x03D60000, 0x0003F000)  // GFX_REG_CONT（cx_dbgc 0x3d61000、gmu@3d6a000；参考 0x02C60000）
+            Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, ,, ) { 0x0000014C }  // GFX, SPI 300（原厂 0x12c）
+            Memory32Fixed (ReadWrite, 0x0B290000, 0x0000FFFF)  // GPU_PDC_SEQ_MEM（原厂 gmu pdc 0xb290000）
+            Memory32Fixed (ReadWrite, 0x0B490000, 0x00010000)  // GPU_PDC_REGS（原厂 gmu pdc 0xb490000）
+            Memory32Fixed (ReadWrite, 0x03D90000, 0x00009000)  // GPU_CC（原厂 gpucc@3d90000；参考 0x02C90000 是 SM8150）
+            Memory32Fixed (ReadWrite, 0x0C200000, 0x0000FFFF)  // GPU_RPMH_CPRF（原厂 DT 无对应节点，未核实）
+            Memory32Fixed (ReadWrite, 0x0AA00000, 0x00200000)  // VIDEO_REGS（原厂 vidc@aa00000）
             Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, ,, ) { 0x000000CE }
             Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, ,, ) { 0x000000CF }
             GpioIo (Exclusive, PullUp, 0x0000, 0x0000, IoRestrictionNone,

@@ -129,6 +129,28 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
         Step(0x50);
         goto out;
     }
+    case 9: {
+        /* Route the REAL GPU stream (SID 0, per DT <&adreno_smmu 0 ...>):
+         * SMR[0]=valid,ID=0,mask=0 ; S2CR[0]=translate->CB0. Earlier SMR test
+         * used a fake ID (0xF00) which QHEE dropped; try the genuine SID. */
+        volatile ULONG *rsmr = (volatile ULONG *)(s + SMR0);
+        volatile ULONG *rs2 = (volatile ULONG *)(s + S2CR0);
+        ULONG psmr = READ_REGISTER_ULONG(rsmr), ps2 = READ_REGISTER_ULONG(rs2);
+        Put(L"pre_smr", psmr);
+        Put(L"pre_s2cr", ps2);
+        Step(0x20);
+        WRITE_REGISTER_ULONG(rs2, 0x00000000u);     /* translate -> CB0 first */
+        Step(0x22);
+        WRITE_REGISTER_ULONG(rsmr, 0x80000000u);    /* valid, ID=0, mask=0 */
+        Step(0x30);
+        Put(L"smr_rb", READ_REGISTER_ULONG(rsmr));
+        Put(L"s2cr_rb", READ_REGISTER_ULONG(rs2));
+        Step(0x40);
+        WRITE_REGISTER_ULONG(rsmr, psmr);           /* restore */
+        WRITE_REGISTER_ULONG(rs2, ps2);
+        Step(0x50);
+        goto out;
+    }
     case 8: {
         /* Change CB0.TTBR0 (CB base 0x8000 + 0x20): reassign a QHEE-owned
          * context bank's translation base. If QHEE traps CB reconfiguration

@@ -16,7 +16,8 @@
 | test | 写什么 | 写入值 | 读回 | 结论 | 复位？ |
 |---|---|---|---|---|---|
 | 0 | 只读快照 | — | SMR0=0, S2CR0=0x07fea0ff, sCR0=0x00260406 | 与探针一致 | 否 |
-| 1 | SMR[0] | 0x80000F00 | 0x00000000 | **被丢弃**（QHEE 占 SMR） | 否 |
+| 1 | SMR[0] 假 ID | 0x80000F00 (ID=0xF00) | 0x00000000 | 被丢弃（ID 不是真实流） | 否 |
+| 9 | **SMR[0] 真 ID** | **0x80000000 (valid,ID=0)** | **0x80000000** | **写进去了（stuck）！** | 否 |
 | 2 | S2CR[0] bypass | 0x00010000 (type=1) | 0x00020000 (type=2) | **规格化回 fault** | 否 |
 | 3 | S2CR[0] translate | 0x00000000 (type=0→CB0) | 0x00000000 | **写进去了（stuck）** | 否 |
 | 5 | 先 S2CR=translate 再 SMR=valid | — | S2CR 进、SMR 仍 0 | SMR 顺序无关，仍被占 | 否 |
@@ -27,27 +28,34 @@
 
 CB0.TTBR0 读到的原值 `0x4ef3eeca`——QHEE 给这个上下文组装了真实的页表基址，而我能改它。
 
-## 3. 结论：墙不是“每写必复位”
+> 读回陷阱：PowerShell 的 `[uint32]$k.GetValue()` 会把高位置 1 的值（如 `0x80000000`）藏掉不显示，
+> 必须用 `reg query` 看。test=9 正是这样才看到 `smr_rb=0x80000000`。
 
-从 Windows EL1 对 Adreno SMMU 的单寄存器写**都不会复位**。QHEE 的保护是“**静默还原特定寄存器**”，
-不是“复位”：
-- **占住不让写**：SMR（流匹配，还原成 0）、sCR0.USFCFG（还原成 1）、S2CR 的 bypass 类型（规格化成 fault）。
-- **放行可写**：S2CR 的 translate 类型、CB 的 SCTLR、**CB 的 TTBR0（改值生效）**。
+GPU 的真实 StreamID 来自主线 DT `iommus = <&adreno_smmu 0 0x401>` → **SID 0**（GMU 是 SID 5）。
+test=1 失败是因为写了假 ID 0xF00；换成真实 SID 0（test=9）SMR 就写进去了。
 
-也就是说：**HLOS 能给 GPU 流配 translate、能改上下文组的页表基址**，只是不能自己加流匹配项（SMR）、
-不能把流设成 bypass、不能关 USFCFG。
+## 3. 结论：墙不是“每写必复位”，而且 GPU 流能被 HLOS 完整路由
 
-## 4. 这推翻了阶段 14/17 的因果，重开垫片路
+从 Windows EL1 对 Adreno SMMU 的单寄存器写**都不会复位**。QHEE 的保护是“**静默还原非法写**”，不是“复位”：
+- **放行**：SMR（真实 SID 的 valid 项）、S2CR 的 translate、CB 的 SCTLR、**CB 的 TTBR0（改值生效）**。
+- **挡住（静默还原，不复位）**：SMR 填假 ID、sCR0.USFCFG 清零、S2CR 设 bypass。
 
-阶段 14 看到的 qcsmmu 运行时“整机复位”，**不是**单条寄存器写被 XPU 拦下——因为上面每一类写都放行了。
-真正的复位源还没定位，候选：qcsmmu 的**完整序列**里某一步（全局 TLB 失效 + sTLBGSYNC 轮询半配置态
-挂死、或 enable 后对半配置的流做翻译、或中断风暴），而不是“碰一下 GR0 就死”。需要用 `dagu-smmuwt`
-继续把 sCR2、TLB 失效+同步、以及“改 CB 翻译配置后触发一次走表”这些**序列**补测，才能定位。
+**关键结论：GPU 流（SID 0）可以从 HLOS 完整路由**——SMR[0]=valid/ID0 匹配 + S2CR[0]=translate→CB0 +
+CB0.TTBR0 可改。这三件都验证了能写进去、都不复位。换句话说 Adreno SMMU 的 GPU 通路是**可配置的**，
+阶段 14“一碰就复位”的前提是错的（当时只试了假 ID 的 SMR 和 bypass 的 S2CR，正好都是被还原的那几类）。
 
-更重要的是：既然 S2CR-translate 和 CB-TTBR 都能从 HLOS 写进去，**自写一个保守 SMMU 垫片**（模仿主线
-`arm-smmu-qcom`：不重写全局、不碰 SMR、只把 GPU 流 S2CR 设 translate 并把 CB 指向我们建的页表）就有了
-现实依据，不再是纯猜测。悬而未决点：GPU 流靠什么匹配到 S2CR 项（SMR 写不进；可能这颗 SMMU 走
-StreamID 直接索引 S2CR，待确认），以及改 CB 页表后 QHEE 是否在实际走表时才复位。
+## 4. 这推翻了阶段 14/17 的因果，重开垫片/UEFI 预配路
+
+阶段 14 看到的 qcsmmu 运行时“整机复位”，**不是**单条寄存器写被 XPU 拦下——GPU 流的 SMR/S2CR/CB 三类
+写都放行了。真正的复位源还没定位，候选在 qcsmmu 的**完整序列**：sCR2 改写、全局 TLB 失效 + sTLBGSYNC
+在半配置态轮询挂死、或 enable 后对某条流做翻译走表进了 QHEE 保护内存才复位、或中断风暴。要用
+`dagu-smmuwt` 继续补测 sCR2、TLB 失效+同步来定位。
+
+**既然 GPU 流能从 HLOS 完整路由，两条现实可做的路：**
+1. **UEFI 预配**：`DaguPlatDxe` 在 ExitBootServices 前就把 SMR[0]/S2CR[0]/CB0 配好（阶段 14 的 UEFI 写测
+   只试了被还原的那两类，没试 translate/真 SID/CB-TTBR，需重验 UEFI 侧也放行）。
+2. **保守 SMMU 垫片**：自写驱动注册 qcdx 等的接口 `{36079AE4-...}`，只做上面验证过的写，不碰会复位的全局序列。
+两条都绕开 qcsmmu 的原版 `SmmuInitHardware` 全量流程。
 
 ## 5. 仍要正视后面的墙
 

@@ -252,9 +252,12 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 > 调试期只 `fastboot boot`，**不** `fastboot flash boot`。
 
 ```
-【阶段 10 已测】步骤 A 带 MMU0/MMU1 → 启动日志落盘前硬卡死（疑 qcsmmu 复位 APPS SMMU 断了 UFS）。
-  现改为先测 G（GPU0 不带 SMMU，C:\dagu\ov-gpu-testG.aml），再测 G1（GPU0 + 只有 MMU1）。
-  见 docs/woa-dagu-gpu-stage10-2026-10-31.md。
+【阶段 10】Step A 带 MMU0/MMU1 → 启动日志落盘前硬卡死（qcsmmu 复位 APPS SMMU 断了 UFS）。
+【阶段 11】Test G（GPU0+ENGS，无 SMMU，运行时拉起）→ 蓝屏 0x3B c0000005，首个可分析 dump。
+  崩溃在 qcdxkm8250+0x262904，一个包遍历器 ldrh [devctx->field_38+0xc]（非 NULL 无效指针），
+  在 WDDM init 的资源/DxKMD 注册表解析路径上。RESI/ENGS/PMCL 首元素都是 0x03，Test G 缺 PMCL。
+  → 下一步 Test GP = GPU0 全量(含 PMCL/_HRV)，仍无 SMMU。
+  见 docs/woa-dagu-gpu-stage11-2026-10-31.md（含可远程回滚的"运行时拉起"测法 + dump 分诊工具）。
 
 步骤 A（= 阶段 8，最小步）
   覆盖表 = 固件DSDT + GPU0(ENGS/RESI/TMDT，不含PMCL)   ← 不再带 MMU0

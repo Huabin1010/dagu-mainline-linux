@@ -329,6 +329,8 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 | 门控函数 / 日志码 | `FUN_1402b4be0`；`0xe5f`(GmuInternal) `0xe68`(GmuCached) `0xe71`(GpuInternal) |
 | qcdx 0x3B 崩溃 | `+0x262904`(`ldrh [x19]`,x19=0xc)：GPU0 缺 `REGR`，`"\REGR\%s"` 解析器缓存复用空缓冲。**已修**（GPU0 补 REGR），详见 [stage15](woa-dagu-gpu-stage15-2026-10-31.md) |
 | qcdx 下一道墙 | 启动时阻塞等 qcsmmu 接口 `{36079AE4-78E8-452D-AF50-0CFF78B2F1CA}`（30 s×4），等不到在回退路径 `0xA` 蓝屏（[stage15](woa-dagu-gpu-stage15-2026-10-31.md) §5） |
+| SMMU 复位源（已坐实） | `qcsmmu` `OnPrepareHardware→SmmuInitHardware(0x22280)` 裸 MMIO 写 **sCR0(GR0+0x0)/sCR2(+0x8)** 全局控制 + SMR/S2CR，无 SMC/HVC → QHEE 拦下复位。时钟/电源已排除（[stage16](woa-dagu-gpu-stage16-2026-10-31.md)）；写图见 [stage17](woa-dagu-gpu-stage17-2026-10-31.md) |
+| GPU 整链判断 | stock QHEE/TZ 独占 GPU SMMU + GX/GMU RPMh + zap/PIL，WDDM 这条链在原厂固件下走不通；GPU 侧已交付收益=大核调频（阶段13） |
 | qcdx RE 工具 | `tools/winarm/qdis.py`（RVA 反汇编+串解析）、`tools/winarm/dagu-dump-triage.py`（ARM64 转储） |
 | 覆盖表注册表键 | `HKLM\SYSTEM\CurrentControlSet\Services\ACPI\Parameters\DSDT\QCOMM_\SM8250_\00000004`（值 `00000000`/`00000001`） |
 | 正在用的表 | `HKLM\HARDWARE\ACPI\DSDT\QCOMM_\SM8250_\0000000X` |
@@ -347,5 +349,7 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 [stage5–7（PEP）](woa-dagu-gpu-stage5-2026-10-30.md)、
 [stage13（CX+大核调频）](woa-dagu-gpu-stage13-2026-10-31.md)、
 [stage14（SMMU/QHEE 墙）](woa-dagu-gpu-stage14-2026-10-31.md)、
-[stage15（qcdx 崩溃根因）](woa-dagu-gpu-stage15-2026-10-31.md)。
+[stage15（qcdx 崩溃根因）](woa-dagu-gpu-stage15-2026-10-31.md)、
+[stage16（时钟/电源排除）](woa-dagu-gpu-stage16-2026-10-31.md)、
+[stage17（qcsmmu 写寄存器全图=复位源）](woa-dagu-gpu-stage17-2026-10-31.md)。
 调试/救援：[debug handbook](dagu-woa-debug-handbook.md)。

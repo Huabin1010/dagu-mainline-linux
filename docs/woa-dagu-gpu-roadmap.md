@@ -252,6 +252,10 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 > 调试期只 `fastboot boot`，**不** `fastboot flash boot`。
 
 ```
+【阶段 12】Test G1（只有 MMU1）→ 启动转圈硬卡死。结论：任何 QCOM2509 都会让 qcsmmu 启动时卡总线，
+  在 UEFI 给 GPU_CX_GDSC + GPU_CC 时钟上电前禁止加 SMMU 节点（设备上已 qcsmmu Start=4）。
+  另发现 GPU0 _CRS 的 GFX_REGS/GFX_REG_CONT/GPU_CC 是 SM8150 的 0x02Cxxxxx，已改成 SM8250 的 0x03Dxxxxx。
+  见 docs/woa-dagu-gpu-stage12-2026-10-31.md。
 【阶段 10】Step A 带 MMU0/MMU1 → 启动日志落盘前硬卡死（qcsmmu 复位 APPS SMMU 断了 UFS）。
 【阶段 11】Test G（GPU0+ENGS，无 SMMU，运行时拉起）→ 蓝屏 0x3B c0000005，首个可分析 dump。
   崩溃在 qcdxkm8250+0x262904，一个包遍历器 ldrh [devctx->field_38+0xc]（非 NULL 无效指针），

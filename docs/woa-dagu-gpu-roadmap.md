@@ -252,6 +252,9 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 > 调试期只 `fastboot boot`，**不** `fastboot flash boot`。
 
 ```
+【阶段 13】UEFI v5 在交给 Windows 前给 GPU CX 上电（Adreno SMMU IDR0=0x4C017E06 可读），并修好大核调频（A77 约 3 倍）。
+【阶段 14】CX 上电后运行时拉起 qcsmmu（只 MMU1）→ 整机硬件级复位、无 dump，之后 A 槽重试耗尽落 B。
+  Adreno 实例 INF 参数含 CP_PIXEL 安全上下文 CB1，疑为触发点（未验证）。见 stage14。
 【阶段 12】Test G1（只有 MMU1）→ 启动转圈硬卡死。结论：任何 QCOM2509 都会让 qcsmmu 启动时卡总线，
   在 UEFI 给 GPU_CX_GDSC + GPU_CC 时钟上电前禁止加 SMMU 节点（设备上已 qcsmmu Start=4）。
   另发现 GPU0 _CRS 的 GFX_REGS/GFX_REG_CONT/GPU_CC 是 SM8150 的 0x02Cxxxxx，已改成 SM8250 的 0x03Dxxxxx。

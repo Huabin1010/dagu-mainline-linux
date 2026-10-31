@@ -327,6 +327,8 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 | KMD / 固件 | `qcdxkm8250.sys`、`qcdxkmsuc8250.mbn`(zap,test签名)、`qcvss8250.mbn` |
 | dagu 面板 XML（UEFI 方言） | `.../xiaomi-pipa/Binaries/RawFiles/Panel_L81A_42_04_0a_dualdsi_dphy_lcd_vid.xml` |
 | 门控函数 / 日志码 | `FUN_1402b4be0`；`0xe5f`(GmuInternal) `0xe68`(GmuCached) `0xe71`(GpuInternal) |
+| qcdx 崩溃点 / 根因 | `+0x262904`(`ldrh [x19]`,x19=0xc)；配置解析器 `0x262c70` 缓存复用空 `field_38`（名字先于填充成功被缓存）→ 缺 `DCVS` GPU 配置对象，详见 [stage15](woa-dagu-gpu-stage15-2026-10-31.md) |
+| qcdx RE 工具 | `tools/winarm/qdis.py`（RVA 反汇编+串解析）、`tools/winarm/dagu-dump-triage.py`（ARM64 转储） |
 | 覆盖表注册表键 | `HKLM\SYSTEM\CurrentControlSet\Services\ACPI\Parameters\DSDT\QCOMM_\SM8250_\00000004`（值 `00000000`/`00000001`） |
 | 正在用的表 | `HKLM\HARDWARE\ACPI\DSDT\QCOMM_\SM8250_\0000000X` |
 | SOSI | 占位 `0xDEADBEEFFFFFFFFF`，回填 `0x0000000080907228` |
@@ -341,5 +343,8 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 ### 关联文档
 阶段细节：[stage8（门控逆向）](woa-dagu-gpu-stage8-2026-10-30.md)、
 [stage9（PMCL/_HRV）](woa-dagu-gpu-stage9-2026-10-31.md)、
-[stage5–7（PEP）](woa-dagu-gpu-stage5-2026-10-30.md)。
+[stage5–7（PEP）](woa-dagu-gpu-stage5-2026-10-30.md)、
+[stage13（CX+大核调频）](woa-dagu-gpu-stage13-2026-10-31.md)、
+[stage14（SMMU/QHEE 墙）](woa-dagu-gpu-stage14-2026-10-31.md)、
+[stage15（qcdx 崩溃根因）](woa-dagu-gpu-stage15-2026-10-31.md)。
 调试/救援：[debug handbook](dagu-woa-debug-handbook.md)。

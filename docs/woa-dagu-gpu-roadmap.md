@@ -329,8 +329,9 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 | 门控函数 / 日志码 | `FUN_1402b4be0`；`0xe5f`(GmuInternal) `0xe68`(GmuCached) `0xe71`(GpuInternal) |
 | qcdx 0x3B 崩溃 | `+0x262904`(`ldrh [x19]`,x19=0xc)：GPU0 缺 `REGR`，`"\REGR\%s"` 解析器缓存复用空缓冲。**已修**（GPU0 补 REGR），详见 [stage15](woa-dagu-gpu-stage15-2026-10-31.md) |
 | qcdx 下一道墙 | 启动时阻塞等 qcsmmu 接口 `{36079AE4-78E8-452D-AF50-0CFF78B2F1CA}`（30 s×4），等不到在回退路径 `0xA` 蓝屏（[stage15](woa-dagu-gpu-stage15-2026-10-31.md) §5） |
-| SMMU 复位源（已坐实） | `qcsmmu` `OnPrepareHardware→SmmuInitHardware(0x22280)` 裸 MMIO 写 **sCR0(GR0+0x0)/sCR2(+0x8)** 全局控制 + SMR/S2CR，无 SMC/HVC → QHEE 拦下复位。时钟/电源已排除（[stage16](woa-dagu-gpu-stage16-2026-10-31.md)）；写图见 [stage17](woa-dagu-gpu-stage17-2026-10-31.md) |
-| GPU 整链判断 | stock QHEE/TZ 独占 GPU SMMU + GX/GMU RPMh + zap/PIL，WDDM 这条链在原厂固件下走不通；GPU 侧已交付收益=大核调频（阶段13） |
+| SMMU 可写性（阶段18 更正） | **GPU 流能从 HLOS 完整路由、不复位**：SMR[0]=valid/ID0 + S2CR[0]=translate→CB0 + CB0.TTBR0 都写得进；sCR0.USFCFG/sCR2/CBAR/假ID-SMR/bypass-S2CR 被静默还原不复位。阶段14/17“一碰就复位/架构级墙”的结论被推翻 |
+| qcsmmu 复位源 | 不在 SMMU 寄存器写本身（每类都测过不复位，[stage18](woa-dagu-gpu-stage18-2026-10-31.md)）；疑在 qcsmmu init 的中断连接/GMU(SID5) 重配瞬间打 fault，待定位 |
+| GPU 整链判断 | SMMU 这堵墙可绕（HLOS 自配流或写垫片）；但后面仍有 GX/GMU RPMh（Linux 已超时）+ zap/PIL（TZ），WDDM 整链能否通未知；已交付收益=大核调频（阶段13） |
 | qcdx RE 工具 | `tools/winarm/qdis.py`（RVA 反汇编+串解析）、`tools/winarm/dagu-dump-triage.py`（ARM64 转储） |
 | 覆盖表注册表键 | `HKLM\SYSTEM\CurrentControlSet\Services\ACPI\Parameters\DSDT\QCOMM_\SM8250_\00000004`（值 `00000000`/`00000001`） |
 | 正在用的表 | `HKLM\HARDWARE\ACPI\DSDT\QCOMM_\SM8250_\0000000X` |

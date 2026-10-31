@@ -65,3 +65,36 @@ HYPD  Enabled=0
      就是这么做的），GPU0 不声明 `ArmSmmuV2`。需要同时改 ENGS，工作量大。
 
 设备现状：Windows 正常，`qcsmmu=4`、`QCDX=4`、无覆盖表；boot_a 仍是阶段 13 的 v5 UEFI。
+
+## 5. 追加验证：去掉 CP_PIXEL（CB1）仍然复位
+
+按 §3 的线索，把 Adreno 实例（`Parameters\1`）的 `CTXI` 改成只剩 CB0/CB2/CB3、`S2CB` 删掉
+映射到 CB1 的条目（只留 HLOS 上下文），再运行时拉起 `qcsmmu`。结果**完全一样**：几秒内整机
+复位、无 dump、随后 A 槽重试耗尽落 B。所以触发点不是那一个安全上下文，而是 `qcsmmu` 对 Adreno
+SMMU 做寄存器编程这件事本身——与 QHEE 把 SMMU 当受保护资源、越权访问即复位一致（`qcsmmu8250.sys`
+全程直接 MMIO，无 SMC/HVC）。`S2CB` 的真实结构是深层子键（`S2CB\<sid>\<mask>\<cb>` 里放 MAP），
+不是一条扁平二进制，改起来也更脆。
+
+## 6. 一个操作陷阱：崩溃后必须删覆盖表，不能只禁驱动
+
+qcsmmu 这次硬复位（SoC 级）把 SYSTEM hive 留成了脏状态。之后 `to-win` 回 A 槽时，**覆盖表
+还在**（`00000004` 在，但 `qcsmmu`/`QCDX` 都已是 4），Windows 内核在 `ExitBootServices`
+（`PROGRESS CODE: V03101019`）之后、画面还没起来时就挂住——屏幕冻在 UEFI 调试日志上，
+不复位、不自动回落。拍照确认：`DaguPlat ready-to-boot`、`ESP found, flag open Not Found`、
+`bootmgfw.efi`、`ExitBS`、`V03101019`。
+
+同一张覆盖表在 hive 干净时能正常进系统（阶段 14 §1）；脏 hive + 覆盖表一起就挂。结论：
+**任何一次 GPU/SMMU 崩溃之后的恢复，都必须 `rm-dsdt` 删掉覆盖表，不能只把驱动 Start 改 4。**
+`dagu-rescue.sh` 的 `auto` 已经是先 `rm-dsdt`，手动恢复时要记得。本次恢复：进 fastboot →
+B 槽 → `disable-qcsmmu`/`disable-qcdx`/`rm-dsdt` → `to-win`，Windows 正常（脏 hive 由
+Windows 自己用 LOG 文件回滚，首个启动偏慢、sshd 晚几分钟才就绪，属正常）。
+
+## 7. 路线判断
+
+GPU CX 已上电（阶段 13），但高通 `qcsmmu` 驱动一碰 Adreno SMMU 就被 QHEE 复位，这是“原版
+qcsmmu + qcdx”路线的硬墙。后续只剩三条路，都更重：
+1. 逆向 `qcsmmu8250.sys` 的 `SmmuInitHardware`，定位复位前最后一次寄存器写，找能绕开的注册表开关；
+2. 不用 qcsmmu：在 UEFI 里把 Adreno SMMU 配成 GPU 流旁路（参考 Linux 侧 PCIe0 的做法），并改
+   ENGS 让 qcdx 不要求 `ArmSmmuV2` 接口；
+3. 暂时放弃 WDDM GPU，承认当前对“流畅度”最实在的收益是阶段 13 的大核调频修复（A77 ~3 倍），
+   显示继续走 BasicDisplay。

@@ -450,6 +450,188 @@ TryFastbootReset (
   CpuDeadLoop ();
 }
 
+// ---- GPU CX power domain for Windows ---------------------------------------
+// Windows has no Qualcomm PEP on dagu, so nothing powers the GPU CX domain.
+// The Adreno SMMU (0x3DA0000) and the GMU (0x3D6A000) sit in it, and any
+// access to them while it is collapsed stalls the bus with no abort: that is
+// what hung Windows at the boot spinner when qcsmmu8250 probed MMU1
+// (docs/woa-dagu-gpu-stage12). Turn CX on here, the same set the Qualcomm PEP
+// table G1MD F0 ENTER uses (cx_gdsc + gpu_cc_cxo/gcc_ddrss_gpu_axi/
+// gpu_cc_cx_gmu/gcc_gpu_memnoc_gfx) plus what mainline's adreno_smmu needs
+// (gpu_cc_ahb, gcc_gpu_snoc_dvm_gfx, hlos1 SMMU vote). Offsets: mainline
+// gcc-sm8250.c / gpucc-sm8250.c; base from the dagu stock DT gpucc@3d90000.
+// GX (the GPU core, rail VDD_GFX via RPMh) is NOT touched.
+//
+// Kill switch: an empty \dagu-no-gpu on the Windows ESP skips all of this
+// (create it from B-slot Linux: mount /dev/sda35 and touch the file).
+#define DAGU_GPU_CX_ON  1
+
+#define GPUCC                      0x03D90000u
+#define GPUCC_CX_GDSCR             (GPUCC + 0x106Cu)
+#define GPUCC_AHB_CBCR             (GPUCC + 0x1078u)
+#define GPUCC_CX_GMU_CBCR          (GPUCC + 0x1098u)
+#define GPUCC_CXO_CBCR             (GPUCC + 0x109Cu)
+#define GPUCC_CX_SNOC_DVM_CBCR     (GPUCC + 0x108Cu)
+#define GPUCC_HLOS1_SMMU_VOTE      (GPUCC + 0x5000u)
+#define GCC_BASE                   0x00100000u
+#define GCC_GPU_CFG_AHB_CBCR       (GCC_BASE + 0x71004u)
+#define GCC_GPU_MEMNOC_GFX_CBCR    (GCC_BASE + 0x7100Cu)
+#define GCC_GPU_SNOC_DVM_GFX_CBCR  (GCC_BASE + 0x71018u)
+#define GCC_DDRSS_GPU_AXI_CBCR     (GCC_BASE + 0x71154u)
+#define CBCR_CLK_OFF               BIT31
+#define GDSC_PWR_ON                BIT31
+#define GDSC_SW_COLLAPSE           BIT0
+#define ADRENO_SMMU_IDR0           0x03DA0020u
+
+STATIC BOOLEAN  mGpuCxOk;
+
+STATIC BOOLEAN
+GpuPoll (
+  UINTN   Reg,
+  UINT32  Mask,
+  UINT32  Want,
+  UINTN   Us
+  )
+{
+  UINTN  T;
+
+  for (T = 0; T < Us; T += 10) {
+    if ((MmioRead32 (Reg) & Mask) == Want) {
+      return TRUE;
+    }
+    gBS->Stall (10);
+  }
+  return (MmioRead32 (Reg) & Mask) == Want;
+}
+
+// Enable one branch: set CLK_ENABLE (bit0), wait for CLK_OFF (bit31) to drop.
+STATIC BOOLEAN
+GpuBranch (
+  CONST CHAR8  *Name,
+  UINTN        Cbcr
+  )
+{
+  BOOLEAN  On;
+
+  MmioOr32 (Cbcr, BIT0);
+  On = GpuPoll (Cbcr, CBCR_CLK_OFF, 0, 500);
+  Log ("  %a cbcr=0x%08x %a\n", Name, MmioRead32 (Cbcr), On ? "on" : "STILL OFF");
+  return On;
+}
+
+STATIC BOOLEAN
+GpuKillSwitch (
+  VOID
+  )
+{
+  EFI_HANDLE                       *Handles;
+  UINTN                            Count, I;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
+  EFI_FILE_PROTOCOL                *Root, *Probe, *Flag;
+  BOOLEAN                          Kill = FALSE;
+
+  if (EFI_ERROR (gBS->LocateHandleBuffer (
+                        ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles)))
+  {
+    return FALSE;
+  }
+  for (I = 0; I < Count; I++) {
+    if (EFI_ERROR (gBS->HandleProtocol (Handles[I], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs)) ||
+        EFI_ERROR (Fs->OpenVolume (Fs, &Root)))
+    {
+      continue;
+    }
+    if (EFI_ERROR (Root->Open (Root, &Probe, L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+                               EFI_FILE_MODE_READ, 0)))
+    {
+      Root->Close (Root);
+      continue;
+    }
+    Probe->Close (Probe);
+    if (!EFI_ERROR (Root->Open (Root, &Flag, L"\\dagu-no-gpu", EFI_FILE_MODE_READ, 0))) {
+      Flag->Close (Flag);
+      Kill = TRUE;
+    }
+    Root->Close (Root);
+    break;
+  }
+  gBS->FreePool (Handles);
+  return Kill;
+}
+
+STATIC VOID
+GpuCxOn (
+  VOID
+  )
+{
+  UINT32   Gdscr;
+  BOOLEAN  Ok = TRUE;
+
+  if (!DAGU_GPU_CX_ON) {
+    return;
+  }
+  if (GpuKillSwitch ()) {
+    Log ("gpu: \\dagu-no-gpu present, GPU CX left alone\n");
+    return;
+  }
+  // GCC side first. GPU_CC is reached through GCC_GPU_CFG_AHB_CLK; if that
+  // branch is not running, a GPU_CC access is exactly the bus stall we are
+  // trying to avoid, so bail out before touching 0x3D9xxxx.
+  Log ("gpu: cfg_ahb cbcr=0x%08x before\n", MmioRead32 (GCC_GPU_CFG_AHB_CBCR));
+  if (!GpuBranch ("gcc_gpu_cfg_ahb", GCC_GPU_CFG_AHB_CBCR)) {
+    Log ("gpu: GPU_CC unreachable, abort (no GPU_CC access made)\n");
+    return;
+  }
+  Gdscr = MmioRead32 (GPUCC_CX_GDSCR);
+  Log ("gpu: cx_gdscr=0x%08x before\n", Gdscr);
+  if ((Gdscr & GDSC_PWR_ON) == 0) {
+    MmioAnd32 (GPUCC_CX_GDSCR, ~GDSC_SW_COLLAPSE);
+    if (!GpuPoll (GPUCC_CX_GDSCR, GDSC_PWR_ON, GDSC_PWR_ON, 2000)) {
+      Log ("gpu: CX GDSC did not power on, gdscr=0x%08x, abort\n", MmioRead32 (GPUCC_CX_GDSCR));
+      return;
+    }
+  }
+  Log ("gpu: cx_gdscr=0x%08x after\n", MmioRead32 (GPUCC_CX_GDSCR));
+  Ok &= GpuBranch ("gcc_gpu_memnoc_gfx", GCC_GPU_MEMNOC_GFX_CBCR);
+  Ok &= GpuBranch ("gcc_gpu_snoc_dvm_gfx", GCC_GPU_SNOC_DVM_GFX_CBCR);
+  Ok &= GpuBranch ("gcc_ddrss_gpu_axi", GCC_DDRSS_GPU_AXI_CBCR);
+  Ok &= GpuBranch ("gpu_cc_ahb", GPUCC_AHB_CBCR);
+  Ok &= GpuBranch ("gpu_cc_cxo", GPUCC_CXO_CBCR);
+  Ok &= GpuBranch ("gpu_cc_cx_gmu", GPUCC_CX_GMU_CBCR);
+  Ok &= GpuBranch ("gpu_cc_cx_snoc_dvm", GPUCC_CX_SNOC_DVM_CBCR);
+  MmioOr32 (GPUCC_HLOS1_SMMU_VOTE, BIT0);
+  Log ("gpu: hlos1 smmu vote=0x%08x\n", MmioRead32 (GPUCC_HLOS1_SMMU_VOTE));
+  // Proof that the block now answers: the first register qcsmmu8250 reads.
+  if (Ok) {
+    Log ("gpu: adreno smmu IDR0=0x%08x\n", MmioRead32 (ADRENO_SMMU_IDR0));
+    mGpuCxOk = TRUE;
+  } else {
+    Log ("gpu: a clock stayed off, Adreno SMMU not probed\n");
+  }
+}
+
+// ExitBootServices: Qualcomm ClockDxe may drop clocks it thinks are unused.
+// Re-assert the same bits (MMIO only, no file or log I/O at this point), and
+// only if the ReadyToBoot pass proved the sequence works on this boot.
+STATIC VOID
+GpuCxReassert (
+  VOID
+  )
+{
+  if (!mGpuCxOk || ((MmioRead32 (GCC_GPU_CFG_AHB_CBCR) & CBCR_CLK_OFF) != 0)) {
+    return;
+  }
+  MmioAnd32 (GPUCC_CX_GDSCR, ~GDSC_SW_COLLAPSE);
+  MmioOr32 (GCC_GPU_MEMNOC_GFX_CBCR, BIT0);
+  MmioOr32 (GCC_GPU_SNOC_DVM_GFX_CBCR, BIT0);
+  MmioOr32 (GCC_DDRSS_GPU_AXI_CBCR, BIT0);
+  MmioOr32 (GPUCC_AHB_CBCR, BIT0);
+  MmioOr32 (GPUCC_CXO_CBCR, BIT0);
+  MmioOr32 (GPUCC_CX_GMU_CBCR, BIT0);
+  MmioOr32 (GPUCC_CX_SNOC_DVM_CBCR, BIT0);
+  MmioOr32 (GPUCC_HLOS1_SMMU_VOTE, BIT0);
+}
+
 // The ESP's filesystem is connected during BDS, after this driver's DXE
 // entry, so a single scan at entry misses it. Re-run the flag check whenever
 // any SimpleFileSystem is installed; the ESP shows up before bootmgfw starts.
@@ -480,8 +662,9 @@ OnReadyToBoot (
     return;
   }
   mDone = TRUE;
-  Log ("dagu-uefi-diag v1\n");
+  Log ("dagu-uefi-diag v2\n");
   EpssApply (TRUE);
+  GpuCxOn ();
   WcnCensus ();
   if (DAGU_PLAT_DIAG) {
     WriteEspFile ();
@@ -496,6 +679,7 @@ OnExitBootServices (
   )
 {
   EpssApply (FALSE);                 // last word before the OS: MMIO only
+  GpuCxReassert ();
 }
 
 EFI_STATUS

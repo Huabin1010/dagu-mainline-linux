@@ -134,6 +134,9 @@ grep -q DaguPcieDxe "$DEV/xiaomi-dagu/DXE.inc" && grep -q DaguPcieDxe "$DEV/xiao
 # (INACCESSIBLE_BOOT_DEVICE, 0xC0000034). dagu's tree has no _DEP, PEP0 is a
 # placeholder (QCOM2430) and UFS0 keeps _CCA 0 as the stock DT (no dma-coherent).
 ASL_SRC="$HERE/../edk2-msm/Platform/Xiaomi/sm8250/AcpiTables/dagu"
+# edk2-msm is a local checkout that is not always present; the same tree is
+# tracked in this repo under port/dagu.
+[ -d "$ASL_SRC" ] || ASL_SRC="$HERE/../port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu"
 IASL="$(command -v iasl || true)"
 [ -n "$IASL" ] || IASL="$(find "$HERE/$MU/MU_BASECORE/BaseTools/Bin" -path '*Linux-x86/iasl' -type f 2>/dev/null | head -1)"
 [ -x "$IASL" ] || { echo "no iasl (install acpica-tools)" >&2; exit 1; }
@@ -237,7 +240,7 @@ if [ "$BUILD_TYPE" = DEBUG ]; then
 fi
 
 # 5. Build --------------------------------------------------------------------
-./mu-run.sh python3 build_uefi.py -d xiaomi-dagu -t "$BUILD_TYPE"
+sh ./mu-run.sh python3 build_uefi.py -d xiaomi-dagu -t "$BUILD_TYPE"
 
 mkdir -p out
 cp -f "$MU/Build/KonaPkg/xiaomi-dagu.img" "out/xiaomi-dagu-uefi-${BUILD_TYPE,,}.img"
@@ -248,7 +251,14 @@ cp -f "$MU/Build/KonaPkg/xiaomi-dagu.img" "out/xiaomi-dagu-uefi-${BUILD_TYPE,,}.
 # the raw Mu payload (shim + FD) as the "kernel".
 OUT="$HERE/out"
 gzip -dc "$MU/Build/KonaPkg/bootpayload.bin" > "$OUT/dagu-uefi-payload.raw"
+# The repack below needs the stock HyperOS boot/vendor_boot dump and magiskboot,
+# which are local, git-ignored files. Without them stop here with the payload;
+# tools/winarm/repack-uefi-boot.py can swap it into a boot_a dumped from the device.
+if [ ! -f "$HERE/../dumps/dagu-20260826-210700-root/images/boot_a.img" ]; then
+	echo "==> no stock dump: payload only -> $OUT/dagu-uefi-payload.raw"
+	exit 0
+fi
 (cd ../linux-mainline && KERNEL_IMG="$OUT/dagu-uefi-payload.raw" \
 	BOOTIMG="$OUT/boot-dagu-uefi-v3.img" VBOOT="$OUT/vendor_boot-dagu-uefi.img" \
-	./scripts/build-bootimg.sh)
+	bash ./scripts/build-bootimg.sh)
 echo "==> $OUT/boot-dagu-uefi-v3.img (+ vendor_boot-dagu-uefi.img) for slot A"

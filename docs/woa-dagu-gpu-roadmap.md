@@ -147,7 +147,13 @@ dagu 现在只有 `MMU0`/`MMU1`（阶段 8 对齐了 HID），其余节点都没
 MTP 的 IORT 把 `\_SB.UFS0`（启动盘）映射到 `0x15000000` 的 apps SMMU 后面，Windows 就要
 qcsmmu+PEP 先起来启动盘才出现，否则 `0x7B`/`0xC0000034`。能启动 Windows 的 SM8250 手机
 （alioth/lmi/elish）**都不出 IORT**。所以 `build-dagu-uefi.sh` 从 `ACPI.inc` 里删掉了
-IORT 和 MCFG。启用 SMMU 设备本身不碰 UFS DMA（仍直通），只有带 IORT 才出事。
+IORT 和 MCFG。
+
+**更正（阶段 10 板测）**：原来这里写"启用 SMMU 设备本身不碰 UFS DMA"，不成立。没有 IORT
+时 UFS 的直通靠 QHEE 留在 APPS SMMU（`0x15000000`）里的旁路流配置；`MMU0` 一枚举，
+`qcsmmu8250.sys` 就会在早期加载并复位 SMMU，旁路很可能被清掉。阶段 10 带 `MMU0` 的 Step A
+卡在启动日志落盘之前（ntbtlog 没有段落、无 dump），比阶段 4 更早。在找到让 qcsmmu 保留 UFS
+旁路的办法前，**覆盖表里不要放 `MMU0`**。`MMU1`（Adreno SMMU `0x03DA0000`）UFS 不在后面，可以单独试。
 
 ---
 
@@ -246,8 +252,12 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 > 调试期只 `fastboot boot`，**不** `fastboot flash boot`。
 
 ```
-步骤 A（= 阶段 8，最小步，先做）
-  覆盖表 = 固件DSDT + GPU0(ENGS/RESI/TMDT，不含PMCL) + MMU0/MMU1(QCOM2509)
+【阶段 10 已测】步骤 A 带 MMU0/MMU1 → 启动日志落盘前硬卡死（疑 qcsmmu 复位 APPS SMMU 断了 UFS）。
+  现改为先测 G（GPU0 不带 SMMU，C:\dagu\ov-gpu-testG.aml），再测 G1（GPU0 + 只有 MMU1）。
+  见 docs/woa-dagu-gpu-stage10-2026-10-31.md。
+
+步骤 A（= 阶段 8，最小步）
+  覆盖表 = 固件DSDT + GPU0(ENGS/RESI/TMDT，不含PMCL)   ← 不再带 MMU0
   PEP0 禁用，QCDX Start=3，重启，盯屏幕/ntbtlog
   ├─ 过了门控、驱动完成初始化（dxgkrnl 加载、进桌面）→ 去 步骤 C
   ├─ 仍无 dump 卡死 / 卡在 qcdxkm8250.sys    → 去 步骤 B

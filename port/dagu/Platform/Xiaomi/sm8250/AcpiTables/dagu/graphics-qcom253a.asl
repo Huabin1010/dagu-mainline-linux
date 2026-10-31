@@ -1296,6 +1296,321 @@ Device (GPU0)
         })
         Return (RBUF) /* \_SB_.GPU0.TMDT.RBUF */
     }
+    // =========================================================================
+    // 阶段 15：REGR —— 驱动“注册表”配置包（从 MTP 参考板 DSDT 逐字移植）
+    //
+    // 见 docs/woa-dagu-gpu-stage15-2026-10-31.md。qcdxkm8250.sys 用路径
+    // "\REGR\<键>" 读配置（0x2703c8 格式串 → 解析器 0x262c70），对 GPU0 求值 REGR。
+    // 缺 REGR 时第一次求值失败但方法名已被缓存，第二次同名查询走缓存复用分支、
+    // 解引用空缓冲 → +0x262904 空指针 BugCheck 0x3B。提供 REGR 后缓冲被正常填充。
+    // ZeroPageLowAddr 0x85F40000 落在 dagu 内存图的保留区 0x85E00000+0x200000 内。
+    // =========================================================================
+    Method (REGR, 0, NotSerialized)
+    {
+        Name (RBUF, Package (0x1A)
+        {
+            Package (0x02)
+            {
+                "ForceMaxPerf", 
+                Zero
+            }, 
+
+            Package (0x02)
+            {
+                "ForceStablePowerSettings", 
+                Zero
+            }, 
+
+            Package (0x02)
+            {
+                "ForceActive", 
+                Zero
+            }, 
+
+            Package (0x02)
+            {
+                "DeferForceActive", 
+                Zero
+            }, 
+
+            Package (0x02)
+            {
+                "PreventPowerCollapse", 
+                Zero
+            }, 
+
+            Package (0x02)
+            {
+                "DisableThermalMitigation", 
+                Zero
+            }, 
+
+            Package (0x02)
+            {
+                "OPMApiVersion", 
+                0x02
+            }, 
+
+            Package (0x02)
+            {
+                "DisableTzMDSSRestore", 
+                One
+            }, 
+
+            Package (0x02)
+            {
+                "UseLowPTForGfxPerProcess", 
+                One
+            }, 
+
+            Package (0x02)
+            {
+                "DisableCDI", 
+                Zero
+            }, 
+
+            Package (0x02)
+            {
+                "GPU64bAddrEnabled", 
+                One
+            }, 
+
+            Package (0x02)
+            {
+                "MaxPreemptionOffsets", 
+                0x80
+            }, 
+
+            Package (0x02)
+            {
+                "MaxRequiredDmaQueueEntry", 
+                0x08
+            }, 
+
+            Package (0x02)
+            {
+                "SupportsSecureInAperture", 
+                One
+            }, 
+
+            Package (0x02)
+            {
+                "ZeroFlagSupportInPTE", 
+                One
+            }, 
+
+            Package (0x02)
+            {
+                "SupportsCacheCoherency", 
+                One
+            }, 
+
+            Package (0x02)
+            {
+                "SupportsSHMBridge", 
+                One
+            }, 
+
+            Package (0x02)
+            {
+                "SecureCarveoutSize", 
+                0x00200000
+            }, 
+
+            Package (0x02)
+            {
+                "allowDrmAbove1080p", 
+                One
+            }, 
+
+            Package (0x02)
+            {
+                "ZeroPageLowAddr", 
+                0x85F40000
+            }, 
+
+            Package (0x02)
+            {
+                "ZeroPageHighAddr", 
+                Zero
+            }, 
+
+            Package (0x02)
+            {
+                "KeepUefiBuffer", 
+                One
+            }, 
+
+            Package (0x05)
+            {
+                "GRAPHICS", 
+                Package (0x02)
+                {
+                    "EnableSystemCache", 
+                    One
+                }, 
+
+                Package (0x02)
+                {
+                    "EnableSysCacheForGpuhtw", 
+                    One
+                }, 
+
+                Package (0x0A)
+                {
+                    "DCVS", 
+                    Package (0x02)
+                    {
+                        "Enable", 
+                        One
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "IncreaseFilterBw", 
+                        0x00020000
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "DecreaseFilterBw", 
+                        0x3333
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "TargetBusyPct", 
+                        0x55
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "SampleRate", 
+                        0x3C
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "TargetBusyPctOffscreen", 
+                        0x4B
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "SampleRateOffscreen", 
+                        0x14
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "GpuResetValue", 
+                        0x11490C80
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "BusResetValue", 
+                        0x04B0
+                    }
+                }, 
+
+                Package (0x06)
+                {
+                    "A6x", 
+                    Package (0x02)
+                    {
+                        "DisableICG", 
+                        Zero
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "DisableGmuCG", 
+                        Zero
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "DisableGmuACD", 
+                        Zero
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "EnableFallbackToDisableSecureMode", 
+                        Zero
+                    }, 
+
+                    Package (0x02)
+                    {
+                        "DisableCPCrashDump", 
+                        Zero
+                    }
+                }
+            }, 
+
+            Package (0x02)
+            {
+                "VIDEO", 
+                Package (0x02)
+                {
+                    "EnableSystemCache", 
+                    One
+                }
+            }, 
+
+            Package (0x02)
+            {
+                "CRYPTO", 
+                Package (0x02)
+                {
+                    "EnableCryptoVA", 
+                    One
+                }
+            }, 
+
+            Package (0x07)
+            {
+                "DISPLAY", 
+                Package (0x02)
+                {
+                    "DisableMiracast", 
+                    One
+                }, 
+
+                Package (0x02)
+                {
+                    "EnableOEMDriverDependency", 
+                    Zero
+                }, 
+
+                Package (0x02)
+                {
+                    "EnableBridgeDriverDependency", 
+                    Zero
+                }, 
+
+                Package (0x02)
+                {
+                    "DisableRotator", 
+                    Zero
+                }, 
+
+                Package (0x02)
+                {
+                    "DisableMDPBLT", 
+                    One
+                }, 
+
+                Package (0x02)
+                {
+                    "DisableExternal", 
+                    Zero
+                }
+            }
+        })
+        Return (RBUF) /* \_SB_.GPU0.REGR.RBUF */
+    }
 
     // =========================================================================
     // 阶段 9：PMCL —— 电源/时钟部件模型（从 MTP 参考板 DSDT 逐字移植）

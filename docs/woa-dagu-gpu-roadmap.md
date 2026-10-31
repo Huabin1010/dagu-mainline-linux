@@ -327,7 +327,8 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 | KMD / 固件 | `qcdxkm8250.sys`、`qcdxkmsuc8250.mbn`(zap,test签名)、`qcvss8250.mbn` |
 | dagu 面板 XML（UEFI 方言） | `.../xiaomi-pipa/Binaries/RawFiles/Panel_L81A_42_04_0a_dualdsi_dphy_lcd_vid.xml` |
 | 门控函数 / 日志码 | `FUN_1402b4be0`；`0xe5f`(GmuInternal) `0xe68`(GmuCached) `0xe71`(GpuInternal) |
-| qcdx 崩溃点 / 根因 | `+0x262904`(`ldrh [x19]`,x19=0xc)；配置解析器 `0x262c70` 缓存复用空 `field_38`（名字先于填充成功被缓存）→ 缺 `DCVS` GPU 配置对象，详见 [stage15](woa-dagu-gpu-stage15-2026-10-31.md) |
+| qcdx 0x3B 崩溃 | `+0x262904`(`ldrh [x19]`,x19=0xc)：GPU0 缺 `REGR`，`"\REGR\%s"` 解析器缓存复用空缓冲。**已修**（GPU0 补 REGR），详见 [stage15](woa-dagu-gpu-stage15-2026-10-31.md) |
+| qcdx 下一道墙 | 启动时阻塞等 qcsmmu 接口 `{36079AE4-78E8-452D-AF50-0CFF78B2F1CA}`（30 s×4），等不到在回退路径 `0xA` 蓝屏（[stage15](woa-dagu-gpu-stage15-2026-10-31.md) §5） |
 | qcdx RE 工具 | `tools/winarm/qdis.py`（RVA 反汇编+串解析）、`tools/winarm/dagu-dump-triage.py`（ARM64 转储） |
 | 覆盖表注册表键 | `HKLM\SYSTEM\CurrentControlSet\Services\ACPI\Parameters\DSDT\QCOMM_\SM8250_\00000004`（值 `00000000`/`00000001`） |
 | 正在用的表 | `HKLM\HARDWARE\ACPI\DSDT\QCOMM_\SM8250_\0000000X` |

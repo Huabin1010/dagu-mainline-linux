@@ -31,7 +31,7 @@ def rds(r):
         if len(u)>=3 and all(32<=ord(c)<127 for c in u): return 'L"'+u+'"'
     except: pass
     return None
-md=Cs(CS_ARCH_ARM64,CS_MODE_LITTLE_ENDIAN)
+md=Cs(CS_ARCH_ARM64,CS_MODE_LITTLE_ENDIAN); md.skipdata=True
 def dis(lo,hi):
     adrp={}
     for insn in md.disasm(d[off(lo):off(lo)+(hi-lo)], lo):

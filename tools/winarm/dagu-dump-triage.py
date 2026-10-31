@@ -95,22 +95,42 @@ def main():
         return "0x%x" % va
 
     print("modules=%d" % len(mods))
-    ctx = rdva(params[2], 0x120) if bc == 0x3b else None
     fault_rva = fault_mod = None
-    if ctx:
-        fp, lr, sp, pc = struct.unpack_from("<QQQQ", ctx, 0xf0)
-        print("Pc=%s  Lr=%s  Sp=0x%x" % (who(pc), who(lr), sp))
+    def set_fault(pc):
+        nonlocal fault_rva, fault_mod
         for base, size, name in mods:
             if base <= pc < base+size and drv and name.lower() in drv.lower():
                 fault_rva, fault_mod = pc-base, name
-        stk = rdva(sp, 0x800)
+    if bc == 0x3b:
+        # P3 points at the CONTEXT of the faulting instruction.
+        ctx = rdva(params[2], 0x120)
+    else:
+        # Other bugchecks: use the CONTEXT saved in the dump header (the CPU
+        # that called KeBugCheckEx); its stack still holds the trap frame.
+        ctx = hdr[0x348:0x348+0x120]
+    if bc in (0xa, 0xd1):
+        # IRQL_NOT_LESS_OR_EQUAL / DRIVER_IRQL_NOT_LESS_OR_EQUAL: P1=address,
+        # P2=IRQL, P3=0 read / 1 write / 8 execute, P4=faulting PC.
+        print("fault: %s %s @ IRQL %d, Pc=%s" % (
+            {0: "read", 1: "write", 8: "execute"}.get(params[2], "op%d" % params[2]),
+            hex(params[0]), params[1], who(params[3])))
+        set_fault(params[3])
+    if ctx:
+        regs = struct.unpack_from("<29Q", ctx, 8)
+        fp, lr, sp, pc = struct.unpack_from("<QQQQ", ctx, 0xf0)
+        print("Pc=%s  Lr=%s  Sp=0x%x" % (who(pc), who(lr), sp))
+        print("  " + " ".join("x%d=%x" % (i, r) for i, r in enumerate(regs)))
+        if bc == 0x3b:
+            set_fault(pc)
+        span = 0x800 if bc == 0x3b else 0x3000
+        stk = rdva(sp, span)
         if stk:
-            print("stack (qcdx/dxgkrnl return addresses):")
+            print("stack return-address candidates (sp..sp+0x%x):" % span)
             seen = set()
             for o in range(0, len(stk), 8):
-                v = struct.unpack_from("<Q", stk, o)[0]
+                v = struct.unpack_from("<Q", stk, o)[0] & 0x0000FFFFFFFFFFFF | 0xFFFF000000000000
                 w = who(v)
-                if ("qcdx" in w or "dxgkrnl" in w) and v not in seen:
+                if not w.startswith("0x") and v not in seen:
                     seen.add(v); print("  sp+0x%x: %s" % (o, w))
 
     if drv and fault_rva is not None:

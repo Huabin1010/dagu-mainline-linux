@@ -1,116 +1,120 @@
-# dagu Windows GPU：阶段 15（qcdx 崩溃根因定位：缓存复用空指针）（2026-10-31）
+# dagu Windows GPU：阶段 15（qcdx 空指针根因 = 缺 REGR；补上后撞上 SMMU 接口依赖）（2026-10-31）
 
-阶段 11 发现 `qcdxkm8250.sys` 在绑定时 `BugCheck 0x3B`（`SYSTEM_SERVICE_EXCEPTION`，
-P1=`0xC0000005`），崩溃点恒定在 `qcdxkm8250.sys+0x262904`。阶段 11–13 反复换地址、换 `PMCL`、
-开关 GPU CX 都复现同一个崩溃，说明它跟 GPU 硬件和 ACPI 地址内容无关。本阶段把这个崩溃彻底逆向
-到根因，并给出一个可测的候选修复。工具：`tools/winarm/qdis.py`（capstone，imagebase
-`0x140000000`，RVA 寻址、带字符串解析）。
+阶段 11 起 `qcdxkm8250.sys` 一绑定就 `BugCheck 0x3B`，崩溃点恒定在 `+0x262904`，换地址、加
+`PMCL`、开关 GPU CX 都不变。本阶段把它逆向到根因，补上 GPU0 缺的 `REGR` 方法，实测**崩溃消失**，
+驱动往前走到了 SMMU 初始化，然后卡在“等 qcsmmu 的设备接口”这一步。
 
-## 1. 崩溃现场（崩溃转储寄存器确认）
+工具：`tools/winarm/qdis.py`（capstone，RVA 寻址，imagebase `0x140000000`；本阶段打开了
+`skipdata`，否则 capstone 遇到代码里的数据字就停，会漏掉调用点）、`tools/winarm/dagu-dump-triage.py`
+（本阶段加了非 0x3B 蓝屏的处理和全模块栈扫描）。
 
-从 A 槽拉起 qcdx（GP 覆盖表、阶段 12 修正地址、CX 已上电、无 SMMU）后，拿到内核转储
-`MEMORY-qcdx2.DMP`，用 `tools/winarm/dagu-dump-triage.py`（ARM64 SDMPDUMP 解析器）定位：
+> 更正：本文件第一版（`cbd7d38`）说“方法名是 `DCVS`”、“`0x262c70` 没有静态调用者”，两条都错。
+> 后者是 capstone 没开 `skipdata` 漏扫；前者是猜测。正确结论见下文。
 
-- 出错指令：`qcdxkm8250.sys+0x262904`：`ldrh w8, [x19]`。
-- 崩溃时寄存器：**X19=0xc、X20=0、X21=0xc**。
-- 即：读 `[0xc]` 这个近空地址，页错误 → `0xC0000005`。
+## 1. 0x3B 崩溃现场
 
-`0x262904` 在一个包遍历函数 `0x2628e0` 里，`x19` 是它要遍历的 `ACPI_EVAL_OUTPUT_BUFFER`
-的 `Argument[0]` 指针。`Argument[0] = 缓冲区 + 0xc`（头是 Signature/Length/Count 各 4 字节
-=0xc）。X19=0xc 说明**缓冲区指针本身是 0**，`0 + 0xc = 0xc`。
+转储 `MEMORY-qcdx2.DMP`：出错指令 `+0x262904`：`ldrh w8,[x19]`，**X19=0xc**。
+`x19` 是 `ACPI_EVAL_OUTPUT_BUFFER` 的 `Argument[0]`（缓冲区 + 0xc），所以缓冲区指针本身是 0。
 
-## 2. 调用链与那个致命的“复用”分支
+## 2. 调用链
 
-崩溃函数（`0x2628e0`）由解析器 `0x262c70` 调用（`0x262d5c: bl 0x2628e0`）。`0x262c70`
-是一个“按反斜杠分段的配置路径解析器”：
-
-1. `0x262ca4`：`bl 0x2629f0` 把输入路径（`x22`）按 `\`（0x5c）切出第一段，写到栈 `sp+8`。
-   `0x2629f0` 是个 `\` 分隔的分词器（跳过前导 `\`，取到下一个 `\` 或结尾，最多 0x80 字节）。
-2. `0x262cc0`：`ldr x8,[0x14a318]` → **`RtlCompareMemory`**（已解析 IAT 确认），
-   `blr x8(sp+8, devctx+0x10, 4)`：把这一段的前 4 字节和**上次缓存在 `devctx+0x10` 的名字**比。
-3. `0x262cdc`：`cmp x0,#4; b.eq 0x262d20`——**4 字节全等就跳过重新求值，直接复用缓存**。
-4. 走到 `0x262d28`：`ldr x8,[x19,#0x38]`（取 `field_38`），`x21 = field_38 + 0xc`，交给
-   `0x262d5c: bl 0x2628e0` 遍历。
-
-关键在第 3 步：匹配就复用 `field_38`，**但从不检查 `field_38` 是不是 NULL**。
-
-## 3. 名字被缓存、但缓冲区没被填上
-
-填充 `field_38` 的是 `0x262ac0`，只在第 2 步“不匹配”的回落路径里被调用；而**名字是在调用填充
-之前就先写进 `devctx+0x10` 的**（`0x262d0c: bl 0x1334c8` 拷 4 字节名字）。填充函数 `0x262ac0`：
-
-- `0x262af8: bl 0x25e000` 用一个签名为 **`"EvEx"`**（`0x78457645`）的求值器求值，
-  入参缓冲是 `ACPI_EVAL_INPUT_BUFFER_COMPLEX` 形态，池标记 `"qDXB"`/`"qDX4"`。
-- 返回 `STATUS_SUCCESS`（0）或 `STATUS_BUFFER_OVERFLOW`（`0x80000005`，=`0x262c60`）时才
-  分配并写 `field_38`（`devctx+0x38`）。
-- 返回**其它错误**（例如对象不存在 → 既不是成功也不是 overflow）时：`0x262b0c: b.ne 0x262c44`
-  直接带错误码返回，`field_38` 保持 NULL。
-
-于是毒化序列是：
-
-| 次序 | 发生的事 | `devctx+0x10`(名字) | `field_38` | 结果 |
-|---|---|---|---|---|
-| 第一次解析名字 X | `EvEx` 求值失败（对象缺失，非 overflow） | 已写成 X | NULL | 解析器返回错误，**不崩** |
-| 第二次解析名字 X | `RtlCompareMemory` 命中 → 走复用分支 | X | 仍 NULL | `ldr [field_38]`=0 → `0+0xc` → **崩** |
-
-所以崩溃是一个**缓存一致性 bug**：名字先于填充成功被缓存，第一次求值失败后缓存里留下
-“名字有效但缓冲为空”的状态；第二次同名请求信任缓存、复用了空指针。X19=0xc 正好对上。
-
-## 4. 触发物：dagu 的 GPU 节点缺了一个配置对象
-
-`0x262c70` 恒定不被静态调用（全二进制里 `0x262c70` 只作为 `.pdata` 的函数入口出现一次，
-`0x1c7948`），说明它是运行时注册的回调——高通的“配置路径解析”回调。被解析的路径里有现成的格式串
-**`"DCVS\%s"`**（RVA `0x343b88`）和 **`"%s\%s"`**（RVA `0x342858`），还有一个裸的 4 字节
-`"DCVS"` 标签（RVA `0x343970`，上下文 `DCVS\0\0\0\0Targ…`）。`DCVS` 正好 4 字节，与
-`RtlCompareMemory(...,4)` 对得上。
-
-也就是说：qcdx 在绑定时去解析 `DCVS\<子项>` 这类 GPU 动态调频（Dynamic Clock Voltage
-Scaling）配置；**dagu 移植的 GPU0 节点没有提供这个配置对象**，第一次 `EvEx` 求值失败→名字被
-缓存→同名再查→空指针崩溃。真机 WoA SM8250 的 GPU 节点（或高通属性库）会提供它，我们从 MTP
-裁出来的最小 GPU0 节点没有。
-
-> 注意：`EvEx`/`qDXB` 不是标准 Windows ACPI IOCTL 签名，`0x25e000` 末尾调用的 `[0x14a590]`
-> 也不在导入表里（紧挨 IAT 之后，运行时填的内部函数指针）。所以这层“求值”更像高通**自建的属性库**
-> 包装，底层数据源（ACPI `_DSM`/包、还是注册表/INF）尚未坐实——INF 里 grep 不到 `DCVS`，倾向
-> ACPI 侧。这一点**未验证**，是下一步要做实的。
-
-## 5. 结论：两道墙都还在
-
-- **qcdx 空指针**（本阶段）：根因是高通驱动的缓存复用 bug + dagu 缺 `DCVS` GPU 配置对象。
-  候选修复是给 `graphics-qcom253a.asl` 的 GPU0 节点补上 qcdx 期望的 `DCVS` 配置（方法/包），
-  让首次求值成功、`field_38` 被填上，绕过空指针路径。**待验证**。
-- **SMMU/QHEE 墙**（阶段 14）：即便 qcdx 不再崩，下一步 `qcsmmu` 一编程 Adreno SMMU 就被
-  QHEE 复位整颗 SoC，这是 stock HyperOS 固件上的硬墙。所以 WDDM GPU 加速在当前固件下仍被卡在
-  SMMU 层。
-
-因此，就“让 Windows 跑得流畅”这个目标，目前最实在、已交付的收益仍是阶段 13 的大核调频修复
-（A77 ~3 倍，已验证）；WDDM GPU 这条路两道墙都需要固件侧（QHEE/TZ）配合才可能走通。
-
-## 6. 下一步（按成本从低到高）
-
-1. 坐实 `DCVS` 的数据源：逆 `0x25e000` 末尾 `[0x14a590]` 与 `devctx+0x10` 的来源，确认是 ACPI
-   还是注册表；若 ACPI，给 GPU0 补 `DCVS` 方法/包，重建覆盖表、运行时拉起 qcdx 验证是否过崩溃点。
-2. 即便过了崩溃点，仍要面对阶段 14 的 SMMU/QHEE 复位墙——需要 UEFI 侧把 Adreno SMMU 配成 GPU
-   流旁路（阶段 14 §7 路线 2），工作量大且 UEFI 侧已知“写 GR0 不生效/被规格化”（阶段 14、v8 探针）。
-3. 维持现状：显示走 BasicDisplay，交付大核调频收益。
-
-## 7. 速查坐标（qcdx RE）
-
-| 项 | RVA | 说明 |
+| 层 | RVA | 作用 |
 |---|---|---|
-| 崩溃指令 | `0x262904` | `ldrh w8,[x19]`，x19=0xc |
-| 包遍历函数 | `0x2628e0` | 遍历 `Argument[0]` |
-| 配置路径解析器（回调） | `0x262c70` | `\` 分段 + 缓存复用分支 |
-| 复用判定 | `0x262cdc` | `cmp x0,#4; b.eq 0x262d20` |
-| `RtlCompareMemory` IAT | `0x14a318` | ntoskrnl 导入 |
-| `field_38` 填充函数 | `0x262ac0` | 求值 + 分配 |
-| `EvEx` 求值器 | `0x25e000` | 签名 `"EvEx"`，池标记 `"qDXB"` |
-| 分词器（按 `\`） | `0x2629f0` | 跳 `\`、取段、≤0x80 |
-| `"DCVS\%s"` 格式串 | `0x343b88` | 构造配置路径 |
-| 裸 `"DCVS"` 标签 | `0x343970` | 4 字节方法名 |
-| 关键状态码 | — | `0x80000005` overflow / `0xc0000017` 资源不足 / `0xc000003a` 路径不存在 |
+| 读整数配置 | `0x270340..` | 用格式串 **`"\REGR\%s"`**（`0x3428f8`）拼出路径，调 `0x262e08` |
+| `0x262e08` | | 校验对象签名 `0x55AA55AA`，调解析器，再按键名查值 |
+| 解析器 `0x262c70` | | 按 `\` 切出第一段（`0x2629f0`），即方法名 `REGR`；和缓存名比较后求值 |
+| 填充 `0x262ac0` | | 求值 `REGR`，成功才把输出缓冲写进 `devctx+0x38`（`field_38`） |
+| 求值 `0x25e000` | | 拼 `ACPI_EVAL_INPUT_BUFFER_COMPLEX`，调 `[iface+0x10]`（`DXGKRNL_INTERFACE.DxgkCbEvalAcpiMethod`，`DeviceUid=-1` 即适配器自己的 ACPI 节点 GPU0） |
 
-工具：`tools/winarm/qdis.py`（本阶段入库）、`tools/winarm/dagu-dump-triage.py`（阶段 11）。
+## 3. 根因：缓存名先写、缓冲后填，失败后留下“名字有效但缓冲为空”
+
+`0x262c70` 里：
+
+1. `0x262cc0`：`RtlCompareMemory(段名, devctx+0x10, 4)`（IAT `0x14a318`）。
+2. `0x262cdc`：`cmp x0,#4; b.eq 0x262d20`：4 字节相等就**直接复用缓存的 `field_38`，不判空**。
+3. 不相等：释放旧缓冲 → `0x262d10` **先把新名字写进 `devctx+0x10`** → 再调 `0x262ac0` 求值。
+
+`0x262ac0` 只在求值返回 `STATUS_SUCCESS` 或 `STATUS_BUFFER_OVERFLOW`（`0x80000005`）时分配并写
+`field_38`；其它错误（例如 GPU0 下根本没有 `REGR`）直接返回，`field_38` 保持 NULL。于是：
+
+| 次序 | 发生的事 | 缓存名 | `field_38` | 结果 |
+|---|---|---|---|---|
+| 第 1 次读 `\REGR\xxx` | 求值 `REGR` 失败（对象不存在） | `REGR` | NULL | 返回错误，驱动当作“键不存在”继续 |
+| 第 2 次读 `\REGR\yyy` | 名字相等 → 复用分支 | `REGR` | NULL | `0 + 0xc` → `ldrh [0xc]` → **0x3B** |
+
+## 4. 修复：GPU0 补上 REGR（已验证）
+
+参考板 SM8250 MTP DSDT 的 `\_SB.GPU0.REGR`（`KonaPkg/Device/qcom-mtp8250/ACPI/DSDT.dsl` 与
+`SurfaceDuoACPI/QcomACPI/8250/src/DSDT_8250_MTP.dsl` 两份逐字相同）原样移植进
+`port/dagu/.../graphics-qcom253a.asl`（TMDT 之后）。它是驱动的“注册表配置包”：`ForceMaxPerf`、
+`GPU64bAddrEnabled`、`ZeroPageLowAddr` 等，外加 `GRAPHICS\DCVS`、`GRAPHICS\A6x`、`VIDEO`、
+`CRYPTO`、`DISPLAY` 子包。唯一的硬地址 `ZeroPageLowAddr 0x85F40000` 落在 dagu 实际 UEFI 内存图
+（`KonaPkg/Device/xiaomi-dagu` 的 `RAM Partition 0x85E00000+0x200000`，Reserv）里。
+
+覆盖表：`build-gpu-overlay.py --base backups/fw-dsdt/dagu-fw-dsdt-rev3-20261031.aml`，39269 字节，
+自检全过（SOSI 未动，无 QCOM2509）。`asl /loadtable` → 重启 → 活动 DSDT 确认含 `REGR`。
+
+运行时拉起 `QCDX`（`rt-start.ps1 -Svc QCDX -Id ACPI\QCOM253A\0`，18:39:02）：
+
+```
+driver state=Running after 0s
+dev=OK prob=CM_PROB_NONE ... drv=Running   (持续到 18:39:11 脚本结束)
+```
+
+**`+0x262904` 的 0x3B 不再出现**，这是 qcdx 第一次在 dagu 上进入 `Running`/`CM_PROB_NONE`。
+
+## 5. 下一道墙：qcdx 硬依赖 qcsmmu 的设备接口
+
+约 2 分 50 秒后（18:41:5x）整机蓝屏重启：`BugCheck 0xA`（IRQL_NOT_LESS_OR_EQUAL），读地址 0，
+IRQL 2，PC=`ntoskrnl+0x25a428`。用转储里 qcdx 自己的错误日志环（`qcdx+0x1c6b80` 处的 ERR/WRN/INF
+三个环，每条 0x28 字节：时间戳、序号、返回地址、5 个参数、事件码）还原了过程：
+
+1. `0x2aa240`（引用 `"InitSMMUDisplay"`，按引擎循环 8 次）→ `0x265298` → `0x2654e0`：
+   为引擎的 `MMUINFO`（ENGS 里声明的 `ArmSmmuV2`）建立 SMMU 接口。
+2. `0x284e38`：`IoRegisterPlugPlayNotification(EventCategoryDeviceInterfaceChange, INCLUDE_EXISTING,
+   GUID)`，然后 `KeWaitForSingleObject` 等 30 秒（`0x7530` ms）。等的接口 GUID 从转储里 `qDXA` 池块读出：
+   **`{36079AE4-78E8-452D-AF50-0CFF78B2F1CA}`**，正是 `qcsmmu8250.inf` 给 SMMU 实例写的 `Parameters\0\Guid`。
+3. 日志：`0x1e7`（等待超时）+ `0x1ae`（`STATUS_UNSUCCESSFUL`）**连续 4 轮**，随后一串 `c000000d`
+   （`0x2dc4`/`0x3039`/`0x086d`/`0x0998`/`0x3450`/`0x34e9`…）是启动失败后的回退路径。
+4. 回退路径 `0x2934b0 → 0x29cdd8 → 0x2c1370 → 0x2c3008 → 0x2c7728`：对 `ctx+0x1050+0x48` 调
+   `KeWaitForSingleObject`。这个 KMUTEX 只在 `0x2c0230`（后面的初始化阶段）里 `KeInitializeMutex`，
+   这条路上还没跑到，对象全 0，内核遍历等待链表时读到空的 Blink → `0xA`。这是 qcdx 的第二个
+   错误路径 bug，但触发它的前提是 SMMU 接口缺失。
+
+Windows 侧确认：`DeviceClasses\{36079AE4-…}` 不存在（`qcsmmu Start=4`，没人注册这个接口）；另一个
+在等的 `{48192C45-…}` 是 `qcsyscache` 的接口，属于带回调的非阻塞等待，不是这次的阻塞点。
+
+## 6. 结论
+
+- **第一道墙（qcdx 空指针）拆掉了**：根因是缺 `REGR`，补上后已验证。
+- **第二道墙就是 SMMU**：qcdx 不只是“想要” SMMU，它在启动时**阻塞等待 qcsmmu 的设备接口**，等不到
+  就失败（并在回退路径蓝屏）。而 `qcsmmu` 一编程 Adreno SMMU 就被复位整颗 SoC（阶段 14）。ENGS 的
+  `MMUINFO` 只认 `ArmSmmuV2`/`ArmSmmuV500` + `Miniport`/`Engine`，二进制里没有“无 MMU”模式的字符串。
+  所以绕不开 qcsmmu，必须让它在 dagu 上不复位。
+- 线索（**未验证**）：主线 Linux 在同一套 QHEE 固件上能驱动 Adreno SMMU。`arm-smmu-qcom` 针对“写 S2CR
+  BYPASS 会被固件改成 FAULT”的平台有专门处理（保留一个关掉翻译的 context bank 来模拟旁路），
+  这和 v8 UEFI 探针看到的现象（S2CR bypass 被规格化成 fault）一致。另一个可能是 Windows 下 qcsmmu
+  访问 Adreno SMMU 时时钟/电源不在（INF `SCLCK Enabled=1` 要靠 PoFx/PEP 投票，dagu 没有 PEP）。
+  两条都需要再做实验区分。
+
+## 7. 设备状态
+
+蓝屏后 Windows 自己重启进系统（18:41:56），`QCDX=4`、`qcsmmu=4`。已删除 `rtqcdx` 计划任务和
+`DSDT\QCOMM_\SM8250_\00000004` 覆盖表键（下次启动生效，当前这次启动仍在用带 REGR 的表，不影响使用）。
+boot_a 仍是 v8 UEFI。
+
+## 8. 速查坐标
+
+| 项 | RVA / 值 | 说明 |
+|---|---|---|
+| 0x3B 崩溃指令 | `0x262904` | `ldrh w8,[x19]`，x19=0xc |
+| 配置路径格式串 | `0x3428f8` | `"\REGR\%s"` |
+| 解析器 / 复用判定 | `0x262c70` / `0x262cdc` | `RtlCompareMemory`(IAT `0x14a318`)==4 即复用 |
+| 填充 / 求值 | `0x262ac0` / `0x25e000` | `DxgkCbEvalAcpiMethod` |
+| SMMU 接口等待 | `0x2654e0` → `0x284e38` | 30 s × 4 轮 |
+| 等待的接口 | `{36079AE4-78E8-452D-AF50-0CFF78B2F1CA}` | qcsmmu `Parameters\0\Guid` |
+| 0xA 蓝屏 | `ntoskrnl+0x25a428` | 回退路径等未初始化的 KMUTEX（`ctx+0x1098`） |
+| qcdx 日志环 | `qcdx+0x1c6b80`（缓冲指针）/ `+0x1c6b7c`（计数） | ERR 256 条、WRN 48 条、INF 16 条 |
 
 ### 关联文档
 [stage11（崩溃定位）](woa-dagu-gpu-stage11-2026-10-31.md)、

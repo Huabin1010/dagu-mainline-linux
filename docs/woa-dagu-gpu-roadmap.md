@@ -164,17 +164,41 @@ IORT 和 MCFG。启用 SMMU 设备本身不碰 UFS DMA（仍直通），只有�
 GPU 迭代一律走覆盖表；验证稳了再考虑进固件（届时还要补 `DSDT_ONLY` 白名单，且慎防
 `DSDT_ONLY=all` 触发 `0xA5`）。
 
-### 3.2 覆盖表制作流程
+### 3.2 覆盖表制作流程（已工具化：`tools/winarm/build-gpu-overlay.py`）
 
-1. dump live DSDT（`GetSystemFirmwareTable('ACPI','DSDT')` 或读 `HKLM\HARDWARE\ACPI\DSDT`）。
-2. `iasl -d` 反编译，把目标节点文本拼进去。
-3. 头部 `DefinitionBlock(..., "QCOMM ", "SM8250 ", 0x4+)`——**OEM rev 必须 ≥ 4**（固件是 3，
-   要盖过它）。
-4. 编译时 `SOSI` 用占位符 `0xDEADBEEFFFFFFFFF`。
-5. 二进制回填 `SOSI` 为 `0x0000000080907228`，并把表校验和清零。
-6. 切成两个注册表块：值 `00000000`（u32 总长 + 8 个 0 + u32 `0x1BF0` + AML[0,7152)）、
-   值 `00000001`（u32 `0x1BF0` + u32 余长 + 余下 AML）。
-7. base64 → 传 `C:\dagu\` → `asl.exe /loadtable`（删：`asl.exe /loadtable /d`，只删值留空键）。
+**不要再手工拼表**——历史上手工流程反复把 `SOSI` 退化成 DWord（§3.3）、漏/多节点。
+现在用 `build-gpu-overlay.py` 一条命令生成并自检：
+
+```bash
+# 先只读 dump 固件 DSDT（任何时候都安全）：
+#   GetSystemFirmwareTable('ACPI','DSDT') -> base64 -> fw-base.aml
+A=port/dagu/Platform/Xiaomi/sm8250/AcpiTables/dagu
+# 步骤 A（ENGS-only + SMMU，先测门控）：GPU0 取阶段 8 版本
+git show f4797c8:$A/graphics-qcom253a.asl > /tmp/gpu0-stepA.asl
+python3 tools/winarm/build-gpu-overlay.py --base fw-base.aml \
+  --gpu /tmp/gpu0-stepA.asl --smmu $A/smmu.asl --out ov-stepA.aml
+# 步骤 B（加 PMCL/_HRV）：GPU0 取当前版本
+python3 tools/winarm/build-gpu-overlay.py --base fw-base.aml \
+  --gpu $A/graphics-qcom253a.asl --smmu $A/smmu.asl --out ov-stepB.aml
+```
+
+工具的关键选择（为什么这样最稳）：
+
+- **不反编译固件、只在 AML 层追加**。固件 DSDT 带 UEFI 回填的定宽占位符（15 字符
+  `SIDS` 序列号），`iasl -d` 会把它反编译成 `Name(SIDS,"")` + 一串游离 `Zero`，
+  **不能重新编译**（且会级联报假的 `\_SB.SIDV does not exist`）。所以工具把新节点单独
+  编成 `Scope(\_SB){GPU0 [MMU0 MMU1]}`（用 `External` 引用芯片符号，不产生 AML），
+  再把这段 `ScopeOp` **二进制追加**到 live 固件 AML 后面（多个 `\_SB` 作用域合法合并），
+  只改外层 DSDT 长度 / OEM rev / 校验和。**固件区字节 0 改动**（已自检）。
+- **SOSI 完全不碰**。live 固件 DSDT 里 SOSI 本就是正确的 8 字节 QWord
+  `0x0000000080907228`（UEFI 回填过），追加法不动它，§3.3 的地雷在这条路径上消失。
+- **不含 PEP0(QCOM2519)**，所以 Step A/B 不可能触发 qcpep 的 `0x1A`/`0x101`。
+- 自检项：长度字段、校验和归零、rev≥4、SOSI 为 QWord、`QCOM253A`/`QCOM2509` 在、
+  `QCOM2519` 不在、`ENGINES`/`GraphicsGmuPT`/`GraphicsGlobalPT` 在、`iasl -d` 能反汇编。
+
+部署（**需本人在平板旁**，见 §3.5）：传 `ov-stepX.aml` 到 `C:\dagu\` →
+`asl.exe /loadtable C:\dagu\ov-stepX.aml`（asl 自己切 `00000000/00000001/...` 注册表块）
+→ `QCDX Start=3` → 重启。删：`asl.exe /loadtable /d`，或 `dagu-rescue.sh rm-dsdt`。
 
 ### 3.3 SOSI 地雷（反复踩）
 

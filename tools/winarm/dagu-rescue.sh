@@ -31,8 +31,21 @@ SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 
 win_up() { ping -c1 -W2 "$WIN_IP" >/dev/null 2>&1; }
 # 只 ping 会把局域网里占用同一地址的别的设备误判为平板，所以用 ssh 实际登录一次
+linux_at() { # 探测指定 IP 是不是能用 root/dagu 登录的平板 Linux
+	sshpass -p "$LINUX_PW" ssh "${SSH_OPTS[@]}" -o ConnectTimeout=4 "root@$1" true >/dev/null 2>&1
+}
+# B 槽 Linux 每次 DHCP 地址都会变。先试当前 LINUX_IP，连不上就扫网段按 SSH 指纹
+# 重新定位（dagu-find-linux.sh），找到就更新 LINUX_IP。整个救援链都走这个函数。
 linux_up() {
-	sshpass -p "$LINUX_PW" ssh "${SSH_OPTS[@]}" -o ConnectTimeout=4 "root@$LINUX_IP" true >/dev/null 2>&1
+	linux_at "$LINUX_IP" && return 0
+	local finder="$(dirname "${BASH_SOURCE[0]}")/dagu-find-linux.sh"
+	[ -x "$finder" ] || return 1
+	local found
+	found="$("$finder" "${LINUX_IP%.*}" 2>/dev/null | sed -n 's/^FOUND //p' | head -1)"
+	[ -n "$found" ] || return 1
+	LINUX_IP="$found"
+	echo "[rescue] Linux 新地址: $LINUX_IP" >&2
+	linux_at "$LINUX_IP"
 }
 
 lsh() { # 在平板 Linux 上以 root 跑一条命令

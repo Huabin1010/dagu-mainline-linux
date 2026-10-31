@@ -70,7 +70,8 @@ python3 "$REPO/tools/winarm/repack-uefi-boot.py" --boot "$BK/boot_a-pre-$stamp.i
 echo "[5] Linux -> fastboot -> flash boot_a -> slot a"
 L "nohup sh -c 'sleep 1; python3 -c \"import ctypes;ctypes.CDLL(\\\"libc.so.6\\\").syscall(142,0xfee1dead,0x28121969,0xA1B2C3D4,b\\\"bootloader\\\")\"' >/dev/null 2>&1 &" || true
 wait_usb 18d1:d00d 60 || { echo "no fastboot after Linux reboot" >&2; exit 1; }
-$FB flash boot_a "$BK/boot_a-new-$stamp.img"
+sleep 4   # right after enumeration the interface can still be busy
+for i in 1 2 3; do $FB flash boot_a "$BK/boot_a-new-$stamp.img" && break; echo "flash retry $i"; sleep 5; done
 $FB set-active a
 timeout 5 $FB reboot || true
 echo "done. new=$BK/boot_a-new-$stamp.img backup=$BK/boot_a-pre-$stamp.img"

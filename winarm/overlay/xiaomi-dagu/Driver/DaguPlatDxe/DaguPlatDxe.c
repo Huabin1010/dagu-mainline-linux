@@ -104,6 +104,9 @@ STATIC EFI_GUID  mVregGuid = EFI_PMICVREG_PROTOCOL_GUID;
 #define TLMM_NORTH  0x0F900000u
 
 // ---- log buffer -----------------------------------------------------------
+// Vendor GUID of the volatile DaguDiag variable: d4a9c1e2-7b3f-4c6a-9e51-0da600000001.
+STATIC EFI_GUID  mDiagVarGuid =
+  { 0xd4a9c1e2, 0x7b3f, 0x4c6a, { 0x9e, 0x51, 0x0d, 0xa6, 0x00, 0x00, 0x00, 0x01 } };
 STATIC CHAR8    mLog[12288];
 STATIC UINTN    mLogLen;
 STATIC BOOLEAN  mDone;
@@ -126,6 +129,16 @@ Log (
   VA_END (Args);
   DEBUG ((DEBUG_ERROR, "DaguPlat %a", mLog + mLogLen));
   mLogLen += N;
+  // Stage 13: no \dagu-uefi-diag.txt has ever appeared on the ESP, so mirror
+  // the log into a volatile BS|RT variable after every line. Windows reads it
+  // in the same boot (GetFirmwareEnvironmentVariable, vendor GUID below).
+  // Volatile: no NV store needed, gone on the next reset. Errors ignored
+  // (the variable service may not be up yet at driver entry).
+  gRT->SetVariable (
+         L"DaguDiag", &mDiagVarGuid,
+         EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
+         mLogLen, mLog
+         );
 }
 
 // ---- EPSS -----------------------------------------------------------------
@@ -179,14 +192,25 @@ EpssApply (
     EPSS_DOMAIN  *D = &mDom[N];
 
     En = MmioRead32 (D->Base + EPSS_ENABLE);
-    if ((En & 1u) == 0) {
-      if (Verbose) {
-        Log ("epss d%u: hw not enabled (0x%x), skip\n", N, En);
-      }
-      continue;
+    // Stage 13: d1 (A77 x3) and d2 (prime) read ENABLE=0x2 here because their
+    // CPUs are still powered off in UEFI; Windows brings them up later and
+    // they then ran at a low default clock (pinned-core benchmark: A77 slower
+    // than A55). Linux sees bit0=1 because it probes after SMP bring-up.
+    // EPSS itself is always on, so vote anyway; the LUT must still be sane.
+    if (((En & 1u) == 0) && Verbose) {
+      Log ("epss d%u: ENABLE=0x%x (cluster down), voting anyway\n", N, En);
     }
-    if (D->Index < 0) {
+    if (D->Index == -1) {
       EpssChoose (D);
+      // A powered-down cluster must still expose a real LUT (Linux reads
+      // 710-2419 / 845-3187 MHz). Refuse to vote for anything implausible.
+      if ((D->Index >= 0) && (LutKhz (D->Base, (UINT32)D->Index, &Cc) < 500000u)) {
+        if (Verbose) {
+          Log ("epss d%u: LUT idx %d = %u kHz looks bogus, skip\n",
+               N, D->Index, LutKhz (D->Base, (UINT32)D->Index, &Cc));
+        }
+        D->Index = -2;
+      }
     }
     if (D->Index < 0) {
       if (Verbose) {
@@ -325,8 +349,12 @@ WriteEspFile (
       File->Close (File);
     }
     DEBUG ((DEBUG_ERROR, "DaguPlat: diag -> ESP %r (%u bytes)\n", Status, mLogLen));
+    Log ("diag file write: %r\n", Status);
     Root->Close (Root);
     break;
+  }
+  if (I == Count) {
+    Log ("diag file: no ESP among %u volumes\n", (UINT32)Count);
   }
   gBS->FreePool (Handles);
 }
@@ -637,6 +665,69 @@ GpuCxReassert (
 // any SimpleFileSystem is installed; the ESP shows up before bootmgfw starts.
 STATIC VOID   *mFsReg;
 
+// Stage 13: the fastboot flag (checked here) is proven to work on dagu, but
+// no \dagu-uefi-diag.txt was ever written by the ReadyToBoot path, in v1 or
+// v2. So do the MMIO-only GPU CX power-on (and an early diag write) the first
+// time the Windows ESP shows up here, instead of relying on ReadyToBoot.
+// Everything in GpuCxOn is MMIO + Stall, valid at TPL_CALLBACK.
+STATIC BOOLEAN  mEarlyDone;
+STATIC BOOLEAN  mFileDone;
+
+STATIC BOOLEAN
+EspPresent (
+  VOID
+  )
+{
+  EFI_HANDLE                       *Handles;
+  UINTN                            Count, I;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
+  EFI_FILE_PROTOCOL                *Root, *Probe;
+  BOOLEAN                          Found = FALSE;
+
+  if (EFI_ERROR (gBS->LocateHandleBuffer (
+                        ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles)))
+  {
+    return FALSE;
+  }
+  for (I = 0; I < Count && !Found; I++) {
+    if (EFI_ERROR (gBS->HandleProtocol (Handles[I], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs)) ||
+        EFI_ERROR (Fs->OpenVolume (Fs, &Root)))
+    {
+      continue;
+    }
+    if (!EFI_ERROR (Root->Open (Root, &Probe, L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+                                EFI_FILE_MODE_READ, 0)))
+    {
+      Probe->Close (Probe);
+      Found = TRUE;
+    }
+    Root->Close (Root);
+  }
+  gBS->FreePool (Handles);
+  return Found;
+}
+
+STATIC VOID
+EarlyOnEsp (
+  VOID
+  )
+{
+  if (mFastbootPending || !EspPresent ()) {
+    return;
+  }
+  if (!mEarlyDone) {
+    mEarlyDone = TRUE;
+    Log ("gpu pass from fs-notify\n");
+    GpuCxOn ();
+  }
+  // ReadyToBoot fires before the ESP is mounted on dagu (fs-notify #1-3 see
+  // no ESP), which is why no diag file was ever written. Write it here.
+  if (DAGU_PLAT_DIAG && !mFileDone) {
+    mFileDone = TRUE;
+    WriteEspFile ();
+  }
+}
+
 STATIC VOID
 EFIAPI
 OnFsNotify (
@@ -644,8 +735,14 @@ OnFsNotify (
   IN VOID       *Context
   )
 {
+  STATIC UINT32  Calls;
+
+  if (Calls++ < 8) {
+    Log ("fs-notify #%u esp=%u\n", Calls, (UINT32)EspPresent ());
+  }
   CheckFastbootFlag ();
   TryFastbootReset ();                  // may succeed here; else ReadyToBoot retries
+  EarlyOnEsp ();
 }
 
 STATIC VOID
@@ -655,6 +752,7 @@ OnReadyToBoot (
   IN VOID       *Context
   )
 {
+  Log ("ready-to-boot mDone=%u early=%u\n", (UINT32)mDone, (UINT32)mEarlyDone);
   CheckFastbootFlag ();                 // backstop: also catch it here
   TryFastbootReset ();                  // TPL_APPLICATION: PMIC write works here
   if (mDone) {
@@ -662,9 +760,12 @@ OnReadyToBoot (
     return;
   }
   mDone = TRUE;
-  Log ("dagu-uefi-diag v2\n");
+  Log ("path=ready-to-boot\n");
   EpssApply (TRUE);
-  GpuCxOn ();
+  if (!mEarlyDone) {
+    mEarlyDone = TRUE;
+    GpuCxOn ();
+  }
   WcnCensus ();
   if (DAGU_PLAT_DIAG) {
     WriteEspFile ();
@@ -691,6 +792,8 @@ DaguPlatDxeInitialize (
 {
   EFI_EVENT   Ev, FsEv;
   EFI_STATUS  Status;
+
+  Log ("entry\n");
 
   // Windows -> fastboot: fire the flag check as each filesystem mounts.
   Status = gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, OnFsNotify, NULL, &FsEv);

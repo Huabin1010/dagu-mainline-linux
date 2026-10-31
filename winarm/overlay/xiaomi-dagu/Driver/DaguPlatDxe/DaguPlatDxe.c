@@ -509,6 +509,7 @@ TryFastbootReset (
 #define CBCR_CLK_OFF               BIT31
 #define GDSC_PWR_ON                BIT31
 #define GDSC_SW_COLLAPSE           BIT0
+#define ADRENO_SMMU                0x03DA0000u
 #define ADRENO_SMMU_IDR0           0x03DA0020u
 
 STATIC BOOLEAN  mGpuCxOk;
@@ -587,6 +588,127 @@ GpuKillSwitch (
   return Kill;
 }
 
+// Read-only dump of the Adreno SMMU (ARM SMMUv2 @ 0x3DA0000) global state, so
+// we can see what XBL/QHEE left it in. If the GPU streams are already in
+// bypass (S2CR type=1) or the SMMU is globally bypassed (sCR0.CLIENTPD=1),
+// Windows may not need qcsmmu to reprogram anything -- and reprogramming is
+// exactly what makes QHEE reset the SoC (stage 14). Reads are known safe:
+// UEFI already read IDR0 here. GR0 @ +0, GR1 @ +0x1000.
+#define SMMU_sCR0    0x0000u
+#define SMMU_sACR    0x0010u
+#define SMMU_IDR0    0x0020u
+#define SMMU_IDR1    0x0024u
+#define SMMU_IDR2    0x0028u
+#define SMMU_IDR7    0x003Cu
+#define SMMU_sGFSR   0x0048u
+#define SMMU_SMR0    0x0800u
+#define SMMU_S2CR0   0x0C00u
+#define SMMU_CBAR0   0x1000u
+
+// Return TRUE if a named flag file exists on the Windows ESP; delete it so the
+// action runs once. Used to gate risky one-shot experiments from a normal boot.
+STATIC BOOLEAN
+EspFlag (
+  IN CHAR16  *Name
+  )
+{
+  EFI_HANDLE                       *Handles;
+  UINTN                            Count, I;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
+  EFI_FILE_PROTOCOL                *Root, *Probe, *Flag;
+  BOOLEAN                          Hit = FALSE;
+
+  if (EFI_ERROR (gBS->LocateHandleBuffer (
+                        ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles)))
+  {
+    return FALSE;
+  }
+  for (I = 0; I < Count && !Hit; I++) {
+    if (EFI_ERROR (gBS->HandleProtocol (Handles[I], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs)) ||
+        EFI_ERROR (Fs->OpenVolume (Fs, &Root)))
+    {
+      continue;
+    }
+    if (EFI_ERROR (Root->Open (Root, &Probe, L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi", EFI_FILE_MODE_READ, 0))) {
+      Root->Close (Root);
+      continue;
+    }
+    Probe->Close (Probe);
+    if (!EFI_ERROR (Root->Open (Root, &Flag, Name, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0))) {
+      Flag->Delete (Flag);               // one-shot
+      Hit = TRUE;
+    }
+    Root->Close (Root);
+  }
+  gBS->FreePool (Handles);
+  return Hit;
+}
+
+// One-shot, gated by \dagu-smmu-wt on the ESP: prove whether the Adreno SMMU
+// GR0 is writable from here (i.e. not fully QHEE-locked). Writes a test value
+// to SMR[0]/S2CR[0], reads back, then restores. If the device instead resets
+// during this, the write is caught by QHEE/XPU and the stock HLOS SMMU model
+// cannot work; if the readback matches, UEFI can set GPU-stream bypass and
+// Windows can skip qcsmmu entirely.
+STATIC VOID
+GpuSmmuWriteTest (
+  VOID
+  )
+{
+  UINT32  Smr0, S2cr0, RbSmr, RbS2cr;
+
+  if (!EspFlag (L"\\dagu-smmu-wt")) {
+    return;
+  }
+  Smr0  = MmioRead32 (ADRENO_SMMU + SMMU_SMR0);
+  S2cr0 = MmioRead32 (ADRENO_SMMU + SMMU_S2CR0);
+  Log ("smmu-wt: pre SMR0=0x%08x S2CR0=0x%08x -- writing test values\n", Smr0, S2cr0);
+  MmioWrite32 (ADRENO_SMMU + SMMU_SMR0, 0x80000F00u);       // valid, id=0xF00
+  MmioWrite32 (ADRENO_SMMU + SMMU_S2CR0, 0x00010000u);      // type=1 (bypass)
+  RbSmr  = MmioRead32 (ADRENO_SMMU + SMMU_SMR0);
+  RbS2cr = MmioRead32 (ADRENO_SMMU + SMMU_S2CR0);
+  Log ("smmu-wt: readback SMR0=0x%08x S2CR0=0x%08x (survived = GR0 writable)\n", RbSmr, RbS2cr);
+  MmioWrite32 (ADRENO_SMMU + SMMU_SMR0, Smr0);              // restore
+  MmioWrite32 (ADRENO_SMMU + SMMU_S2CR0, S2cr0);
+  Log ("smmu-wt: restored SMR0=0x%08x S2CR0=0x%08x\n",
+       MmioRead32 (ADRENO_SMMU + SMMU_SMR0), MmioRead32 (ADRENO_SMMU + SMMU_S2CR0));
+}
+
+STATIC VOID
+GpuSmmuProbe (
+  VOID
+  )
+{
+  UINT32  Idr0 = MmioRead32 (ADRENO_SMMU + SMMU_IDR0);
+  UINT32  Idr1 = MmioRead32 (ADRENO_SMMU + SMMU_IDR1);
+  UINT32  Cr0  = MmioRead32 (ADRENO_SMMU + SMMU_sCR0);
+  UINT32  NumSmr = Idr0 & 0xFFu;
+  UINT32  NumCb  = Idr1 & 0xFFu;
+  UINT32  I, Smr, S2cr;
+
+  Log ("smmu: IDR0=0x%08x IDR1=0x%08x IDR2=0x%08x IDR7=0x%08x\n",
+       Idr0, Idr1, MmioRead32 (ADRENO_SMMU + SMMU_IDR2), MmioRead32 (ADRENO_SMMU + SMMU_IDR7));
+  Log ("smmu: sCR0=0x%08x (CLIENTPD=%u USFCFG=%u) sACR=0x%08x sGFSR=0x%08x\n",
+       Cr0, Cr0 & 1u, (Cr0 >> 10) & 1u,
+       MmioRead32 (ADRENO_SMMU + SMMU_sACR), MmioRead32 (ADRENO_SMMU + SMMU_sGFSR));
+  Log ("smmu: NUMSMRG=%u NUMSIDB=%u SMS=%u NUMCB=%u\n",
+       NumSmr, (Idr0 >> 9) & 0xFu, (Idr0 >> 27) & 1u, NumCb);
+  if (NumSmr > 48) {
+    NumSmr = 48;
+  }
+  for (I = 0; I < NumSmr; I++) {
+    Smr  = MmioRead32 (ADRENO_SMMU + SMMU_SMR0 + I * 4u);
+    S2cr = MmioRead32 (ADRENO_SMMU + SMMU_S2CR0 + I * 4u);
+    // Only print entries that are in use: valid SMR or a non-fault S2CR.
+    if (((Smr >> 31) & 1u) || ((S2cr & 0xFFFFu) != 0)) {
+      Log ("smmu: [%02u] SMR=0x%08x (V=%u ID=0x%04x MASK=0x%04x) S2CR=0x%08x (type=%u cb=%u) CBAR=0x%08x\n",
+           I, Smr, (Smr >> 31) & 1u, Smr & 0x7FFFu, (Smr >> 16) & 0x7FFFu,
+           S2cr, (S2cr >> 16) & 3u, S2cr & 0xFFu,
+           MmioRead32 (ADRENO_SMMU + SMMU_CBAR0 + I * 4u));
+    }
+  }
+}
+
 STATIC VOID
 GpuCxOn (
   VOID
@@ -633,6 +755,7 @@ GpuCxOn (
   if (Ok) {
     Log ("gpu: adreno smmu IDR0=0x%08x\n", MmioRead32 (ADRENO_SMMU_IDR0));
     mGpuCxOk = TRUE;
+    GpuSmmuProbe ();
   } else {
     Log ("gpu: a clock stayed off, Adreno SMMU not probed\n");
   }
@@ -722,6 +845,11 @@ EarlyOnEsp (
   }
   // ReadyToBoot fires before the ESP is mounted on dagu (fs-notify #1-3 see
   // no ESP), which is why no diag file was ever written. Write it here.
+  // SMMU write test needs the ESP (for its flag) AND CX powered; both are true
+  // here (CX from the ready-to-boot pass). Runs at most once via the flag.
+  if (mGpuCxOk) {
+    GpuSmmuWriteTest ();
+  }
   if (DAGU_PLAT_DIAG && !mFileDone) {
     mFileDone = TRUE;
     WriteEspFile ();
@@ -760,7 +888,7 @@ OnReadyToBoot (
     return;
   }
   mDone = TRUE;
-  Log ("path=ready-to-boot\n");
+  Log ("path=ready-to-boot v6\n");
   EpssApply (TRUE);
   if (!mEarlyDone) {
     mEarlyDone = TRUE;

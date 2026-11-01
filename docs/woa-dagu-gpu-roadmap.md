@@ -331,7 +331,8 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 | qcdx 下一道墙 | 启动时阻塞等 qcsmmu 接口 `{36079AE4-78E8-452D-AF50-0CFF78B2F1CA}`（30 s×4），等不到在回退路径 `0xA` 蓝屏（[stage15](woa-dagu-gpu-stage15-2026-10-31.md) §5） |
 | SMMU 可写性（阶段18 更正） | **GPU 流能从 HLOS 完整路由、不复位**：SMR[0]=valid/ID0 + S2CR[0]=translate→CB0 + CB0.TTBR0 都写得进；sCR0.USFCFG/sCR2/CBAR/假ID-SMR/bypass-S2CR 被静默还原不复位。阶段14/17“一碰就复位/架构级墙”的结论被推翻 |
 | qcsmmu 复位源 | 不在 SMMU 寄存器写本身（每类都测过不复位，[stage18](woa-dagu-gpu-stage18-2026-10-31.md)）；疑在 qcsmmu init 的中断连接/GMU(SID5) 重配瞬间打 fault，待定位 |
-| GPU 整链判断 | SMMU 这堵墙可绕（HLOS 自配流或写垫片）；但后面仍有 GX/GMU RPMh（Linux 已超时）+ zap/PIL（TZ），WDDM 整链能否通未知；已交付收益=大核调频（阶段13） |
+| qcsmmu 复位（阶段19 定位） | 关 SCLCK/PowerManaged（自管时钟/PoFx）仍复位 → 时钟假设证伪。复位在 qcsmmu 的"活配置"序列：配成生效翻译后 QHEE 在**真实走表**时才判违规复位，注册表旋钮关不掉、孤立写复现不了 |
+| GPU 整链判断（阶段19 定论） | stock HyperOS 固件下 WDDM 走不通：卡点是 QHEE 对 GPU SMMU 走表的保护 + GX/RPMh（Linux 已超时）+ zap/PIL（TZ），全在安全世界，非安全侧改不动。已交付收益=大核调频（阶段13）；显示走 BasicDisplay |
 | qcdx RE 工具 | `tools/winarm/qdis.py`（RVA 反汇编+串解析）、`tools/winarm/dagu-dump-triage.py`（ARM64 转储） |
 | 覆盖表注册表键 | `HKLM\SYSTEM\CurrentControlSet\Services\ACPI\Parameters\DSDT\QCOMM_\SM8250_\00000004`（值 `00000000`/`00000001`） |
 | 正在用的表 | `HKLM\HARDWARE\ACPI\DSDT\QCOMM_\SM8250_\0000000X` |

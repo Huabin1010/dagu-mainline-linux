@@ -37,7 +37,10 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiDriverEntryPoint.h>
 
-#define DAGU_PCIE_HOLD_S  30u
+/* Screen pause after the PCIe log. 0 means boot continues at once.
+ * The old 30 s stall ran even when step 0 succeeded; it was only there
+ * so the log could be read off the panel. */
+#define DAGU_PCIE_HOLD_S  0u
 
 // ---- addresses (sm8250.dtsi pcie@1c00000 / phy@1c06000, gcc-sm8250.c) ----
 #define PARF        0x01C00000u

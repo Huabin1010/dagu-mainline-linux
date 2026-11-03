@@ -53,6 +53,23 @@ Step(ULONG s)
         ZwFlushKey(gKey);
 }
 
+static ULONG
+GetDword(PCWSTR name, ULONG def)
+{
+    UNICODE_STRING n;
+    UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + 8];
+    PKEY_VALUE_PARTIAL_INFORMATION pi = (PVOID)buf;
+    ULONG got = 0;
+
+    if (!gKey)
+        return def;
+    RtlInitUnicodeString(&n, name);
+    if (NT_SUCCESS(ZwQueryValueKey(gKey, &n, KeyValuePartialInformation, pi, sizeof(buf), &got)) &&
+        pi->Type == REG_DWORD && pi->DataLength == 4)
+        return *(ULONG *)pi->Data;
+    return def;
+}
+
 static NTSTATUS
 OpenParams(PUNICODE_STRING reg, ULONG *test)
 {
@@ -127,6 +144,29 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
         WRITE_REGISTER_ULONG(rsmr, psmr);
         WRITE_REGISTER_ULONG(rs2, ps2);
         Step(0x50);
+        goto out;
+    }
+    case 20:
+    case 21: {
+        /* Generic probe of one SMMU offset given by DWORD "off".
+         * 20 = read only, 21 = read then write the same value back.
+         * Targets the Perf page (0x3000) and IMPL-DEF1 page (0x6000) that
+         * qcsmmu's OFFI map uses and no earlier test touched. */
+        ULONG o = GetDword(L"off", 0) & (SMMU_SIZE - 4);
+        volatile ULONG *rc = (volatile ULONG *)(s + o);
+        ULONG p;
+        Put(L"offs", o);
+        Step(0x18);                       /* flushed: ABOUT TO READ */
+        p = READ_REGISTER_ULONG(rc);
+        Put(L"pre", p);
+        Step(0x1C);                       /* read survived */
+        if (test == 21) {
+            Step(0x20);                   /* flushed: ABOUT TO WRITE */
+            WRITE_REGISTER_ULONG(rc, p);
+            Step(0x30);
+            Put(L"readback", READ_REGISTER_ULONG(rc));
+            Step(0x40);
+        }
         goto out;
     }
     case 12: {

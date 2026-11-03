@@ -1389,8 +1389,11 @@ Device (GPU0)
 
             Package (0x02)
             {
+                /* qcdx 0x29ba78: a non-zero value plus a context whose
+                 * +0x40 is already 1 returns 0xC0000001 before StartDevice
+                 * ever waits for SCM. This board has no TZ aperture. */
                 "SupportsSecureInAperture", 
-                One
+                Zero
             }, 
 
             Package (0x02)

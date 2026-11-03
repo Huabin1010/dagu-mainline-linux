@@ -1,0 +1,47 @@
+; Publishes the SCM and TrEE device interfaces qcdx waits on after the
+; SMMU callbacks. Root-enumerated: dagu has no ACPI\QCOM250B / QCOM2576,
+; and this driver does not load qcscm or QcTrEE.
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %Mfg%
+DriverVer   = 11/02/2026,1.0.0.0
+CatalogFile = dagu-qcif.cat
+PnpLockdown = 0
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+dagu-qcif.sys = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Qcif_Inst, root\DAGUQCIF
+
+[Qcif_Inst.NT]
+CopyFiles = Qcif_Copy
+
+[Qcif_Copy]
+dagu-qcif.sys
+
+[Qcif_Inst.NT.Services]
+AddService = daguqcif, 0x00000002, Qcif_Service
+
+[Qcif_Service]
+DisplayName   = %Desc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\dagu-qcif.sys
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu SCM and TrEE interface stand-in"
+Disk = "dagu qcif"

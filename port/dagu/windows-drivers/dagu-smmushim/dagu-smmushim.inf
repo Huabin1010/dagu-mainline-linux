@@ -1,0 +1,48 @@
+; dagu SMMU shim. Root-enumerated so it can publish the device interfaces
+; qcdx waits on, without binding ACPI\QCOM2509 (that would load qcsmmu).
+; Test-signed .sys. Catalog is optional while PnpLockdown is off; a signed
+; catalog is still produced on the tablet when pnputil asks for one.
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %Mfg%
+DriverVer   = 11/02/2026,1.0.0.0
+CatalogFile = dagu-smmushim.cat
+PnpLockdown = 0
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+dagu-smmushim.sys = 1
+
+[Manufacturer]
+%Mfg% = Models, NTarm64
+
+[Models.NTarm64]
+%Desc% = Shim_Inst, root\DAGUSMMU
+
+[Shim_Inst.NT]
+CopyFiles = Shim_Copy
+
+[Shim_Copy]
+dagu-smmushim.sys
+
+[Shim_Inst.NT.Services]
+AddService = dagusmmu, 0x00000002, Shim_Service
+
+[Shim_Service]
+DisplayName   = %Desc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\dagu-smmushim.sys
+
+[Strings]
+Mfg  = "dagu"
+Desc = "dagu Adreno SMMU shim"
+Disk = "dagu smmu shim"

@@ -217,7 +217,10 @@ ClearStale(VOID)
         L"iblo", L"ibhi", L"qflt",
         L"qprs", L"qrd",
         L"tcrlo", L"tcrhi", L"tb1lo", L"tb1hi", L"qmrs",
+        L"rethi", L"site", L"pout", L"qblo", L"qbhi",
+        L"fail1", L"fcall1", L"fsite1", L"fcall", L"fsite", L"nfail",
     };
+    static const UCHAR kNoRing[8 * 8 * sizeof(ULONG) + sizeof(ULONG)] = { 0 };
     ULONG i, k;
     WCHAR ring[3];
 
@@ -265,7 +268,10 @@ ClearStale(VOID)
         ring[0] = L'c'; Put(ring, 0);
         ring[0] = L'd'; Put(ring, 0);
         ring[0] = L'r'; Put(ring, 0);
+        ring[0] = L'h'; Put(ring, 0);
+        ring[0] = L'p'; Put(ring, 0);
     }
+    PutBin(L"ring1", kNoRing, sizeof(kNoRing));
 }
 
 static ULONG
@@ -432,22 +438,47 @@ AsRange(ULONG_PTR p)
 
 /* Last eight calls stay in the driver image. A bugcheck while ZwFlushKey
  * is running tears the SYSTEM hive (0xc000014c), so the ring is published
- * only every 16 calls, in one flush. */
+ * only every 16 calls, in one flush, and once more from the failure hook.
+ * Entry i holds the call whose zero-based number n has (n & 7) == i.
+ * Site is the qcdx return address as an RVA. When the return address is
+ * outside the known qcdx image, Site is its low 32 bits and bit i of pout
+ * is set. Rhi is the high half of the slot's 64-bit return value. */
 typedef struct _CALL_REC {
     ULONG Slot;
     ULONG A, B, C, D, R;
+    ULONG Rhi;
+    ULONG Site;
 } CALL_REC;
 
 static CALL_REC gRing[8];
 static ULONG gNcall;
 static ULONG gSeen0;
 static ULONG gSeen1;
+static ULONG gPout;
 static LONG gMap = -1;
+/* qcdx image of the current load. OnLoad sets it when the name matches;
+ * NoteCaller fills it from the PE header if OnLoad did not. */
+static ULONG_PTR gQcdxBase;
+static ULONG gQcdxSize;
 
-static VOID
-FlushRing(VOID)
+static ULONG
+SiteOf(ULONG_PTR caller, ULONG idx)
 {
-    ULONG i;
+    ULONG_PTR base = gQcdxBase;
+
+    if (base && caller >= base && caller - base < gQcdxSize) {
+        gPout &= ~(1u << idx);
+        return (ULONG)(caller - base);
+    }
+    gPout |= 1u << idx;
+    return (ULONG)caller;
+}
+
+/* Values only, no flush. The caller decides when to ZwFlushKey. */
+static VOID
+WriteRing(VOID)
+{
+    ULONG i, last;
     WCHAR name[3];
 
     if (!gKey || KeGetCurrentIrql() != PASSIVE_LEVEL)
@@ -461,16 +492,32 @@ FlushRing(VOID)
         name[0] = L'c'; Put(name, gRing[i].C);
         name[0] = L'd'; Put(name, gRing[i].D);
         name[0] = L'r'; Put(name, gRing[i].R);
+        name[0] = L'h'; Put(name, gRing[i].Rhi);
+        name[0] = L'p'; Put(name, gRing[i].Site);
     }
+    last = (gNcall - 1) & 7;
     Put(L"ncall", gNcall);
-    Put(L"slot", gRing[(gNcall - 1) & 7].Slot);
-    Put(L"arg0", gRing[(gNcall - 1) & 7].A);
-    Put(L"arg1", gRing[(gNcall - 1) & 7].B);
-    Put(L"arg2", gRing[(gNcall - 1) & 7].C);
-    Put(L"arg3", gRing[(gNcall - 1) & 7].D);
-    Put(L"retlo", gRing[(gNcall - 1) & 7].R);
+    Put(L"slot", gRing[last].Slot);
+    Put(L"arg0", gRing[last].A);
+    Put(L"arg1", gRing[last].B);
+    Put(L"arg2", gRing[last].C);
+    Put(L"arg3", gRing[last].D);
+    Put(L"retlo", gRing[last].R);
+    Put(L"rethi", gRing[last].Rhi);
+    Put(L"site", gRing[last].Site);
+    Put(L"pout", gPout);
+    Put(L"qblo", (ULONG)gQcdxBase);
+    Put(L"qbhi", (ULONG)(gQcdxBase >> 32));
     Put(L"seen0", gSeen0);
     Put(L"seen1", gSeen1);
+}
+
+static VOID
+FlushRing(VOID)
+{
+    if (!gKey || KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
+    WriteRing();
     Put(L"step", 0x60);
     StampGen();
     ZwFlushKey(gKey);
@@ -517,6 +564,8 @@ SlotDispatch(ULONG slot, ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d, ULO
     rec->C = (ULONG)c;
     rec->D = (ULONG)d;
     rec->R = (ULONG)ret;
+    rec->Rhi = (ULONG)(ret >> 32);
+    rec->Site = SiteOf(caller, gNcall & 7);
     if (slot < 32)
         gSeen0 |= (1u << slot);
     else if (slot < 64)
@@ -794,16 +843,48 @@ OpenParams(PUNICODE_STRING reg)
 #define QCDX_HOOK_RVA 0x1c66c0u
 
 static LONG gHooked;
+static ULONG gFailN;
 
+/* The hook can run more than once per load: a stop or rollback after the
+ * first failure reaches the same exit with the same status. fail1, fcall1,
+ * fsite1 and ring1 belong to the first call and are never overwritten.
+ * fail, fcall, fsite and the s/a/b/c/d/r/h/p ring keys follow the last one.
+ * fsite is the RVA in qcdx that called the hook (pout bit 8 when it is
+ * outside the image). ring1 is the eight CALL_REC entries, indexed as in
+ * the live ring, followed by ncall at that moment. */
 static VOID
 RecordStatus(ULONG status)
 {
+    ULONG_PTR ret = (ULONG_PTR)__builtin_return_address(0);
+    ULONG site;
+    struct {
+        CALL_REC Ring[8];
+        ULONG Ncall;
+    } snap;
+
+    if (gQcdxBase && ret >= gQcdxBase && ret - gQcdxBase < gQcdxSize) {
+        site = (ULONG)(ret - gQcdxBase);
+        gPout &= ~(1u << 8);
+    } else {
+        site = (ULONG)ret;
+        gPout |= 1u << 8;
+    }
+    gFailN++;
+    if (gFailN == 1) {
+        RtlCopyMemory(snap.Ring, gRing, sizeof(snap.Ring));
+        snap.Ncall = gNcall;
+        Put(L"fail1", status);
+        Put(L"fcall1", gNcall);
+        Put(L"fsite1", site);
+        PutBin(L"ring1", &snap, sizeof(snap));
+    }
     /* gNcall is this load's slot-callback count. Zero means adapter init
      * failed before any SMMU callback. */
     Put(L"fail", status);
-    Put(L"ncall", gNcall);
-    Put(L"seen0", gSeen0);
-    Put(L"seen1", gSeen1);
+    Put(L"fcall", gNcall);
+    Put(L"fsite", site);
+    Put(L"nfail", gFailN);
+    WriteRing();
     Step(0x61);
 }
 
@@ -1322,6 +1403,8 @@ OnLoad(PUNICODE_STRING name, HANDLE pid, PIMAGE_INFO info)
     else
         goto out;
     gIhit = how;
+    gQcdxBase = (ULONG_PTR)info->ImageBase;
+    gQcdxSize = info->ImageSize > 0xFFFFFFFFu ? 0xFFFFFFFFu : (ULONG)info->ImageSize;
     gNirq = KeGetCurrentIrql();
     if (gNirq == PASSIVE_LEVEL)
         PatchQcdx((PUCHAR)info->ImageBase, TRUE);
@@ -1338,6 +1421,17 @@ NoteCaller(ULONG_PTR ret)
     if (gHooked && gPatched)
         return;
     base = ImageBaseFrom(ret);
+    if (base && !gQcdxBase) {
+        /* OnLoad missed it. SizeOfImage is at optional header + 56 in
+         * both PE32 and PE32+. */
+        __try {
+            LONG lfanew = *(LONG *)(base + 0x3C);
+            gQcdxSize = *(ULONG *)(base + (ULONG)lfanew + 24 + 56);
+            gQcdxBase = (ULONG_PTR)base;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            gQcdxSize = 0;
+        }
+    }
     if (base)
         PatchQcdx(base, FALSE);
     if (InterlockedCompareExchange(&gHooked, 1, 0) != 0)

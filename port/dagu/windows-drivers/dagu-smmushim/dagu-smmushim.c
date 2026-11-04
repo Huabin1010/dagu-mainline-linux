@@ -91,7 +91,64 @@ static HANDLE gKey;
 static ULONG gBootGen;
 static LONG gIfaceKind; /* 0 none, 1 default/gpu, 2 video */
 static PVOID gAlloc[ALLOC_MAX];
+/* Load-notify diagnostics. ntfy counts every callback. The ring keeps the
+ * last four images that were large enough to be qcdx, or whose name
+ * contains "qcdx". ihit is 1 when the name matched and 2 when only the
+ * image size matched. nirq is the IRQL of that attempt. */
+static ULONG gNtfy;
+static ULONG gIhit;
+static ULONG gIseq;
+static ULONG gNirq;
+static ULONG gPendMask;
+static ULONG gPendStep;
+static LONG gPendValid;
+/* ImageBase used for this attempt, plus one 20-byte window per site.
+ * Byte 0 of a window is RVA-8 and bytes 8..11 are the compared dword,
+ * so RVA-4, RVA+4 and RVA+8 are in the same record. qflt bit i means
+ * the dword itself faulted. qflt bit i+8 means the window faulted;
+ * the other bytes are then zeros, not a read. A dword that was read
+ * is still stored at offset 8.
+ *
+ * qflt does not say why. Both a missing page and a present page that
+ * stage-2 will not allow a data read raise 0xC0000005. The descriptor
+ * is sampled before the data read. qexc is that read's exception code
+ * (0 if it succeeded, 0xC0000006 if the pager tried and failed). qprs
+ * bit i is the stage-1 valid bit. qrd bit i is set for a valid leaf:
+ * every architectural AP value still allows an EL1 data read, so a
+ * present readable page that nevertheless raises 0xC0000005 is not a
+ * stage-1 permission. qwlk is per site and is 0 only when qpte holds
+ * the descriptor; any other value means the walk failed and qprs must
+ * not be read as "not present". */
+static ULONG_PTR gPendBase;
+static ULONG gPendFlt;
+static UCHAR gPendWin[6][20];
+static ULONG gPendPrs;
+static ULONG gPendRd;
+static ULONG gPendExc[6];
+static ULONG gPendXi0[6];
+static ULONG gPendWlk[6];
+static ULONG64 gPendPte[6];
+static ULONG64 gPendTcr;
+static ULONG64 gPendTtbr;
+static ULONG gPendMrs;
+/* Per site, written only when WriteQcdx ran. 0 means it was not called
+ * or the store finished. The numbers follow the call order:
+ * 1 IoAllocateMdl returned NULL.
+ * 2 MmProbeAndLockPages raised; wprot is that exception code.
+ * 3 MmGetSystemAddressForMdlSafe returned NULL.
+ * 4 MmProtectMdlSystemAddress failed; wprot is the NTSTATUS.
+ * qwin is still the pre-write window, so a later Want there means the
+ * site was already patched and this function was not called. */
+static ULONG gPendWstat[6];
+static ULONG gPendWprot[6];
+static ULONG *gExcOut;
+static ULONG *gXi0Out;
+static ULONG gIsz[4];
+static WCHAR gInm[4][48];
+static WORK_QUEUE_ITEM gNoteItem;
+static LONG gNoteQueued;
 static VOID NoteCaller(ULONG_PTR ret);
+static VOID NoteFlush(VOID);
 static UINT64 SlotDispatch(ULONG slot, ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d, ULONG_PTR caller);
 
 static VOID
@@ -102,6 +159,32 @@ Put(PCWSTR name, ULONG v)
         return;
     RtlInitUnicodeString(&n, name);
     ZwSetValueKey(gKey, &n, 0, REG_DWORD, &v, sizeof(v));
+}
+
+static VOID
+PutStr(PCWSTR name, PCWSTR val)
+{
+    UNICODE_STRING n;
+    SIZE_T chars;
+
+    if (!gKey || KeGetCurrentIrql() != PASSIVE_LEVEL || !val)
+        return;
+    chars = 0;
+    while (val[chars] && chars < 80)
+        chars++;
+    RtlInitUnicodeString(&n, name);
+    ZwSetValueKey(gKey, &n, 0, REG_SZ, (PVOID)val, (ULONG)((chars + 1) * sizeof(WCHAR)));
+}
+
+static VOID
+PutBin(PCWSTR name, const VOID *buf, ULONG len)
+{
+    UNICODE_STRING n;
+
+    if (!gKey || KeGetCurrentIrql() != PASSIVE_LEVEL || !buf)
+        return;
+    RtlInitUnicodeString(&n, name);
+    ZwSetValueKey(gKey, &n, 0, REG_BINARY, (PVOID)buf, len);
 }
 
 static VOID
@@ -129,12 +212,50 @@ ClearStale(VOID)
         L"fail", L"ncall", L"seen0", L"seen1", L"qpatch", L"slot",
         L"arg0", L"arg1", L"arg2", L"arg3", L"retlo",
         L"subok", L"suboff", L"subsz", L"iface", L"qsize", L"qver",
+        L"ntfy", L"ihit", L"iseq", L"nirq",
+        L"i0sz", L"i1sz", L"i2sz", L"i3sz",
+        L"iblo", L"ibhi", L"qflt",
+        L"qprs", L"qrd",
+        L"tcrlo", L"tcrhi", L"tb1lo", L"tb1hi", L"qmrs",
     };
     ULONG i, k;
     WCHAR ring[3];
 
+    gNtfy = 0;
+    gIhit = 0;
+    gIseq = 0;
+    gNirq = 0;
+    gPendBase = 0;
+    gPendFlt = 0;
+    gPendPrs = 0;
+    gPendRd = 0;
+    gPendTcr = 0;
+    gPendTtbr = 0;
+    gPendMrs = 0;
+    RtlZeroMemory(gPendWin, sizeof(gPendWin));
+    RtlZeroMemory(gPendExc, sizeof(gPendExc));
+    RtlZeroMemory(gPendXi0, sizeof(gPendXi0));
+    RtlZeroMemory(gPendWlk, sizeof(gPendWlk));
+    RtlZeroMemory(gPendPte, sizeof(gPendPte));
+    RtlZeroMemory(gPendWstat, sizeof(gPendWstat));
+    RtlZeroMemory(gPendWprot, sizeof(gPendWprot));
+    for (i = 0; i < 4; i++) {
+        gIsz[i] = 0;
+        gInm[i][0] = 0;
+    }
     for (i = 0; i < sizeof(kNames) / sizeof(kNames[0]); i++)
         Put(kNames[i], 0);
+    PutStr(L"i0nm", L"");
+    PutStr(L"i1nm", L"");
+    PutStr(L"i2nm", L"");
+    PutStr(L"i3nm", L"");
+    PutBin(L"qwin", gPendWin, sizeof(gPendWin));
+    PutBin(L"qexc", gPendExc, sizeof(gPendExc));
+    PutBin(L"qxi0", gPendXi0, sizeof(gPendXi0));
+    PutBin(L"qpte", gPendPte, sizeof(gPendPte));
+    PutBin(L"qwlk", gPendWlk, sizeof(gPendWlk));
+    PutBin(L"wstat", gPendWstat, sizeof(gPendWstat));
+    PutBin(L"wprot", gPendWprot, sizeof(gPendWprot));
     ring[2] = 0;
     for (k = 0; k < 8; k++) {
         ring[1] = (WCHAR)(L'0' + k);
@@ -741,65 +862,298 @@ static const struct {
     { 0x29b070u, 0x52807d02u, 0x52800002u },
     { 0x27a420u, 0xC0000010u, 0xC0000001u },
 };
+_Static_assert(sizeof(kQcdxPatch) / sizeof(kQcdxPatch[0]) == 6,
+               "qwin is six 20-byte windows");
 
 NTKERNELAPI NTSTATUS MmProtectMdlSystemAddress(PMDL mdl, ULONG protect);
 
 static LONG gPatched;
+static int NoteExc(PEXCEPTION_POINTERS ep);
 
 static ULONG
-WriteQcdx(PVOID addr, ULONG value)
+WriteQcdx(PVOID addr, ULONG value, ULONG *stat, ULONG *detail)
 {
     PMDL mdl;
     ULONG *slot;
+    ULONG *savedExc;
+    ULONG *savedXi0;
+    ULONG exc = 0;
+    ULONG xi0 = 0;
     NTSTATUS st;
 
+    *stat = 0;
+    *detail = 0;
     mdl = IoAllocateMdl(addr, sizeof(ULONG), FALSE, FALSE, NULL);
-    if (!mdl)
+    if (!mdl) {
+        *stat = 1;
         return 0;
+    }
+    /* This handler is the one that sees the probe exception. The call
+     * does not pass it outward, so the code has to be stored here. */
+    savedExc = gExcOut;
+    savedXi0 = gXi0Out;
+    gExcOut = &exc;
+    gXi0Out = &xi0;
     __try {
         MmProbeAndLockPages(mdl, KernelMode, IoReadAccess);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (NoteExc(GetExceptionInformation())) {
+        gExcOut = savedExc;
+        gXi0Out = savedXi0;
+        *stat = 2;
+        *detail = exc;
+        IoFreeMdl(mdl);
+        return 0;
+    }
+    gExcOut = savedExc;
+    gXi0Out = savedXi0;
+    /* Protect changes an existing system mapping. On a locked but
+     * unmapped MDL it returns STATUS_NOT_MAPPED_VIEW. */
+    slot = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
+    if (!slot) {
+        *stat = 3;
+        MmUnlockPages(mdl);
         IoFreeMdl(mdl);
         return 0;
     }
     st = MmProtectMdlSystemAddress(mdl, PAGE_EXECUTE_READWRITE);
-    slot = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
-    if (NT_SUCCESS(st) && slot)
-        *slot = value;
+    if (!NT_SUCCESS(st)) {
+        *stat = 4;
+        *detail = (ULONG)st;
+        MmUnlockPages(mdl);
+        IoFreeMdl(mdl);
+        return 0;
+    }
+    *slot = value;
     MmProtectMdlSystemAddress(mdl, PAGE_EXECUTE_READ);
     MmUnlockPages(mdl);
     IoFreeMdl(mdl);
-    return NT_SUCCESS(st) && slot ? 1u : 0u;
+    return 1;
+}
+
+#define WALK_OK 0u
+#define WALK_NOT_KERNEL 1u
+#define WALK_GRANULE 2u
+#define WALK_DEPTH 4u
+#define WALK_NOREG 5u
+
+static ULONG64
+MrsTcr(VOID)
+{
+    ULONG64 v;
+    __asm__ __volatile__("mrs %0, tcr_el1" : "=r"(v));
+    return v;
+}
+
+static ULONG64
+MrsTtbr1(VOID)
+{
+    ULONG64 v;
+    __asm__ __volatile__("mrs %0, ttbr1_el1" : "=r"(v));
+    return v;
+}
+
+static int
+NoteExc(PEXCEPTION_POINTERS ep)
+{
+    PEXCEPTION_RECORD rec;
+
+    if (ep && (rec = ep->ExceptionRecord) != NULL) {
+        if (gExcOut)
+            *gExcOut = rec->ExceptionCode;
+        if (gXi0Out)
+            *gXi0Out = rec->NumberParameters > 0 ? (ULONG)rec->ExceptionInformation[0] : 0;
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static BOOLEAN
+TryMrs(ULONG64 (*fn)(VOID), ULONG64 *out, ULONG *excOut)
+{
+    ULONG exc = 0;
+    ULONG xi0 = 0;
+
+    gExcOut = &exc;
+    gXi0Out = &xi0;
+    __try {
+        *out = fn();
+        *excOut = 0;
+        return TRUE;
+    } __except (NoteExc(GetExceptionInformation())) {
+        *excOut = exc;
+        return FALSE;
+    }
+}
+
+/* Read one stage-1 descriptor without touching va. A valid bit of 0 is
+ * still a successful walk: qpte then holds the software PTE. */
+static ULONG
+ReadStage1(ULONG_PTR va, ULONG64 tcr, ULONG64 ttbr, ULONG64 *descOut)
+{
+    ULONG t1sz, tg1, vaBits, level, start, shift;
+    ULONG64 pa, desc;
+    MM_COPY_ADDRESS src;
+    SIZE_T got;
+    NTSTATUS st;
+
+    *descOut = 0;
+    t1sz = (ULONG)((tcr >> 16) & 0x3F);
+    tg1 = (ULONG)((tcr >> 30) & 0x3);
+    if (tg1 != 2)
+        return WALK_GRANULE;
+    if (t1sz == 0 || t1sz >= 48)
+        return WALK_NOT_KERNEL;
+    vaBits = 64 - t1sz;
+    if (((ULONG64)va >> vaBits) != ((1ULL << t1sz) - 1))
+        return WALK_NOT_KERNEL;
+    if (vaBits > 39)
+        start = 0;
+    else if (vaBits > 30)
+        start = 1;
+    else if (vaBits > 21)
+        start = 2;
+    else
+        start = 3;
+    pa = ttbr & 0x0000FFFFFFFFF000ULL;
+    for (level = start; level <= 3; level++) {
+        shift = 12 + 9 * (3 - level);
+        pa = (pa & 0x0000FFFFFFFFF000ULL) + ((((ULONG64)va >> shift) & 0x1FF) * 8);
+        got = 0;
+        src.PhysicalAddress.QuadPart = (LONGLONG)pa;
+        st = MmCopyMemory(&desc, src, sizeof(desc), MM_COPY_MEMORY_PHYSICAL, &got);
+        if (!NT_SUCCESS(st) || got != sizeof(desc))
+            return NT_SUCCESS(st) ? (ULONG)STATUS_PARTIAL_COPY : (ULONG)st;
+        *descOut = desc;
+        if ((desc & 1) == 0)
+            return WALK_OK;
+        if (level == 3 || (desc & 2) == 0)
+            return WALK_OK;
+        pa = desc;
+    }
+    return WALK_DEPTH;
 }
 
 static VOID
-PatchQcdx(PUCHAR base)
+PatchQcdx(PUCHAR base, BOOLEAN defer)
 {
     ULONG mask = 0;
+    ULONG fault = 0;
+    ULONG prs = 0;
+    ULONG rd = 0;
+    UCHAR win[6][20];
+    ULONG exc[6];
+    ULONG xi0[6];
+    ULONG wstat[6];
+    ULONG wprot[6];
+    ULONG wlk[6];
+    ULONG64 pte[6];
+    ULONG64 tcr = 0;
+    ULONG64 ttbr = 0;
+    ULONG tcrExc = 0;
+    ULONG ttbrExc = 0;
+    ULONG mrs = 0;
+    BOOLEAN regs;
     ULONG i;
 
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
         return;
     if (InterlockedCompareExchange(&gPatched, 1, 0) != 0)
         return;
+    RtlZeroMemory(win, sizeof(win));
+    RtlZeroMemory(exc, sizeof(exc));
+    RtlZeroMemory(xi0, sizeof(xi0));
+    RtlZeroMemory(wstat, sizeof(wstat));
+    RtlZeroMemory(wprot, sizeof(wprot));
+    RtlZeroMemory(wlk, sizeof(wlk));
+    RtlZeroMemory(pte, sizeof(pte));
+    regs = TryMrs(MrsTcr, &tcr, &tcrExc) && TryMrs(MrsTtbr1, &ttbr, &ttbrExc);
+    mrs = tcrExc != 0 ? tcrExc : ttbrExc;
     for (i = 0; i < sizeof(kQcdxPatch) / sizeof(kQcdxPatch[0]); i++) {
         ULONG *slot = (ULONG *)(base + kQcdxPatch[i].Rva);
+        UCHAR tmp[20];
         ULONG cur = 0;
+        ULONG k;
+        ULONG64 desc = 0;
+        BOOLEAN dwordOk = FALSE;
+        BOOLEAN winOk = FALSE;
 
+        if (!regs)
+            wlk[i] = WALK_NOREG;
+        else
+            wlk[i] = ReadStage1((ULONG_PTR)slot, tcr, ttbr, &desc);
+        pte[i] = desc;
+        if (wlk[i] == WALK_OK && (desc & 1) != 0) {
+            prs |= 1u << i;
+            /* Valid leaf. AP[7:6] never denies an EL1 data read. */
+            rd |= 1u << i;
+        }
+        /* The compare stays a single dword read. A fault in the
+         * surrounding window must not turn a readable site into a miss.
+         * The descriptor above was taken first, so a fault-in caused by
+         * this read does not hide the previous state. */
+        gExcOut = &exc[i];
+        gXi0Out = &xi0[i];
         __try {
             cur = *slot;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            continue;
+            dwordOk = TRUE;
+        } __except (NoteExc(GetExceptionInformation())) {
+            fault |= 1u << i;
         }
+        __try {
+            PUCHAR p = (PUCHAR)slot - 8;
+            for (k = 0; k < 20; k++)
+                tmp[k] = p[k];
+            winOk = TRUE;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            fault |= 1u << (i + 8);
+        }
+        if (winOk) {
+            for (k = 0; k < 20; k++)
+                win[i][k] = tmp[k];
+        } else if (dwordOk) {
+            win[i][8] = (UCHAR)cur;
+            win[i][9] = (UCHAR)(cur >> 8);
+            win[i][10] = (UCHAR)(cur >> 16);
+            win[i][11] = (UCHAR)(cur >> 24);
+        }
+        if (!dwordOk)
+            continue;
         if (cur == kQcdxPatch[i].Want) {
             mask |= 1u << i;
             continue;
         }
         if (cur != kQcdxPatch[i].Expect)
             continue;
-        if (WriteQcdx(slot, kQcdxPatch[i].Want))
+        if (WriteQcdx(slot, kQcdxPatch[i].Want, &wstat[i], &wprot[i]))
             mask |= 1u << i;
     }
+    gExcOut = NULL;
+    gXi0Out = NULL;
+    /* A site that already holds Want counts as done. The offline-patched
+     * qcdx image therefore still reports qpatch 0x3F / step 0x65. */
+    if (defer) {
+        gPendBase = (ULONG_PTR)base;
+        gPendFlt = fault;
+        gPendPrs = prs;
+        gPendRd = rd;
+        gPendTcr = tcr;
+        gPendTtbr = ttbr;
+        gPendMrs = mrs;
+        RtlCopyMemory(gPendWin, win, sizeof(gPendWin));
+        RtlCopyMemory(gPendExc, exc, sizeof(gPendExc));
+        RtlCopyMemory(gPendXi0, xi0, sizeof(gPendXi0));
+        RtlCopyMemory(gPendWlk, wlk, sizeof(gPendWlk));
+        RtlCopyMemory(gPendPte, pte, sizeof(gPendPte));
+        RtlCopyMemory(gPendWstat, wstat, sizeof(gPendWstat));
+        RtlCopyMemory(gPendWprot, wprot, sizeof(gPendWprot));
+        gPendMask = mask;
+        gPendStep = mask == 0x3fu ? 0x65u : 0x64u;
+        gPendValid = 1;
+        if (mask != 0x3fu)
+            InterlockedExchange(&gPatched, 0);
+        return;
+    }
+    PutBin(L"wstat", wstat, sizeof(wstat));
+    PutBin(L"wprot", wprot, sizeof(wprot));
     Put(L"qpatch", mask);
     if (mask != 0x3fu) {
         InterlockedExchange(&gPatched, 0);
@@ -827,19 +1181,153 @@ NameIsQcdx(PUNICODE_STRING name)
     return RtlEqualUnicodeString(&last, &tail, TRUE);
 }
 
+static BOOLEAN
+NameHasQcdx(PUNICODE_STRING name)
+{
+    static const WCHAR needle[] = L"qcdx";
+    ULONG n, i, j;
+
+    if (!name || !name->Buffer || name->Length < 8)
+        return FALSE;
+    n = name->Length / sizeof(WCHAR);
+    for (i = 0; i + 3 < n; i++) {
+        for (j = 0; j < 4; j++) {
+            WCHAR c = name->Buffer[i + j];
+            if (c >= L'A' && c <= L'Z')
+                c = (WCHAR)(c - L'A' + L'a');
+            if (c != needle[j])
+                break;
+        }
+        if (j == 4)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static VOID
+TailOf(PUNICODE_STRING name, WCHAR *dst, ULONG cap)
+{
+    ULONG nchars, start, i;
+
+    dst[0] = 0;
+    if (!name || !name->Buffer || name->Length < sizeof(WCHAR) || cap < 2) {
+        dst[0] = L'-';
+        dst[1] = 0;
+        return;
+    }
+    nchars = name->Length / sizeof(WCHAR);
+    start = nchars > cap - 1 ? nchars - (cap - 1) : 0;
+    for (i = 0; i < nchars - start && i + 1 < cap; i++)
+        dst[i] = name->Buffer[start + i];
+    dst[i] = 0;
+}
+
+static VOID
+FlushNote(PVOID ctx)
+{
+    ULONG i, ntfy, iseq;
+    WCHAR szn[5], nmn[5];
+
+    UNREFERENCED_PARAMETER(ctx);
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
+    ntfy = gNtfy;
+    iseq = gIseq;
+    Put(L"ntfy", ntfy);
+    Put(L"ihit", gIhit);
+    Put(L"iseq", iseq);
+    Put(L"nirq", gNirq);
+    for (i = 0; i < 4; i++) {
+        szn[0] = nmn[0] = L'i';
+        szn[1] = nmn[1] = (WCHAR)(L'0' + i);
+        szn[2] = L's';
+        szn[3] = L'z';
+        szn[4] = 0;
+        nmn[2] = L'n';
+        nmn[3] = L'm';
+        nmn[4] = 0;
+        Put(szn, gIsz[i]);
+        PutStr(nmn, gInm[i][0] ? gInm[i] : L"-");
+    }
+    if (gPendValid) {
+        Put(L"iblo", (ULONG)gPendBase);
+        Put(L"ibhi", (ULONG)(gPendBase >> 32));
+        Put(L"qflt", gPendFlt);
+        Put(L"qprs", gPendPrs);
+        Put(L"qrd", gPendRd);
+        Put(L"tcrlo", (ULONG)gPendTcr);
+        Put(L"tcrhi", (ULONG)(gPendTcr >> 32));
+        Put(L"tb1lo", (ULONG)gPendTtbr);
+        Put(L"tb1hi", (ULONG)(gPendTtbr >> 32));
+        Put(L"qmrs", gPendMrs);
+        PutBin(L"qwin", gPendWin, sizeof(gPendWin));
+        PutBin(L"qexc", gPendExc, sizeof(gPendExc));
+        PutBin(L"qxi0", gPendXi0, sizeof(gPendXi0));
+        PutBin(L"qpte", gPendPte, sizeof(gPendPte));
+        PutBin(L"qwlk", gPendWlk, sizeof(gPendWlk));
+        PutBin(L"wstat", gPendWstat, sizeof(gPendWstat));
+        PutBin(L"wprot", gPendWprot, sizeof(gPendWprot));
+        Put(L"qpatch", gPendMask);
+        Step(gPendStep);
+    } else if (gKey) {
+        ZwFlushKey(gKey);
+    }
+    InterlockedExchange(&gNoteQueued, 0);
+    if (gNtfy != ntfy || gIseq != iseq)
+        NoteFlush();
+}
+
+/* Queue only. OnLoad stays off the registry so a loader lock cannot meet
+ * ZwFlushKey, and the flush does not wait for a slot callback. The aperture
+ * check returns before any slot call, so a callback-time flush would never
+ * land when step stays 0x30. */
+static VOID
+NoteFlush(VOID)
+{
+    if (InterlockedCompareExchange(&gNoteQueued, 1, 0) == 0)
+        ExQueueWorkItem(&gNoteItem, DelayedWorkQueue);
+}
+
+static VOID
+Remember(PUNICODE_STRING name, ULONG size)
+{
+    ULONG slot = gIseq & 3;
+
+    gIsz[slot] = size;
+    TailOf(name, gInm[slot], 48);
+    gIseq++;
+}
+
 static VOID
 OnLoad(PUNICODE_STRING name, HANDLE pid, PIMAGE_INFO info)
 {
+    BOOLEAN named, big, loose;
+    ULONG how;
+
     UNREFERENCED_PARAMETER(pid);
-    if (!info || !info->ImageBase || info->ImageSize < 0x29c000)
+    gNtfy++;
+    if (!info || !info->ImageBase)
         return;
-    if (!NameIsQcdx(name)) {
-        if (name && name->Buffer)
-            return;
-        if (info->ImageSize != 0x35b000)
-            return;
-    }
-    PatchQcdx((PUCHAR)info->ImageBase);
+    named = NameIsQcdx(name);
+    loose = named || NameHasQcdx(name);
+    big = info->ImageSize >= 0x29c000;
+    if (big || loose)
+        Remember(name, info->ImageSize > 0xFFFFFFFFu ? 0xFFFFFFFFu : (ULONG)info->ImageSize);
+    if (!big)
+        goto out;
+    if (named)
+        how = 1;
+    else if (!(name && name->Buffer) && info->ImageSize == 0x35b000)
+        how = 2;
+    else
+        goto out;
+    gIhit = how;
+    gNirq = KeGetCurrentIrql();
+    if (gNirq == PASSIVE_LEVEL)
+        PatchQcdx((PUCHAR)info->ImageBase, TRUE);
+out:
+    if (big || loose)
+        NoteFlush();
 }
 
 static VOID
@@ -851,7 +1339,7 @@ NoteCaller(ULONG_PTR ret)
         return;
     base = ImageBaseFrom(ret);
     if (base)
-        PatchQcdx(base);
+        PatchQcdx(base, FALSE);
     if (InterlockedCompareExchange(&gHooked, 1, 0) != 0)
         return;
     if (!base)
@@ -870,6 +1358,7 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
 
     OpenParams(reg);
     gBootGen = GetDword(L"bootgen", 0) + 1;
+    ExInitializeWorkItem(&gNoteItem, FlushNote, NULL);
     ClearStale();
     Step(0x10);
     if (!NT_SUCCESS(PsSetLoadImageNotifyRoutine(OnLoad)))

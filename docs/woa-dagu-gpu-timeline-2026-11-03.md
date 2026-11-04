@@ -2,13 +2,13 @@
 
 这份文档只回答两件事：现在停在启动链的哪一步，以及哪一步还没被这次冷启动测量到。细节仍以各阶段文档为准。阶段 21 的问题码 43 已经过去，不是当前的卡点。
 
-截至本文，平板在 Linux（B 槽）。A 槽这一轮没有再启动。下面的分区读数来自最近一次从 fastboot 切回 B 槽之后，本文写作时没有再读盘。
+截至本文，平板在 Linux（B 槽，`192.168.1.51`）。A 槽这一轮没有再启动。2026-11-03 18:21 在切槽之前又读了一遍盘，整套配置单元备份在平板 `/root/pre-step6-20261103/`，主机副本在 `/tmp/dagu-boot/pre-step6/`。
 
 ---
 
 ## 1. 现在停在哪
 
-**当前位置：垫片已经能在 qcdx 映射完成时打上六处补丁。这份垫片在 Windows 分区上，还没有跑过一次。**
+**当前位置：垫片会在 qcdx 映射完成时打上六处补丁，匹配失败时会写下通知次数、最近四个映像和命中方式。这份带记录的垫片已经换进 DriverStore，还没有跑过一次。**
 
 **卡点：上一次冷启动的加载通知把 qcdx 跳过了，六处补丁一处都没写。`StartDevice` 因此停在孔径检查，页表和切帧都没开始。**
 
@@ -23,8 +23,12 @@
 | 垫片 dagusmmu | Start=3。`map` 保持 0，不走实页表，不写 `0x03DA0000` |
 | qcif | 上一次已加载。它发布 SCM / TrEE 接口，ioctl 返回 `0xC0000010`。映像加载不等于这些接口已经被 qcdx 打开 |
 | 上一次补丁结果 | `qpatch` 仍是 0。当时的通知读错了 `SystemModeImage` 位域 |
-| 已装上、还没启动的垫片 | DriverStore `552c40a9`，26288 字节。按文件名 `qcdxkm8250.sys` 匹配；名字为空时再比对映像大小 `0x35b000` |
-| A 槽重试 | 上次 `set-active a` 把重试补到 7，随后一次启动变成 6。Windows 不会把 A 槽标成成功 |
+| 已装上、还没启动的垫片 | DriverStore `710673ba…`，28336 字节。`ImagePath` 指向 `dagu-smmushim.inf_arm64_811ccbe7ca466ddc\dagu-smmushim.sys`，读回哈希就是这一份。通知回调只改内存，记录由工作项刷出，不依赖槽回调 |
+| 上一版未启动过的垫片 | `552c40a9` 和会在回调里写注册表的 `62afd290…` 都已换下，副本在 `/root/pre-step6-20261103/` |
+| 离线补丁副本 | `/root/pre-step6-20261103/qcdxkm8250-loadpatch.sys`，`30803ec5…`。六处已按期望值改好。DriverStore 里的 qcdx 仍是原件 `8e77bf1e…` |
+| 启动前复核 | 垫片读回是 `710673ba…`，28336 字节。DSDT 39269 字节，校验和 0，有 `QCOM253A`，没有 `QCOM2509`。QCDX Start=3，qcsmmu Start=4。qcdx 仍是 `8e77bf1e…` |
+| A 槽重试 | GPT 属性 `0x0032000000000000`：retry 6，successful 0，unbootable 0。再启动一次会变成 5 |
+| 回到 B 槽 | 当前 `androidboot.slot_suffix=_b`。`boot_b` 属性 `0x0077000000000000`：active、successful。fastboot 里 `set-active b` 再 reboot 即可回来 |
 
 ---
 
@@ -62,7 +66,7 @@ flowchart TD
 | 3 | 内核进入用户态 | 已通过。0xA、0x6B、0xC0000428 都是版本错位，硬链接成一套 26100.1 之后不再出现 | 不换内核、不换 ntdll |
 | 4 | 覆盖表追加 GPU0。PnP 枚举 `ACPI\QCOM253A\0`，qcdx 加载 | 已通过。表里有 `QCOM253A`，没有 `QCOM2509`。`_STA` 返回 `0x0F` | 不重建覆盖表。源码里的 `SupportsSecureInAperture Zero` 不是现用表，现用值是 1 |
 | 5 | 垫片 DriverEntry 把 `bootgen` 加 1，清掉上一轮的 `fail` / `ncall` / `qpatch`，再登记加载通知 | 已通过。通知登记成功，所以 `step` 不是 `0x11`。`bootgen=2` 只出现在 `SYSTEM.LOG1` | 同一套登记逻辑还在 |
-| 6 | qcdx 映像一映射就写六处，此时 `StartDevice` 还没运行 | **卡在这里。** 位域检查把 qcdx 跳过，`qpatch` 保持 0 | `552c40a9` 不再读位域 |
+| 6 | qcdx 映像一映射就写六处，此时 `StartDevice` 还没运行 | **卡在这里。** 位域检查把 qcdx 跳过，`qpatch` 保持 0 | `710673ba…` 在回调里只改内存。工作项随后写下 `ntfy` / `ihit` / `i0`–`i3`，不等槽回调 |
 | 7 | `FUN_14029ba78` 看孔径标志 | 两个条件都成立，返回 `0xC0000001`，后面的调用都没发生 | `0x29baf0` 改成无条件跳过。还没被测量 |
 | 8 | `FUN_14029b168` 建显示页表和最多 8 份引擎页表，经 `FUN_1402aa7e0` 调垫片虚表 | 未到。页表函数的唯一调用者就是第 7 步那个函数 | `map` 仍是 0 |
 | 9 | `FUN_14029ac00` 等 SCM，`FUN_14029ae70` 等 TrEE，然后做版本查询 | 未到。这两次等待排在孔径检查和页表循环之后 | 超时改成 0，版本状态改成 `0xC0000001` |
@@ -83,7 +87,7 @@ flowchart TD
   chk --> flag{"SupportsSecureInAperture 为 1<br/>且任一上下文 +0x40 为 1"}
   flag -->|"上一次两个都成立"| ret["返回 0xC0000001<br/>有背光，没有帧"]
 
-  map --> now{"552c40a9，还没启动"}
+  map --> now{"710673ba，还没启动"}
   now -->|"名字以 qcdxkm8250.sys 结尾"| hit["进入 PatchQcdx"]
   now -->|"名字为空且映像大小是 0x35b000"| hit
   now -->|"其他映像"| ignore["忽略"]
@@ -220,7 +224,7 @@ flowchart LR
 | 4 | 从 `SYSTEM.bak-qcdx4` 把六段 DSDT 和 QCDX Start=3 接回去 | 表长 39269，校验和 0。下一次启动重新加载 qcdx |
 | 5 | 加载通知里打六处补丁，再冷启动一次。跑的是 `bf010d25…` | 日志头 `05:56:27`。qcdx 已加载。屏幕有背光、没有帧。`bootgen` 只在日志里变成 2。`qpatch` 仍是 0 |
 | 6 | 反编译孔径检查、等待函数、版本查询和页表调用 | 六处期望字节保持不动。上一轮没打上，是因为 `IMAGE_INFO` 的位域布局和通知实际读取的不一致 |
-| 7 | `552c40a9` 写入 DriverStore | **还没有启动。** 之后只改了源码注释，二进制没有为注释重编 |
+| 7 | `552c40a9` 写入 DriverStore | 匹配失败时不留原因。18:24 的 `62afd290…` 在回调里写注册表。18:36 换成 `710673ba…`，记录改由工作项刷出，还没有启动 |
 
 ---
 
@@ -237,36 +241,57 @@ flowchart LR
 
 ## 5. 下一次启动要看的数
 
-只在决定测量第 6 步时再切 A 槽。A 槽重试现在是 6，Windows 不会把这一槽标成成功。要看的是这一代垫片自己写下的值。主配置单元如果再次出现序号不一致，以含有新 `bootgen` 的那一侧为准。
+只在决定测量第 6 步时再切 A 槽。Windows 不会把这一槽标成成功。先整份读主单元、`SYSTEM.LOG1`、`SYSTEM.LOG2`，找出哪一侧含有比备份更新的 `bootgen`，然后只解读那一侧里的 `qpatch`、`step`、`ntfy`、`ihit`。不要拿主单元的 `step` 和日志里的 `qpatch` 拼在一起。
+
+这次读盘时主单元序号仍是 7394/7393，`bootgen` 是 1，`step` 是 `0x30`，`qpatch` 是 0。`SYSTEM.LOG1` 序号 7393/7393，里面有上一轮写下的 `bootgen=2`。`SYSTEM.LOG2` 是空文件。`bootgen` 只用来分代：读到 2 既可能是新垫片从 1 加出来的，也可能是旧日志。证明 `710673ba…` 跑过的是旧垫片从没写过的 `ntfy`、`ihit`、`i0nm`。这些新值名和 `bootgen` 仍然只在同一侧里一起读。
+
+通知回调不写注册表。它把次数、名字、大小和补丁掩码留在内存里，并排队一个工作项。工作项在回调返回之后、PASSIVE 上刷盘，不经过槽回调。孔径检查提前返回、`step` 停在 `0x30` 时，这些记录仍然会落盘。
+
+`PatchQcdx` 看到期望值或已经是补丁值都算这一位置通过。六处都已经是补丁值时，结果仍是 `qpatch=0x3F`、`step=0x65`，不是 `0x64`。离线副本 `30803ec5…` 和原件 `8e77bf1e…` 都是 2908336 字节，只有那六个指令共 11 个字节不同。DriverStore 里的 qcdx 仍是原件。换上离线副本时不必先改垫片。
 
 ```mermaid
 flowchart TD
-  boot["下一次冷启动<br/>期望 bootgen = 3"] --> gen{"bootgen"}
-  gen -->|"仍是 2，或主单元里找不到新值"| old["552c40a9 的 DriverEntry 没跑到"]
-  gen -->|"3"| step{"step"}
-  step -->|"0x11"| noreg["加载通知登记失败"]
-  step -->|"0x30，且没有 qpatch"| nopatch["通知跑了，但没进入 PatchQcdx"]
-  step -->|"0x64"| bytes["六处里有期望字节对不上<br/>看 qpatch 哪一位是 0"]
-  step -->|"0x65"| patch{"qpatch"}
-  patch -->|"0x3F"| screen{"屏幕"}
-  patch -->|"其他"| bits["step 和掩码不一致，先重读单元"]
+  boot["下一次冷启动"] --> side{"同一侧有没有 ntfy / ihit / i0nm"}
+  side -->|"没有"| unclear["先别下结论。看 bootgen、启动日志和 ImagePath 哈希"]
+  side -->|"有"| ntfy{"ntfy"}
+  ntfy -->|"0"| noreg["通知没被调用。不换离线副本"]
+  ntfy -->|"> 0"| hit{"ihit"}
+  hit -->|"0"| names["看 i0nm-i3nm 和大小。只有规则选错了对象才换离线副本"]
+  hit -->|"1 或 2，nirq 不是 0"| irql["选中了但当时写不了。不换离线副本"]
+  hit -->|"1 或 2，nirq = 0"| patch{"qpatch / step"}
+  patch -->|"0x3F / 0x65"| screen{"屏幕"}
+  patch -->|"其他"| bytes["这一处才谈补丁字节"]
   screen -->|"有帧"| ok["第 10 步通过"]
-  screen -->|"仍是有背光的黑屏"| frame["补丁已经生效<br/>卡点移到切帧"]
+  screen -->|"蓝屏"| dump["看新转储和 step。越过孔径检查之后的路径"]
+  screen -->|"仍是有背光的黑屏"| frame["记下 qpatch、step、ncall。切帧一次只改一处"]
 
   classDef now fill:#f4cccc,stroke:#990000,color:#000
   classDef next fill:#fff2cc,stroke:#bf9000,color:#000
   classDef ok fill:#d9ead3,stroke:#38761d,color:#000
   class boot now
-  class gen,step,patch,screen next
+  class side,step,why,screen next
   class ok ok
 ```
 
-| 项 | 第 6 步打上了 | 还停在上一次 |
-|---|---|---|
-| `bootgen` | 3 | 2，或主单元仍是 1 而日志里没有 3 |
-| `qpatch` | `0x3F`，六位全 1 | 0。加载通知仍没匹配到这份 qcdx |
-| `step` | `0x65` | `0x64` 是期望字节不对；`0x30` 是只启用了接口；`0x11` 是通知没登记上 |
-| `ncall` | 这一代从 0 重新计。非 0 说明孔径检查之后真的进了槽回调 | 0，同时 `qpatch` 也是 0：回调和补丁都没发生 |
-| 屏幕 | 有帧则第 10 步通过 | `qpatch=0x3F` 仍是有背光的黑屏，才去看 `ActivatePageTableDisplay` |
+| 项 | 含义 |
+|---|---|
+| `ntfy` | 这次启动里加载通知被调用的次数。只在映像不小于 `0x29c000`，或名字里带 `qcdx` 时刷进注册表 |
+| `ihit` | 0 没选中；1 按 `qcdxkm8250.sys` 这个结尾选中；2 名字为空且映像大小正好是 `0x35b000` |
+| `nirq` | 选中那一次的 IRQL。0 是 PASSIVE，补丁函数才会写。非 0 表示选中了但没写 |
+| `iseq` | 记下来的映像个数。最后一条在槽 `(iseq - 1) mod 4` |
+| `i0nm`–`i3nm` / `i0sz`–`i3sz` | 最近四个候选映像的路径尾巴和大小 |
+| `qpatch` | `0x3F` 六处都写上。0 是没进写循环，或六处都没对上期望字节 |
+| `step` | `0x65` 六处都写上；`0x64` 有对不上的；`0x30` 只启用了接口；`0x11` 通知没登记上 |
 
-`qpatch` 到了 `0x3F` 之前，不改 GOP，不刷 UEFI，不把 `map` 设成 1。
+同一侧找不到 `ntfy`、`ihit`、`i0nm` 时，先别下结论。垫片可能没跑，也可能跑了没落盘。用这一侧有没有比 1 更大的新 `bootgen`、启动日志里的加载顺序，以及 `ImagePath` 指向的文件哈希一起看。落盘存疑就再等一次，不把它当成匹配规则的问题。
+
+新值名在同一侧出现之后，按这个顺序读，只有最后一种才谈补丁效果：
+
+1. `ntfy=0`：通知没被调用。问题在登记，和匹配无关。不换离线副本。
+2. `ntfy>0` 且 `ihit=0`：通知跑了但没选中。看 `i0nm`–`i3nm` 和对应大小。只有这些名字和大小说明匹配规则选错了对象，才换 `qcdxkm8250-loadpatch.sys`。
+3. `ihit` 为 1 或 2，且 `nirq` 不是 0：选中了，但当时写不了。补丁时机的问题。不换离线副本。
+4. `ihit` 为 1 或 2，且 `nirq=0`：这时才读 `qpatch` 和 `step`。
+
+工作项写完 `qpatch` 后走 `Step`，`Step` 里有 `ZwFlushKey`。没选中时工作项自己调用 `ZwFlushKey`。键在刷出时已经提交，不必为了等惰性写再空等一两分钟。
+
+`qpatch=0x3F` 之后如果蓝屏，看有没有新的 `MEMORY.DMP`，以及 `step` 停在哪。这是越过孔径检查之后的路径，和以前的版本错位不是一件事。屏幕仍黑就把这次的 `qpatch`、`step` 和 `ncall` 一起记下来，再决定切帧里动哪一处，一次只动一处。在 `qpatch` 到 `0x3F` 之前，不改 GOP，不刷 UEFI，不把 `map` 设成 1。

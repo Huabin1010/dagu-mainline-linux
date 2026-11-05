@@ -32,7 +32,7 @@ $FB set-active b; timeout 5 $FB reboot || true
 wait_usb 0525:a4a7 60 || { echo "B-slot Linux USB gadget did not appear" >&2; exit 1; }
 IP=""
 for _ in $(seq 1 20); do
-	for c in ${LINUX_IP:-} 192.168.1.68; do
+	for c in ${LINUX_IP:-} $(cat "${XDG_CACHE_HOME:-$HOME/.cache}/dagu-linux-ip" 2>/dev/null); do
 		sshpass -p "$PW" ssh "${SSHO[@]}" "root@$c" true 2>/dev/null && { IP=$c; break 2; }
 	done
 	sleep 5

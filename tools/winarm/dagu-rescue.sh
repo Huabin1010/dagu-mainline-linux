@@ -17,12 +17,13 @@
 #   dagu-rescue.sh auto                       等上线；若落到 Linux 就删覆盖表并切回 A
 #   dagu-rescue.sh hive-run <本地脚本>        把脚本推到 Linux 上以 root 执行
 #
-# 环境变量：WIN_IP（默认 192.168.1.250）、LINUX_IP（默认 192.168.1.75）、
+# 环境变量：WIN_IP（默认 192.168.1.250）、LINUX_IP（默认取 ~/.cache/dagu-linux-ip）、
 #           LINUX_PW（默认 dagu）、WIN_PART（默认 /dev/sda36）。
 set -u
 
 WIN_IP="${WIN_IP:-192.168.1.250}"
-LINUX_IP="${LINUX_IP:-192.168.1.75}"
+# 默认用 dagu-find-linux.sh 上次找到并缓存的地址；没有缓存才用旧的固定值
+LINUX_IP="${LINUX_IP:-$(cat "${XDG_CACHE_HOME:-$HOME/.cache}/dagu-linux-ip" 2>/dev/null || echo 192.168.1.75)}"
 LINUX_PW="${LINUX_PW:-dagu}"
 WIN_PART="${WIN_PART:-/dev/sda36}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

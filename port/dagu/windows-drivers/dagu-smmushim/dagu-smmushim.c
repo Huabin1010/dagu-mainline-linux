@@ -219,6 +219,13 @@ ClearStale(VOID)
         L"tcrlo", L"tcrhi", L"tb1lo", L"tb1hi", L"qmrs",
         L"rethi", L"site", L"pout", L"qblo", L"qbhi",
         L"fail1", L"fcall1", L"fsite1", L"fcall", L"fsite", L"nfail",
+        L"adlo", L"adhi", L"a630", L"a638lo", L"a638hi", L"a780", L"aflt",
+        L"a784", L"a788", L"a3b78", L"a3b7c", L"a3b90", L"a46c4", L"mflt",
+        L"d1108lo", L"d1108hi", L"d1110lo", L"d1110hi",
+        L"d1118lo", L"d1118hi", L"dflt", L"rst",
+        L"fminst", L"fmidet", L"fmcall", L"fmhit",
+        L"fmaflt", L"fmbflt", L"fmdsclo", L"fmdschi",
+        L"fmseen", L"fmlast",
     };
     static const UCHAR kNoRing[8 * 8 * sizeof(ULONG) + sizeof(ULONG)] = { 0 };
     ULONG i, k;
@@ -844,6 +851,75 @@ OpenParams(PUNICODE_STRING reg)
 
 static LONG gHooked;
 static ULONG gFailN;
+/* When set (Parameters\rstonfail=1), the GPU StartDevice failure tail
+ * resets the box after flushing, so an A-slot hang becomes a counted reset
+ * and ABL falls back to B on its own. Read once in DriverEntry. */
+static ULONG gRstOnFail;
+
+/* RVA of the loadpatch trampoline's return site. When RecordStatus runs
+ * with this return address, the call came through the failure-tail
+ * trampoline at 0x2c7768, and the adapter pointer is still live in x20.
+ * At the three generic hook sites (0x133854/0x133a2c/0x133b0c) x20 is not
+ * the adapter, so the adapter fields are read only for this exact site. */
+#define QCDX_TRAMP_SITE 0x2c777cu
+
+/* FillMode injection. FUN_1402934b0 (StartDevice adapter init) fails at
+ * 0xC0000001 because the upstream mode-enumeration stage produced no mode
+ * data: adapter+0x780 (mode type) is 0 but FUN_140276fd0 needs 5, and the
+ * framebuffer descriptor at adapter+0x638 has a zero scan buffer where
+ * FUN_140319718 needs +0x1110 >= 0x5000 with +0x1108/+0x1118 non-null.
+ *
+ * At 0x294438 the function calls KeInitializeGuardedMutex(&global) through
+ * the import slot at .rdata 0x14a360, returning to 0x29443c. That call sits
+ * before 0x294460 (first read of adapter+0x638) and before 0x2944e8 (the
+ * FUN_140276fd0 call that reads +0x780). The whole 0x2934b0 body (1244
+ * instructions, fully decoded) has no store to +0x638, so the descriptor
+ * pointer is stable upstream input. x20 holds the adapter across the call
+ * (callee-saved). Redirecting that one import slot to a thunk that calls the
+ * real KeInitializeGuardedMutex and then fills the mode fields lands both
+ * groups before any gate reads them, without editing a single instruction.
+ *
+ * The slot is shared by every KeInitializeGuardedMutex caller, so the thunk
+ * forwards unconditionally and only fills when the return address is the
+ * 0x29443c site. */
+#define QCDX_KEINITGM_IAT_RVA 0x14a360u
+#define QCDX_FILLMODE_SITE    0x29443cu
+
+/* Measured on the device (B-slot Linux, panel l81a_42_04_0a, 1600x2560x32).
+ * +0x780 == 5 is hard gate 1. The GOP framebuffer UEFI already lit is at
+ * phys 0x9C000000, 0xFA0000 bytes (== 1600*2560*4), stride 0x1900 (1600*4);
+ * its size satisfies the >= 0x5000 scan-size gate. The sub-mode id only
+ * selects a pixel-format branch and avoids an error log; a mismatch still
+ * continues, so it is not a gate. */
+#define FM_MODE_TYPE  5u
+#define FM_SUBMODE_ID 0x026a0064u
+#define FM_FB_BASE    0x9C000000ull
+#define FM_SCAN_SIZE  0x00FA0000ull
+#define FM_STRIDE     0x00001900ull
+
+/* Set once when the import slot is redirected. gRealKeInitGM is the original
+ * KeInitializeGuardedMutex pointer read out of the slot; the thunk forwards
+ * to it. gFillSite is base+0x29443c, the one return address that triggers a
+ * fill. The fm* counters are diagnostics flushed by RecordStatus. */
+static LONG gFillHooked;
+/* Not static: FillModeThunk's naked asm loads these. A static symbol is
+ * not a reliable operand for adrp/:lo12: in clang-cl inline asm. */
+PVOID gRealKeInitGM;
+ULONG_PTR gFillSite;
+/* Naked thunk updates these. gFmSeen counts every import call, gFmLastRet
+ * is the low 32 bits of the last return address, so a missed site compare
+ * is visible after the failure bugcheck. */
+ULONG gFmSeen;
+ULONG gFmLastRet;
+static ULONG gFmInstall;   /* 0 none, 1 installed, 9 slot read faulted, 0x1x WriteQcdxPtr stat */
+static ULONG gFmInstDetail;
+static ULONG gFmCall;      /* thunk reached our site */
+static ULONG gFmHit;       /* FillMode completed */
+static ULONG gFmAflt;      /* A group / descriptor read faulted */
+static ULONG gFmBflt;      /* B group write faulted */
+static ULONG64 gFmDesc;    /* descriptor pointer seen at fill time */
+
+VOID FillMode(ULONG_PTR adapter);
 
 /* The hook can run more than once per load: a stop or rollback after the
  * first failure reaches the same exit with the same status. fail1, fcall1,
@@ -851,9 +927,23 @@ static ULONG gFailN;
  * fail, fcall, fsite and the s/a/b/c/d/r/h/p ring keys follow the last one.
  * fsite is the RVA in qcdx that called the hook (pout bit 8 when it is
  * outside the image). ring1 is the eight CALL_REC entries, indexed as in
- * the live ring, followed by ncall at that moment. */
-static VOID
-RecordStatus(ULONG status)
+ * the live ring, followed by ncall at that moment.
+ *
+ * adapter is x20 captured by RecordStatusThunk before this prologue runs.
+ * When fsite is the trampoline site, FUN_1402934b0 reads these adapter
+ * fields at the failure point and we sample them here to settle the
+ * static ambiguity:
+ *   a630      *(ULONG  *)(adapter+0x630)  display-path enable flag
+ *   a638lo/hi *(ULONG64*)(adapter+0x638)  framebuffer descriptor pointer
+ *   a780      *(ULONG  *)(adapter+0x780)  mode type (FUN_140276fd0 needs 5)
+ *   adlo/adhi  adapter pointer itself (sanity)
+ * aflt is 1 if any of those reads faulted.
+ *
+ * External linkage, not static: RecordStatusThunk references this symbol
+ * from inline asm (b RecordStatus), which emits an external relocation that
+ * an internal-linkage symbol would not satisfy. */
+VOID
+RecordStatus(ULONG status, ULONG_PTR adapter)
 {
     ULONG_PTR ret = (ULONG_PTR)__builtin_return_address(0);
     ULONG site;
@@ -884,8 +974,274 @@ RecordStatus(ULONG status)
     Put(L"fcall", gNcall);
     Put(L"fsite", site);
     Put(L"nfail", gFailN);
+    /* Only the trampoline site carries the adapter in x20. */
+    if (site == QCDX_TRAMP_SITE && adapter) {
+        ULONG a630 = 0, a780 = 0, aflt = 0;
+        ULONG64 a638 = 0;
+        Put(L"adlo", (ULONG)adapter);
+        Put(L"adhi", (ULONG)(adapter >> 32));
+        __try {
+            a630 = *(volatile ULONG *)(adapter + 0x630);
+            a638 = *(volatile ULONG64 *)(adapter + 0x638);
+            a780 = *(volatile ULONG *)(adapter + 0x780);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            aflt = 1;
+        }
+        Put(L"a630", a630);
+        Put(L"a638lo", (ULONG)a638);
+        Put(L"a638hi", (ULONG)(a638 >> 32));
+        Put(L"a780", a780);
+        Put(L"aflt", aflt);
+
+        /* a780 == 0 at the failure point but FUN_140276fd0 needs 5. The
+         * mode type and its geometry siblings are never stored by any
+         * instruction in the image; they are block-filled by the upstream
+         * mode-enumeration stage. Sample the whole mode-geometry group so a
+         * single boot tells us which input the enumeration failed to
+         * produce. FUN_140276fd0 reads these adapter offsets alongside
+         * +0x780:
+         *   +0x784   mode flags      (a784)
+         *   +0x788   sub-mode id     (a788; legal 0x26a0064/0x2760014/
+         *                             0x2a80014/0x2b2000a)
+         *   +0x3b78  geometry a      (a3b78)
+         *   +0x3b7c  geometry b      (a3b7c)
+         *   +0x3b90  stride shift    (a3b90)
+         *   +0x46c4  packed geometry (a46c4)
+         * Separate __try so a fault here cannot lose the group above. */
+        {
+            ULONG a784 = 0, a788 = 0, a3b78 = 0, a3b7c = 0, a3b90 = 0,
+                  a46c4 = 0, mflt = 0;
+            __try {
+                a784  = *(volatile ULONG *)(adapter + 0x784);
+                a788  = *(volatile ULONG *)(adapter + 0x788);
+                a3b78 = *(volatile ULONG *)(adapter + 0x3b78);
+                a3b7c = *(volatile ULONG *)(adapter + 0x3b7c);
+                a3b90 = *(volatile ULONG *)(adapter + 0x3b90);
+                a46c4 = *(volatile ULONG *)(adapter + 0x46c4);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                mflt = 1;
+            }
+            Put(L"a784", a784);
+            Put(L"a788", a788);
+            Put(L"a3b78", a3b78);
+            Put(L"a3b7c", a3b7c);
+            Put(L"a3b90", a3b90);
+            Put(L"a46c4", a46c4);
+            Put(L"mflt", mflt);
+        }
+
+        /* When a638 (the framebuffer descriptor) is non-null, FUN_140294460
+         * reads three fields out of it and FUN_140319718 later rejects the
+         * mode unless the scan buffer at descriptor +0x1110 is >= 0x5000 and
+         * the two pointers at +0x1108/+0x1118 are non-null. Sample them so
+         * we know whether a638 carries a usable framebuffer or an empty one.
+         *   desc+0x1108  fb base ptr   (d1108lo/hi)
+         *   desc+0x1110  scan size     (d1110lo/hi)
+         *   desc+0x1118  fb stride ptr (d1118lo/hi)
+         * Separate __try; descriptor may be a bad pointer. */
+        if (a638 && !aflt) {
+            ULONG64 d1108 = 0, d1110 = 0, d1118 = 0;
+            ULONG dflt = 0;
+            __try {
+                d1108 = *(volatile ULONG64 *)(a638 + 0x1108);
+                d1110 = *(volatile ULONG64 *)(a638 + 0x1110);
+                d1118 = *(volatile ULONG64 *)(a638 + 0x1118);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                dflt = 1;
+            }
+            Put(L"d1108lo", (ULONG)d1108);
+            Put(L"d1108hi", (ULONG)(d1108 >> 32));
+            Put(L"d1110lo", (ULONG)d1110);
+            Put(L"d1110hi", (ULONG)(d1110 >> 32));
+            Put(L"d1118lo", (ULONG)d1118);
+            Put(L"d1118hi", (ULONG)(d1118 >> 32));
+            Put(L"dflt", dflt);
+        }
+        /* FillMode runtime result, flushed on the same failure tail so one
+         * boot shows whether the import hook fired before the gates. fmcall
+         * is how many times the thunk saw the 0x29443c site, fmhit how many
+         * times FillMode ran, fmaflt/fmbflt the per-group fault counts, and
+         * fmdesc the descriptor pointer seen at fill time. */
+        Put(L"fmcall", gFmCall);
+        Put(L"fmhit", gFmHit);
+        Put(L"fmaflt", gFmAflt);
+        Put(L"fmbflt", gFmBflt);
+        Put(L"fmdsclo", (ULONG)gFmDesc);
+        Put(L"fmdschi", (ULONG)(gFmDesc >> 32));
+    }
+    /* Thunk entry count and the last return address it saw. fmcall stays 0
+     * when the site compare misses; fmseen tells those two cases apart. */
+    Put(L"fmseen", gFmSeen);
+    Put(L"fmlast", gFmLastRet);
     WriteRing();
     Step(0x61);
+
+    /* Record-then-reset: the A-slot GPU StartDevice has failed and qcdx
+     * does not retry (nfail stays 1), so Windows would otherwise crawl to a
+     * black session and hang without resetting. A hang does not decrement
+     * ABL's A-slot retry counter, so the box never falls back to B on its
+     * own and needs a manual power+voldown into fastboot. When rstonfail=1
+     * we instead end this boot in a clean reset: everything above is already
+     * flushed to the SYSTEM hive by Step(0x61), so a bugcheck here loses no
+     * record. CrashControl is set offline to AutoReboot=1, CrashDumpEnabled=0
+     * so this reboots immediately without stalling on a dump write. One
+     * reset decrements the A retry counter; with the counter preset to 1 via
+     * sgdisk, ABL falls back to B unattended and the hive is read back there.
+     * Gated to the trampoline site so the three generic hook points never
+     * trip it. */
+    if (site == QCDX_TRAMP_SITE && gRstOnFail &&
+        KeGetCurrentIrql() == PASSIVE_LEVEL) {
+        if (gKey) {
+            Put(L"rst", 1);
+            Put(L"step", 0x62);
+            StampGen();
+            ZwFlushKey(gKey);
+        }
+        KeBugCheckEx(0xDA6, 0x780, status, adapter, gBootGen);
+    }
+}
+
+/* Installed into qcdx base+0x1c66c0. The loadpatch trampoline calls this
+ * with the failure status in w0, and the adapter is still live in x20.
+ * Forward x20 as the second argument (x1) and tail-call RecordStatus. The
+ * trampoline's return address in lr is preserved through the tail branch,
+ * so RecordStatus returns straight back into the trampoline. Naked: no
+ * prologue runs before x20 is captured. */
+__attribute__((naked)) static VOID
+RecordStatusThunk(VOID)
+{
+    __asm__ volatile(
+        "mov x1, x20\n\t"
+        "b RecordStatus\n\t");
+}
+
+/* Fills the two mode-field groups the enumeration stage never produced.
+ * Group A lives in the adapter head (mode type + sub-mode id). Group B lives
+ * in the framebuffer descriptor at adapter+0x638 (fb base, scan size,
+ * stride). Each group has its own SEH frame so a fault in one does not lose
+ * the other. Called from FillModeThunk with the adapter in x0 only when the
+ * return address is the 0x29443c site, i.e. after the descriptor pointer is
+ * live and before any gate reads these fields.
+ *
+ * External linkage: FillModeThunk references it from inline asm.
+ *
+ * noinline is required. clang-cl inlined this into FillModeEntry and
+ * deleted both __try frames, so a faulting store became a bugcheck
+ * (bootgen 16, step stayed 0x65, the failure tail never ran). */
+__declspec(noinline) VOID
+FillMode(ULONG_PTR adapter)
+{
+    ULONG64 desc = 0;
+
+    gFmHit++;
+    if (!adapter)
+        return;
+    /* Group A: adapter head. +0x780 is hard gate 1; +0x788 selects the
+     * pixel-format branch. Read the descriptor pointer in the same frame so
+     * a bad adapter cannot reach group B. */
+    __try {
+        *(volatile ULONG *)(adapter + 0x780) = FM_MODE_TYPE;
+        *(volatile ULONG *)(adapter + 0x788) = FM_SUBMODE_ID;
+        desc = *(volatile ULONG64 *)(adapter + 0x638);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        gFmAflt++;
+        return;
+    }
+    gFmDesc = desc;
+    if (!desc)
+        return;
+    /* Group B: framebuffer descriptor. +0x1110 scan size clears the
+     * >= 0x5000 gate; +0x1108/+0x1118 must be non-null. Point the scan
+     * output at the GOP framebuffer UEFI already lit. */
+    __try {
+        *(volatile ULONG64 *)(desc + 0x1108) = FM_FB_BASE;
+        *(volatile ULONG64 *)(desc + 0x1110) = FM_SCAN_SIZE;
+        *(volatile ULONG64 *)(desc + 0x1118) = FM_STRIDE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        gFmBflt++;
+    }
+}
+
+/* C body behind the FillModeThunk naked shim. mutex (x0) is the caller's
+ * original argument, adapter (x1) is x20 captured before any prologue, and
+ * ret (x2) is the caller's return address captured from lr. Call the real
+ * KeInitializeGuardedMutex first so every caller of the import behaves
+ * normally, then fill the mode fields only when the return address is the
+ * 0x29443c site. Returning from here returns straight to the caller because
+ * FillModeThunk tail-branched with lr preserved.
+ *
+ * External linkage: FillModeThunk references it from inline asm. */
+VOID
+FillModeEntry(PVOID mutex, ULONG_PTR adapter, ULONG_PTR ret)
+{
+    VOID (*real)(PVOID) = (VOID (*)(PVOID))gRealKeInitGM;
+
+    if (real)
+        real(mutex);
+    /* Low 32 bits only. The thunk already filtered on this, and the high
+     * bits of ret may be a pointer-auth tag. */
+    if ((ULONG)ret == (ULONG)gFillSite) {
+        gFmCall++;
+        /* Flush before the stores. A fault inside FillMode then leaves
+         * step 0x66 / fmcall>=1 instead of looking like the hook never ran.
+         * Only this one call site reaches here; the thunk tail-calls the
+         * real import for every other caller. */
+        if (gKey && KeGetCurrentIrql() == PASSIVE_LEVEL) {
+            Put(L"fmcall", gFmCall);
+            Put(L"step", 0x66);
+            ZwFlushKey(gKey);
+        }
+        FillMode(adapter);
+        if (gKey && KeGetCurrentIrql() == PASSIVE_LEVEL) {
+            Put(L"fmhit", gFmHit);
+            Put(L"fmaflt", gFmAflt);
+            Put(L"fmbflt", gFmBflt);
+            Put(L"fmdsclo", (ULONG)gFmDesc);
+            Put(L"fmdschi", (ULONG)(gFmDesc >> 32));
+            Put(L"step", 0x67);
+            ZwFlushKey(gKey);
+        }
+    }
+}
+
+/* Installed into the KeInitializeGuardedMutex import slot (.rdata 0x14a360).
+ * Every caller of that import reaches here. Other callers tail-branch to the
+ * real function with x0/x30/x19-x28 untouched (x16/x17 are the intra-call
+ * volatiles a blr target may clobber). Only the 0x29443c site enters
+ * FillModeEntry, which needs a frame to call the real import and then fill.
+ * Naked so that site still sees the caller's x20 and lr. */
+__attribute__((naked)) static VOID
+FillModeThunk(VOID)
+{
+    __asm__ volatile(
+        /* bti c: qcdx enters this with blr. Harmless hint if BTI is off. */
+        "bti c\n\t"
+        "adrp x16, gFmSeen\n\t"
+        "ldr w17, [x16, :lo12:gFmSeen]\n\t"
+        "add w17, w17, #1\n\t"
+        "str w17, [x16, :lo12:gFmSeen]\n\t"
+        "adrp x16, gFmLastRet\n\t"
+        "str w30, [x16, :lo12:gFmLastRet]\n\t"
+        /* Compare the low 32 bits. A kernel return address can carry a
+         * pointer-auth tag in the high bits, so a full 64-bit compare
+         * against base+0x29443c never matches (bootgen 20, fmcall=0). */
+        "adrp x16, gFillSite\n\t"
+        "ldr x16, [x16, :lo12:gFillSite]\n\t"
+        "cmp w30, w16\n\t"
+        "b.ne 1f\n\t"
+        "mov x1, x20\n\t"
+        "mov x2, x30\n\t"
+        "b FillModeEntry\n\t"
+        /* ntoskrnl exports are call targets. br (a jump) is not a call and
+         * faults their landing pad; blr is. x30 is restored so qcdx's blr
+         * still returns to the instruction after the import call. */
+        "1:\n\t"
+        "str x30, [sp, #-16]!\n\t"
+        "adrp x16, gRealKeInitGM\n\t"
+        "ldr x16, [x16, :lo12:gRealKeInitGM]\n\t"
+        "blr x16\n\t"
+        "ldr x30, [sp], #16\n\t"
+        "ret\n\t");
 }
 
 static PUCHAR
@@ -1009,6 +1365,115 @@ WriteQcdx(PVOID addr, ULONG value, ULONG *stat, ULONG *detail)
     MmUnlockPages(mdl);
     IoFreeMdl(mdl);
     return 1;
+}
+
+/* Eight-byte sibling of WriteQcdx for the import-slot redirect. The slot at
+ * .rdata 0x14a360 holds a 64-bit pointer; WriteQcdx only stores a dword.
+ * Same MDL/probe/protect dance, same stat codes (1 alloc, 2 probe raised,
+ * 3 no system address, 4 protect failed). Returns the original pointer in
+ * *old so the caller can forward to it. */
+static ULONG
+WriteQcdxPtr(PVOID addr, PVOID value, PVOID *old, ULONG *stat, ULONG *detail)
+{
+    PMDL mdl;
+    PVOID *slot;
+    ULONG *savedExc;
+    ULONG *savedXi0;
+    ULONG exc = 0;
+    ULONG xi0 = 0;
+    NTSTATUS st;
+
+    *stat = 0;
+    *detail = 0;
+    if (old)
+        *old = NULL;
+    mdl = IoAllocateMdl(addr, sizeof(PVOID), FALSE, FALSE, NULL);
+    if (!mdl) {
+        *stat = 1;
+        return 0;
+    }
+    savedExc = gExcOut;
+    savedXi0 = gXi0Out;
+    gExcOut = &exc;
+    gXi0Out = &xi0;
+    __try {
+        MmProbeAndLockPages(mdl, KernelMode, IoReadAccess);
+    } __except (NoteExc(GetExceptionInformation())) {
+        gExcOut = savedExc;
+        gXi0Out = savedXi0;
+        *stat = 2;
+        *detail = exc;
+        IoFreeMdl(mdl);
+        return 0;
+    }
+    gExcOut = savedExc;
+    gXi0Out = savedXi0;
+    slot = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
+    if (!slot) {
+        *stat = 3;
+        MmUnlockPages(mdl);
+        IoFreeMdl(mdl);
+        return 0;
+    }
+    st = MmProtectMdlSystemAddress(mdl, PAGE_EXECUTE_READWRITE);
+    if (!NT_SUCCESS(st)) {
+        *stat = 4;
+        *detail = (ULONG)st;
+        MmUnlockPages(mdl);
+        IoFreeMdl(mdl);
+        return 0;
+    }
+    if (old)
+        *old = *slot;
+    *slot = value;
+    /* Import slot lives in .rdata. Restoring RX would mark a data page
+     * executable; the original protection is read-only. */
+    MmProtectMdlSystemAddress(mdl, PAGE_READONLY);
+    MmUnlockPages(mdl);
+    IoFreeMdl(mdl);
+    return 1;
+}
+
+/* Redirect qcdx's KeInitializeGuardedMutex import slot to FillModeThunk.
+ * Runs once per load, after PatchQcdx, from the same PASSIVE_LEVEL contexts.
+ * Reads the original pointer first (so the thunk can forward to it) and only
+ * writes the slot if the read succeeded and the slot still holds a kernel
+ * pointer, i.e. it has not already been redirected. gFillSite is the one
+ * return address (base+0x29443c) that triggers a mode fill; every other
+ * caller of the import is forwarded untouched. */
+static VOID
+InstallFillHook(PUCHAR base)
+{
+    PVOID *iat = (PVOID *)(base + QCDX_KEINITGM_IAT_RVA);
+    PVOID cur = NULL;
+    PVOID old = NULL;
+    ULONG stat = 0;
+    ULONG detail = 0;
+
+    if (InterlockedCompareExchange(&gFillHooked, 1, 0) != 0)
+        return;
+    __try {
+        cur = *iat;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        gFmInstall = 9;
+        return;
+    }
+    /* Already pointing at our thunk from an earlier load of this image:
+     * keep the saved real pointer and do nothing. */
+    if (cur == (PVOID)FillModeThunk) {
+        gFmInstall = 1;
+        return;
+    }
+    gFillSite = (ULONG_PTR)base + QCDX_FILLMODE_SITE;
+    gRealKeInitGM = cur;
+    if (WriteQcdxPtr(iat, (PVOID)FillModeThunk, &old, &stat, &detail)) {
+        gFmInstall = 1;
+    } else {
+        gFmInstall = 0x10u | (stat & 0xFu);
+        gFmInstDetail = detail;
+        gRealKeInitGM = NULL;
+        gFillSite = 0;
+    }
 }
 
 #define WALK_OK 0u
@@ -1349,8 +1814,23 @@ FlushNote(PVOID ctx)
         PutBin(L"wstat", gPendWstat, sizeof(gPendWstat));
         PutBin(L"wprot", gPendWprot, sizeof(gPendWprot));
         Put(L"qpatch", gPendMask);
+        /* FillMode import-hook install result, known once the image mapped.
+         * fminst 1 installed, 9 slot read faulted, 0x1x WriteQcdxPtr stat. */
+        Put(L"fminst", gFmInstall);
+        Put(L"fmidet", gFmInstDetail);
+        /* The pointer the thunk forwards to. A null or non-canonical value
+         * here means the import slot was snapshotted wrong. */
+        Put(L"fmrllo", (ULONG)(ULONG_PTR)gRealKeInitGM);
+        Put(L"fmrlhi", (ULONG)((ULONG_PTR)gRealKeInitGM >> 32));
         Step(gPendStep);
-    } else if (gKey) {
+        /* Consume once. The qcdx patch result is fixed after the image is
+         * mapped; rewriting and flushing it on every later image load only
+         * adds hard-reset tear windows to the SYSTEM hive (0xc000014c). */
+        InterlockedExchange(&gPendValid, 0);
+    } else if (gKey && (ntfy & 0xFFu) == 0) {
+        /* Heartbeat only. Flushing on every notification turned ~9800 image
+         * loads into ~9800 synchronous hive writes, each a tear window on a
+         * hard reset. Every 256th load keeps coarse early/late visibility. */
         ZwFlushKey(gKey);
     }
     InterlockedExchange(&gNoteQueued, 0);
@@ -1406,8 +1886,10 @@ OnLoad(PUNICODE_STRING name, HANDLE pid, PIMAGE_INFO info)
     gQcdxBase = (ULONG_PTR)info->ImageBase;
     gQcdxSize = info->ImageSize > 0xFFFFFFFFu ? 0xFFFFFFFFu : (ULONG)info->ImageSize;
     gNirq = KeGetCurrentIrql();
-    if (gNirq == PASSIVE_LEVEL)
+    if (gNirq == PASSIVE_LEVEL) {
         PatchQcdx((PUCHAR)info->ImageBase, TRUE);
+        InstallFillHook((PUCHAR)info->ImageBase);
+    }
 out:
     if (big || loose)
         NoteFlush();
@@ -1432,14 +1914,16 @@ NoteCaller(ULONG_PTR ret)
             gQcdxSize = 0;
         }
     }
-    if (base)
+    if (base) {
         PatchQcdx(base, FALSE);
+        InstallFillHook(base);
+    }
     if (InterlockedCompareExchange(&gHooked, 1, 0) != 0)
         return;
     if (!base)
         return;
     __try {
-        *(PVOID *)(base + QCDX_HOOK_RVA) = (PVOID)RecordStatus;
+        *(PVOID *)(base + QCDX_HOOK_RVA) = (PVOID)RecordStatusThunk;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         Step(0x63);
     }
@@ -1452,6 +1936,7 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
 
     OpenParams(reg);
     gBootGen = GetDword(L"bootgen", 0) + 1;
+    gRstOnFail = GetDword(L"rstonfail", 0);
     ExInitializeWorkItem(&gNoteItem, FlushNote, NULL);
     ClearStale();
     Step(0x10);

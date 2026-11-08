@@ -353,5 +353,6 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 [stage14（SMMU/QHEE 墙）](woa-dagu-gpu-stage14-2026-10-31.md)、
 [stage15（qcdx 崩溃根因）](woa-dagu-gpu-stage15-2026-10-31.md)、
 [stage16（时钟/电源排除）](woa-dagu-gpu-stage16-2026-10-31.md)、
-[stage17（qcsmmu 写寄存器全图=复位源）](woa-dagu-gpu-stage17-2026-10-31.md)。
+[stage17（qcsmmu 写寄存器全图=复位源）](woa-dagu-gpu-stage17-2026-10-31.md)、
+[stage20–22（SMMU 接口/第 25 槽/显示版本门与槽 24/20）](woa-dagu-gpu-stage22-2026-11-08.md)。
 调试/救援：[debug handbook](dagu-woa-debug-handbook.md)。

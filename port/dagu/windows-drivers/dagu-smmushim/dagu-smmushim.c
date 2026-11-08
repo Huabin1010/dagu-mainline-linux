@@ -29,6 +29,10 @@
  * that key is flushed once every 16 calls, not on every callback.
  */
 #include <ntddk.h>
+#include "dagu-dsdt-ov.h"
+
+NTKERNELAPI NTSTATUS ZwFlushBuffersFile(HANDLE FileHandle,
+                                        PIO_STATUS_BLOCK IoStatusBlock);
 
 #define IFACE_BYTES 0x1A0u
 #define IFACE_FN0   0x20u
@@ -89,6 +93,7 @@ typedef struct _SHIM_EXT {
 
 static HANDLE gKey;
 static ULONG gBootGen;
+static ULONG gLastStep;
 static LONG gIfaceKind; /* 0 none, 1 default/gpu, 2 video */
 static PVOID gAlloc[ALLOC_MAX];
 /* Load-notify diagnostics. ntfy counts every callback. The ring keeps the
@@ -99,6 +104,26 @@ static ULONG gNtfy;
 static ULONG gIhit;
 static ULONG gIseq;
 static ULONG gNirq;
+/* DSDT override writer result, flushed by RecordStatus. */
+static ULONG gOvIns;
+static ULONG gOvLen;
+static ULONG gOvFlt;
+/* Latest failure state, written by RecordStatus and flushed by DiagThread.
+ * The thread is the reliable writer: the compiler dropped the direct
+ * WriteDiag call from the failure tail, and a bugcheck can lose cached
+ * file data, so a PASSIVE thread writes whenever the log ring changes. */
+static ULONG gLastFail;
+static ULONG gLastSite;
+static ULONG_PTR gLastAd;
+/* Active ACPI DSDT identity from HKLM\HARDWARE\ACPI\DSDT\QCOMM_\SM8250_.
+ * acpk* are the decoded subkey names (the table revision, e.g. 4), acpl* the
+ * first value length in that subkey, acpn the subkey count, acpf the first
+ * failing status. A 53457-byte first value means our _ROM overlay is live. */
+static ULONG gAcpN;
+static ULONG gAcpK[4];
+static ULONG gAcpL[4];
+static ULONG gAcpF;
+static LONG gAcpDone;
 static ULONG gPendMask;
 static ULONG gPendStep;
 static LONG gPendValid;
@@ -121,13 +146,13 @@ static LONG gPendValid;
  * not be read as "not present". */
 static ULONG_PTR gPendBase;
 static ULONG gPendFlt;
-static UCHAR gPendWin[6][20];
+static UCHAR gPendWin[7][20];
 static ULONG gPendPrs;
 static ULONG gPendRd;
-static ULONG gPendExc[6];
-static ULONG gPendXi0[6];
-static ULONG gPendWlk[6];
-static ULONG64 gPendPte[6];
+static ULONG gPendExc[7];
+static ULONG gPendXi0[7];
+static ULONG gPendWlk[7];
+static ULONG64 gPendPte[7];
 static ULONG64 gPendTcr;
 static ULONG64 gPendTtbr;
 static ULONG gPendMrs;
@@ -139,8 +164,8 @@ static ULONG gPendMrs;
  * 4 MmProtectMdlSystemAddress failed; wprot is the NTSTATUS.
  * qwin is still the pre-write window, so a later Want there means the
  * site was already patched and this function was not called. */
-static ULONG gPendWstat[6];
-static ULONG gPendWprot[6];
+static ULONG gPendWstat[7];
+static ULONG gPendWprot[7];
 static ULONG *gExcOut;
 static ULONG *gXi0Out;
 static ULONG gIsz[4];
@@ -196,6 +221,7 @@ StampGen(VOID)
 static VOID
 Step(ULONG s)
 {
+    gLastStep = s;
     Put(L"step", s);
     StampGen();
     if (gKey && KeGetCurrentIrql() == PASSIVE_LEVEL)
@@ -226,6 +252,11 @@ ClearStale(VOID)
         L"fminst", L"fmidet", L"fmcall", L"fmhit",
         L"fmaflt", L"fmbflt", L"fmdsclo", L"fmdschi",
         L"fmseen", L"fmlast",
+        L"hist0", L"hist1", L"hist2", L"hist3", L"logseen", L"loginst",
+        L"ls0", L"ls1", L"ls2", L"ls3",
+        L"ovins", L"ovlen", L"ovflt",
+        L"acpn", L"acpf", L"acpk0", L"acpk1", L"acpk2", L"acpk3",
+        L"acpl0", L"acpl1", L"acpl2", L"acpl3",
     };
     static const UCHAR kNoRing[8 * 8 * sizeof(ULONG) + sizeof(ULONG)] = { 0 };
     ULONG i, k;
@@ -235,6 +266,16 @@ ClearStale(VOID)
     gIhit = 0;
     gIseq = 0;
     gNirq = 0;
+    gOvIns = 0;
+    gOvLen = 0;
+    gOvFlt = 0;
+    gAcpN = 0;
+    gAcpF = 0;
+    gAcpDone = 0;
+    for (i = 0; i < 4; i++) {
+        gAcpK[i] = 0;
+        gAcpL[i] = 0;
+    }
     gPendBase = 0;
     gPendFlt = 0;
     gPendPrs = 0;
@@ -402,7 +443,10 @@ NewRange(ULONG kind, ULONG_PTR base, ULONG_PTR size, ULONG_PTR offset, ULONG fla
     VA_RANGE *r;
     ULONG i;
 
-    if (KeGetCurrentIrql() > APC_LEVEL)
+    /* NonPagedPoolNx allocation is legal up to DISPATCH_LEVEL. The earlier
+     * APC-only guard made slot 25 return NULL when the display path calls
+     * the range allocator from a DPC, which qcdx reports as 0xC0001817. */
+    if (KeGetCurrentIrql() > DISPATCH_LEVEL)
         return NULL;
     r = ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(VA_RANGE), 'mmSD');
     if (!r)
@@ -459,6 +503,17 @@ typedef struct _CALL_REC {
 
 static CALL_REC gRing[8];
 static ULONG gNcall;
+/* Last slot call, used by the encoded stop code: the display path's failure
+ * is slot 25 returning NULL, and this shows whether it was the IRQL guard,
+ * a zero length, or the allocator. */
+static ULONG gLastSlot;
+static ULONG gLastIrql;
+static ULONG gLastB;
+static ULONG gLastSubOk;
+/* Slot 24 is not implemented; record who calls it so the next stop code
+ * points at the qcdx function that needs it. */
+static ULONG gSite24;
+static ULONG gA24, gB24, gC24, gD24;
 static ULONG gSeen0;
 static ULONG gSeen1;
 static ULONG gPout;
@@ -537,6 +592,19 @@ SlotDispatch(ULONG slot, ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d, ULO
     UINT64 ret = 0;
 
     NoteCaller(caller);
+    gLastSlot = slot;
+    gLastIrql = KeGetCurrentIrql();
+    gLastB = (ULONG)b;
+    if (slot == 24) {
+        if (gQcdxBase && caller >= gQcdxBase && caller - gQcdxBase < gQcdxSize)
+            gSite24 = (ULONG)(caller - gQcdxBase);
+        else
+            gSite24 = (ULONG)caller | 0x80000000u;
+        gA24 = (ULONG)a;
+        gB24 = (ULONG)b;
+        gC24 = (ULONG)c;
+        gD24 = (ULONG)d;
+    }
     if (slot == SLOT_ALLOC)
         ret = AllocHandle();
     else if (slot == SLOT_BIND) {
@@ -553,6 +621,7 @@ SlotDispatch(ULONG slot, ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d, ULO
         if (b != 0)
             sub = NewRange(VA_SUB, c, b, c, (ULONG)d, AsRange(a));
         ret = sub ? (UINT64)(ULONG_PTR)sub : 0;
+        gLastSubOk = ret ? 1u : 0u;
         Put(L"suboff", (ULONG)c);
         Put(L"subsz", (ULONG)b);
         Put(L"subok", ret ? 1u : 0u);
@@ -919,7 +988,227 @@ static ULONG gFmAflt;      /* A group / descriptor read faulted */
 static ULONG gFmBflt;      /* B group write faulted */
 static ULONG64 gFmDesc;    /* descriptor pointer seen at fill time */
 
+/* Last qcdx log-wrapper event codes, newest first. The wrapper at RVA
+ * 0x10920 forwards its event code to FUN_140107d8 through the bl at RVA
+ * 0x10950; the shim redirects that one instruction to LogThunk, which
+ * records w2 and then calls the original target. The failure tail always
+ * logs 0x998, so the gate that failed sits a few entries deeper. A 16-entry
+ * ring is kept because the display-config parser logs several stages before
+ * the StartDevice tail. Non-static for the inline asm. */
+PVOID gLogReal;
+ULONG gLogRing[16];
+ULONG gSiteRing[16];
+ULONG gLogCount;
+ULONG gLogSeen;
+static LONG gLogHooked;
+static ULONG gLogInstall;  /* 0 none, 1 installed, 3 unexpected insn, 8 out of bl range, 9 read fault, 0x1x write stat */
+
 VOID FillMode(ULONG_PTR adapter);
+
+/* Read the active DSDT identity from the HARDWARE hive. ACPI publishes one
+ * subkey per loaded table under ...\ACPI\DSDT\<OEMID>\<TABLEID>; the subkey
+ * name is the table revision and its values carry the AML bytes. Run once at
+ * the failure point (PASSIVE), so it describes the table this boot used. */
+static ULONG
+HexName(PCWSTR s, ULONG n)
+{
+    ULONG v = 0;
+    ULONG i;
+
+    for (i = 0; i < n; i++) {
+        WCHAR c = s[i];
+        ULONG d;
+
+        if (c >= L'0' && c <= L'9')
+            d = c - L'0';
+        else if (c >= L'a' && c <= L'f')
+            d = c - L'a' + 10;
+        else if (c >= L'A' && c <= L'F')
+            d = c - L'A' + 10;
+        else
+            break;
+        v = (v << 4) | d;
+    }
+    return v;
+}
+
+static VOID
+ReadActiveDsdt(VOID)
+{
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES oa;
+    HANDLE h = NULL;
+    NTSTATUS st;
+    UCHAR buf[512];
+    ULONG i;
+    ULONG len;
+
+    if (InterlockedCompareExchange(&gAcpDone, 1, 0) != 0)
+        return;
+    RtlInitUnicodeString(&name,
+        L"\\Registry\\Machine\\HARDWARE\\ACPI\\DSDT\\QCOMM_\\SM8250_");
+    InitializeObjectAttributes(&oa, &name,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL, NULL);
+    st = ZwOpenKey(&h, KEY_QUERY_VALUE, &oa);
+    if (!NT_SUCCESS(st)) {
+        gAcpF = (ULONG)st;
+        return;
+    }
+    for (i = 0; i < 4; i++) {
+        KEY_BASIC_INFORMATION *bi = (KEY_BASIC_INFORMATION *)buf;
+        UNICODE_STRING sub;
+        HANDLE hs = NULL;
+
+        len = 0;
+        st = ZwEnumerateKey(h, i, KeyBasicInformation, buf, sizeof(buf), &len);
+        if (!NT_SUCCESS(st))
+            break;
+        gAcpN++;
+        gAcpK[i] = HexName(bi->Name, bi->NameLength / sizeof(WCHAR));
+        sub.Buffer = bi->Name;
+        sub.Length = (USHORT)bi->NameLength;
+        sub.MaximumLength = (USHORT)bi->NameLength;
+        InitializeObjectAttributes(&oa, &sub,
+                                   OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, h, NULL);
+        if (NT_SUCCESS(ZwOpenKey(&hs, KEY_QUERY_VALUE, &oa))) {
+            UCHAR vbuf[512];
+            ULONG vlen = 0;
+
+            if (NT_SUCCESS(ZwEnumerateValueKey(hs, 0, KeyValueFullInformation,
+                                               vbuf, sizeof(vbuf), &vlen)))
+                gAcpL[i] = ((KEY_VALUE_FULL_INFORMATION *)vbuf)->DataLength;
+            else if (!gAcpF)
+                gAcpF = 1;
+            ZwClose(hs);
+        } else if (!gAcpF) {
+            gAcpF = 2;
+        }
+    }
+    ZwClose(h);
+}
+
+/* Binary diagnostic record appended to \??\C:\dagu\shim.bin. The registry
+ * channel stopped persisting after the manual hive edit (fail stayed 0 even
+ * though the bugcheck ran), so file output is the reliable measurement path.
+ * One fixed-size record per call; parse it on the B-slot Linux side. */
+#define DIAG_MAGIC 0x47414444u /* 'DDAG' */
+#define DIAG_VER   2u
+
+typedef struct _DIAG_REC {
+    ULONG Magic, Ver, BootGen, Step, Fail, Fsite, Ncall, Nfail, Rst;
+    ULONG Fminst, Fmseen, Fmlast, Fmcall, Fmhit, Fmaflt, Fmbflt;
+    ULONG LogCount;
+    ULONG Hist[16], Lsite[16];
+    ULONG OvIns, OvLen, OvFlt;
+    ULONG AcpN, AcpF, AcpK[4], AcpL[4];
+    ULONG Adlo, Adhi, A630, A638lo, A638hi, A780, A46c4, Aflt;
+    ULONG QPatch, QPendStep, Ihit, Fmdsclo, Fmdschi, Pad;
+} DIAG_REC;
+
+static VOID
+WriteDiag(ULONG fail, ULONG fsite, ULONG_PTR adapter)
+{
+    UNICODE_STRING path;
+    OBJECT_ATTRIBUTES oa;
+    IO_STATUS_BLOCK iosb;
+    HANDLE h = NULL;
+    NTSTATUS st;
+    DIAG_REC r;
+    ULONG i;
+
+    RtlZeroMemory(&r, sizeof(r));
+    r.Magic = DIAG_MAGIC;
+    r.Ver = DIAG_VER;
+    r.BootGen = gBootGen;
+    r.Step = gLastStep;
+    r.Fail = fail;
+    r.Fsite = fsite;
+    r.Ncall = gNcall;
+    r.Nfail = gFailN;
+    r.Rst = gRstOnFail;
+    r.Fminst = gFmInstall;
+    r.Fmseen = gFmSeen;
+    r.Fmlast = gFmLastRet;
+    r.Fmcall = gFmCall;
+    r.Fmhit = gFmHit;
+    r.Fmaflt = gFmAflt;
+    r.Fmbflt = gFmBflt;
+    r.LogCount = gLogCount;
+    for (i = 0; i < 16; i++) {
+        ULONG k = (gLogCount ? (gLogCount - 1 - i) : 0) & 15;
+
+        r.Hist[i] = gLogRing[k];
+        r.Lsite[i] = gSiteRing[k];
+    }
+    r.OvIns = gOvIns;
+    r.OvLen = gOvLen;
+    r.OvFlt = gOvFlt;
+    r.QPatch = gPendMask;
+    r.QPendStep = gPendStep;
+    r.Ihit = gIhit;
+    r.AcpN = gAcpN;
+    r.AcpF = gAcpF;
+    for (i = 0; i < 4; i++) {
+        r.AcpK[i] = gAcpK[i];
+        r.AcpL[i] = gAcpL[i];
+    }
+    r.Fmdsclo = (ULONG)gFmDesc;
+    r.Fmdschi = (ULONG)(gFmDesc >> 32);
+    if (adapter) {
+        __try {
+            ULONG64 d638 = *(volatile ULONG64 *)(adapter + 0x638);
+
+            r.Adlo = (ULONG)adapter;
+            r.Adhi = (ULONG)(adapter >> 32);
+            r.A630 = *(volatile ULONG *)(adapter + 0x630);
+            r.A638lo = (ULONG)d638;
+            r.A638hi = (ULONG)(d638 >> 32);
+            r.A780 = *(volatile ULONG *)(adapter + 0x780);
+            r.A46c4 = *(volatile ULONG *)(adapter + 0x46c4);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            r.Aflt = 1;
+        }
+    }
+    RtlInitUnicodeString(&path, L"\\SystemRoot\\dagu-shim.bin");
+    InitializeObjectAttributes(&oa, &path,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL, NULL);
+    st = ZwCreateFile(&h, FILE_APPEND_DATA | SYNCHRONIZE, &oa, &iosb, NULL,
+                      FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                      FILE_OPEN_IF,
+                      FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE |
+                          FILE_WRITE_THROUGH,
+                      NULL, 0);
+    if (!NT_SUCCESS(st))
+        return;
+    st = ZwWriteFile(h, NULL, NULL, NULL, &iosb, &r, sizeof(r), NULL, NULL);
+    if (NT_SUCCESS(st))
+        ZwFlushBuffersFile(h, &iosb);
+    ZwClose(h);
+}
+
+/* PASSIVE_LEVEL writer. RecordStatus sets gLastFail/gLastSite/gLastAd and
+ * queues a work item; the worker appends the record. This survives the
+ * compiler dropping a direct call in the failure tail and does not depend
+ * on PsCreateSystemThread, which never produced a record on the device. */
+static WORK_QUEUE_ITEM gDiagItem;
+static LONG gDiagQueued;
+
+static VOID
+DiagWorker(PVOID ctx)
+{
+    UNREFERENCED_PARAMETER(ctx);
+    InterlockedExchange(&gDiagQueued, 0);
+    WriteDiag(gLastFail, gLastSite, gLastAd);
+}
+
+static VOID
+QueueDiag(VOID)
+{
+    if (InterlockedCompareExchange(&gDiagQueued, 1, 0) == 0)
+        ExQueueWorkItem(&gDiagItem, DelayedWorkQueue);
+}
 
 /* The hook can run more than once per load: a stop or rollback after the
  * first failure reaches the same exit with the same status. fail1, fcall1,
@@ -952,12 +1241,29 @@ RecordStatus(ULONG status, ULONG_PTR adapter)
         ULONG Ncall;
     } snap;
 
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+        ReadActiveDsdt();
     if (gQcdxBase && ret >= gQcdxBase && ret - gQcdxBase < gQcdxSize) {
         site = (ULONG)(ret - gQcdxBase);
         gPout &= ~(1u << 8);
     } else {
         site = (ULONG)ret;
         gPout |= 1u << 8;
+    }
+    gLastFail = status;
+    gLastSite = site;
+    gLastAd = adapter;
+    /* Bugcheck before any registry Put/Flush. A flush followed by a reset
+     * tears the SYSTEM hive (0xC0000218 / 0xC000014C), so the rstonfail path
+     * writes nothing and relies on the encoded stop code instead. */
+    if (site == QCDX_TRAMP_SITE && gRstOnFail &&
+        KeGetCurrentIrql() == PASSIVE_LEVEL) {
+        /* 0xDA0?XX: low byte is the qpatch mask (0x7F = all seven sites,
+         * 0x3F = the version patch missed); bit 10 = FillMode ran, bit 11 =
+         * the import site matched. */
+        KeBugCheckEx(0xDA0000u | ((gFmCall ? 1u : 0u) << 11) |
+                         ((gFmHit ? 1u : 0u) << 10) | (gPendMask & 0xFFu),
+                     0x780, status, adapter, gBootGen);
     }
     gFailN++;
     if (gFailN == 1) {
@@ -1073,32 +1379,41 @@ RecordStatus(ULONG status, ULONG_PTR adapter)
      * when the site compare misses; fmseen tells those two cases apart. */
     Put(L"fmseen", gFmSeen);
     Put(L"fmlast", gFmLastRet);
+    /* Last qcdx log events, newest first. The failure tail always logs
+     * 0x998; the gate that failed is hist1 (or hist2 when it logs twice). */
+    {
+        static const PCWSTR hn[4] = { L"hist0", L"hist1", L"hist2", L"hist3" };
+        static const PCWSTR sn[4] = { L"ls0", L"ls1", L"ls2", L"ls3" };
+        ULONG h;
+
+        for (h = 0; h < 4; h++) {
+            ULONG k = (gLogCount ? (gLogCount - 1 - h) : 0) & 15;
+
+            Put(hn[h], gLogRing[k]);
+            Put(sn[h], gSiteRing[k]);
+        }
+    }
+    Put(L"logseen", gLogSeen);
+    Put(L"loginst", gLogInstall);
+    Put(L"ovins", gOvIns);
+    Put(L"ovlen", gOvLen);
+    Put(L"ovflt", gOvFlt);
+    Put(L"acpn", gAcpN);
+    Put(L"acpf", gAcpF);
+    Put(L"acpk0", gAcpK[0]);
+    Put(L"acpk1", gAcpK[1]);
+    Put(L"acpk2", gAcpK[2]);
+    Put(L"acpk3", gAcpK[3]);
+    Put(L"acpl0", gAcpL[0]);
+    Put(L"acpl1", gAcpL[1]);
+    Put(L"acpl2", gAcpL[2]);
+    Put(L"acpl3", gAcpL[3]);
     WriteRing();
+    QueueDiag();
     Step(0x61);
 
-    /* Record-then-reset: the A-slot GPU StartDevice has failed and qcdx
-     * does not retry (nfail stays 1), so Windows would otherwise crawl to a
-     * black session and hang without resetting. A hang does not decrement
-     * ABL's A-slot retry counter, so the box never falls back to B on its
-     * own and needs a manual power+voldown into fastboot. When rstonfail=1
-     * we instead end this boot in a clean reset: everything above is already
-     * flushed to the SYSTEM hive by Step(0x61), so a bugcheck here loses no
-     * record. CrashControl is set offline to AutoReboot=1, CrashDumpEnabled=0
-     * so this reboots immediately without stalling on a dump write. One
-     * reset decrements the A retry counter; with the counter preset to 1 via
-     * sgdisk, ABL falls back to B unattended and the hive is read back there.
-     * Gated to the trampoline site so the three generic hook points never
-     * trip it. */
-    if (site == QCDX_TRAMP_SITE && gRstOnFail &&
-        KeGetCurrentIrql() == PASSIVE_LEVEL) {
-        if (gKey) {
-            Put(L"rst", 1);
-            Put(L"step", 0x62);
-            StampGen();
-            ZwFlushKey(gKey);
-        }
-        KeBugCheckEx(0xDA6, 0x780, status, adapter, gBootGen);
-    }
+    /* The rstonfail bugcheck now runs before any registry write (above),
+     * so the failure boot never touches the SYSTEM hive. */
 }
 
 /* Installed into qcdx base+0x1c66c0. The loadpatch trampoline calls this
@@ -1298,9 +1613,14 @@ static const struct {
     { 0x29afc4u, 0x528ea602u, 0x52800002u },
     { 0x29b070u, 0x52807d02u, 0x52800002u },
     { 0x27a420u, 0xC0000010u, 0xC0000001u },
+    /* Force the display version parser's major to 5 so it indexes the
+     * table[5] row instead of table[0] (null when the GPU version is not
+     * available). RVA 0xacb80 is `lsr w21,w8,#0x1c`; mov w21,#5 keeps the
+     * rest of the parse unchanged. Diagnostic experiment only. */
+    { 0xacb80u, 0x531C7D15u, 0x528000B5u },
 };
-_Static_assert(sizeof(kQcdxPatch) / sizeof(kQcdxPatch[0]) == 6,
-               "qwin is six 20-byte windows");
+_Static_assert(sizeof(kQcdxPatch) / sizeof(kQcdxPatch[0]) == 7,
+               "qwin is seven 20-byte windows");
 
 NTKERNELAPI NTSTATUS MmProtectMdlSystemAddress(PMDL mdl, ULONG protect);
 
@@ -1476,6 +1796,86 @@ InstallFillHook(PUCHAR base)
     }
 }
 
+/* qcdx's log wrapper at RVA 0x10920 moves its event code into w2 and calls
+ * FUN_140107d8 through the bl at RVA 0x10950. Redirecting that one bl
+ * records the code and then calls the original target. A direct bl is not
+ * a BTI-checked indirect branch, so bti c is only a safety landing pad. */
+__attribute__((naked)) static VOID
+LogThunk(VOID)
+{
+    __asm__ volatile(
+        "bti c\n\t"
+        /* site = wrapper's caller, still at [sp+8]. */
+        "ldr x15, [sp, #8]\n\t"
+        /* idx = gLogCount++ & 15 */
+        "adrp x16, gLogCount\n\t"
+        "ldr w17, [x16, :lo12:gLogCount]\n\t"
+        "add w14, w17, #1\n\t"
+        "str w14, [x16, :lo12:gLogCount]\n\t"
+        "and w14, w17, #15\n\t"
+        "lsl w14, w14, #2\n\t"
+        "adrp x16, gLogRing\n\t"
+        "add x16, x16, :lo12:gLogRing\n\t"
+        "add x16, x16, x14\n\t"
+        "str w2, [x16]\n\t"
+        "adrp x16, gSiteRing\n\t"
+        "add x16, x16, :lo12:gSiteRing\n\t"
+        "add x16, x16, x14\n\t"
+        "str w15, [x16]\n\t"
+        "adrp x16, gLogSeen\n\t"
+        "ldr w17, [x16, :lo12:gLogSeen]\n\t"
+        "add w17, w17, #1\n\t"
+        "str w17, [x16, :lo12:gLogSeen]\n\t"
+        /* x30 at entry is the wrapper's return site; blr below clobbers it. */
+        "str x30, [sp, #-16]!\n\t"
+        "adrp x16, gLogReal\n\t"
+        "ldr x16, [x16, :lo12:gLogReal]\n\t"
+        "blr x16\n\t"
+        "ldr x30, [sp], #16\n\t"
+        "ret\n\t");
+}
+
+#define QCDX_LOG_BL_RVA     0x10950u
+#define QCDX_LOG_CALLEE_RVA 0x107d8u
+
+/* Runs once per load from the same PASSIVE contexts as InstallFillHook.
+ * The original bl is checked before writing; a mismatch leaves qcdx
+ * untouched. The thunk must be within the +-128 MB bl range. */
+static VOID
+InstallLogHook(PUCHAR base)
+{
+    ULONG *slot = (ULONG *)(base + QCDX_LOG_BL_RVA);
+    ULONG cur = 0;
+    ULONG stat = 0;
+    ULONG detail = 0;
+    LONG_PTR delta;
+    ULONG want;
+
+    if (InterlockedCompareExchange(&gLogHooked, 1, 0) != 0)
+        return;
+    __try {
+        cur = *slot;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        gLogInstall = 9;
+        return;
+    }
+    if (cur != 0x97FFFFA2u) {
+        gLogInstall = 3;
+        return;
+    }
+    delta = (LONG_PTR)LogThunk - (LONG_PTR)slot;
+    if (delta < -(1LL << 27) || delta >= (1LL << 27)) {
+        gLogInstall = 8;
+        return;
+    }
+    want = 0x94000000u | ((ULONG)(delta >> 2) & 0x03FFFFFFu);
+    gLogReal = base + QCDX_LOG_CALLEE_RVA;
+    if (WriteQcdx(slot, want, &stat, &detail))
+        gLogInstall = 1;
+    else
+        gLogInstall = 0x10u | (stat & 0xFu);
+}
+
 #define WALK_OK 0u
 #define WALK_NOT_KERNEL 1u
 #define WALK_GRANULE 2u
@@ -1585,13 +1985,13 @@ PatchQcdx(PUCHAR base, BOOLEAN defer)
     ULONG fault = 0;
     ULONG prs = 0;
     ULONG rd = 0;
-    UCHAR win[6][20];
-    ULONG exc[6];
-    ULONG xi0[6];
-    ULONG wstat[6];
-    ULONG wprot[6];
-    ULONG wlk[6];
-    ULONG64 pte[6];
+    UCHAR win[7][20];
+    ULONG exc[7];
+    ULONG xi0[7];
+    ULONG wstat[7];
+    ULONG wprot[7];
+    ULONG wlk[7];
+    ULONG64 pte[7];
     ULONG64 tcr = 0;
     ULONG64 ttbr = 0;
     ULONG tcrExc = 0;
@@ -1692,16 +2092,16 @@ PatchQcdx(PUCHAR base, BOOLEAN defer)
         RtlCopyMemory(gPendWstat, wstat, sizeof(gPendWstat));
         RtlCopyMemory(gPendWprot, wprot, sizeof(gPendWprot));
         gPendMask = mask;
-        gPendStep = mask == 0x3fu ? 0x65u : 0x64u;
+        gPendStep = mask == 0x7fu ? 0x65u : 0x64u;
         gPendValid = 1;
-        if (mask != 0x3fu)
+        if (mask != 0x7fu)
             InterlockedExchange(&gPatched, 0);
         return;
     }
     PutBin(L"wstat", wstat, sizeof(wstat));
     PutBin(L"wprot", wprot, sizeof(wprot));
     Put(L"qpatch", mask);
-    if (mask != 0x3fu) {
+    if (mask != 0x7fu) {
         InterlockedExchange(&gPatched, 0);
         Step(0x64);
     } else {
@@ -1889,6 +2289,8 @@ OnLoad(PUNICODE_STRING name, HANDLE pid, PIMAGE_INFO info)
     if (gNirq == PASSIVE_LEVEL) {
         PatchQcdx((PUCHAR)info->ImageBase, TRUE);
         InstallFillHook((PUCHAR)info->ImageBase);
+        InstallLogHook((PUCHAR)info->ImageBase);
+        QueueDiag();
     }
 out:
     if (big || loose)
@@ -1917,6 +2319,7 @@ NoteCaller(ULONG_PTR ret)
     if (base) {
         PatchQcdx(base, FALSE);
         InstallFillHook(base);
+        InstallLogHook(base);
     }
     if (InterlockedCompareExchange(&gHooked, 1, 0) != 0)
         return;
@@ -1929,6 +2332,100 @@ NoteCaller(ULONG_PTR ret)
     }
 }
 
+/* Write the DSDT override (GPU0 + _ROM/PCFG) into the ACPI Parameters key.
+ * The ACPI driver reads that key during boot, so the table takes effect on
+ * the NEXT boot; the current boot keeps the old one. Layout matches what
+ * asl.exe /loadtable writes:
+ *   00000000: u32 total_len, 0, 0, data_len0; then up to 7152 table bytes
+ *   0000000N: u32 table_offset, data_len; then up to 7160 table bytes
+ * Action=0 (REG_DWORD) marks the table loadable. Leftover chunks from an
+ * older, larger overlay are deleted. Read the result back as
+ * ovins/ovlen/ovflt in Services\dagusmmu\Parameters. */
+#define OV_CHUNK0 7152u
+#define OV_CHUNKN 7160u
+#define OV_MAXVAL 16u
+
+static VOID
+EnsureDsdtOverride(VOID)
+{
+    UNICODE_STRING keyName;
+    UNICODE_STRING valName;
+    OBJECT_ATTRIBUTES oa;
+    HANDLE hKey = NULL;
+    NTSTATUS st;
+    PUCHAR buf;
+    WCHAR nameBuf[9];
+    ULONG pos = 0;
+    ULONG idx = 0;
+    ULONG total = DAGU_DSDT_OV_LEN;
+    ULONG i;
+
+    buf = ExAllocatePoolWithTag(NonPagedPoolNx, 16 + OV_CHUNKN, 'VODG');
+    if (!buf) {
+        gOvFlt = 0xC0000017u;
+        return;
+    }
+    RtlInitUnicodeString(&keyName,
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\ACPI"
+        L"\\Parameters\\DSDT\\QCOMM_\\SM8250_\\00000004");
+    InitializeObjectAttributes(&oa, &keyName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL, NULL);
+    st = ZwCreateKey(&hKey, KEY_SET_VALUE | KEY_QUERY_VALUE, &oa, 0, NULL,
+                     REG_OPTION_NON_VOLATILE, NULL);
+    if (!NT_SUCCESS(st)) {
+        gOvFlt = (ULONG)st;
+        ExFreePoolWithTag(buf, 'VODG');
+        return;
+    }
+    while (pos < total && idx < OV_MAXVAL) {
+        ULONG hdr = idx ? 8u : 16u;
+        ULONG cap = idx ? OV_CHUNKN : OV_CHUNK0;
+        ULONG n = total - pos;
+
+        if (n > cap)
+            n = cap;
+        if (idx == 0) {
+            *(ULONG *)(buf + 0) = total;
+            *(ULONG *)(buf + 4) = 0;
+            *(ULONG *)(buf + 8) = 0;
+            *(ULONG *)(buf + 12) = n;
+        } else {
+            *(ULONG *)(buf + 0) = pos;
+            *(ULONG *)(buf + 4) = n;
+        }
+        RtlCopyMemory(buf + hdr, gDsdtOv + pos, n);
+        for (i = 0; i < 8; i++)
+            nameBuf[i] = L"0123456789ABCDEF"[(idx >> (28 - 4 * i)) & 0xF];
+        nameBuf[8] = 0;
+        RtlInitUnicodeString(&valName, nameBuf);
+        st = ZwSetValueKey(hKey, &valName, 0, REG_BINARY, buf, hdr + n);
+        if (!NT_SUCCESS(st)) {
+            gOvFlt = (ULONG)st;
+            break;
+        }
+        gOvIns++;
+        pos += n;
+        idx++;
+    }
+    /* Drop chunks left over from a previous overlay. */
+    for (; idx < OV_MAXVAL; idx++) {
+        for (i = 0; i < 8; i++)
+            nameBuf[i] = L"0123456789ABCDEF"[(idx >> (28 - 4 * i)) & 0xF];
+        nameBuf[8] = 0;
+        RtlInitUnicodeString(&valName, nameBuf);
+        ZwDeleteValueKey(hKey, &valName);
+    }
+    {
+        ULONG zero = 0;
+        RtlInitUnicodeString(&valName, L"Action");
+        ZwSetValueKey(hKey, &valName, 0, REG_DWORD, &zero, sizeof(zero));
+    }
+    gOvLen = total;
+    ZwClose(hKey);
+    ExFreePoolWithTag(buf, 'VODG');
+}
+
 NTSTATUS
 DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
 {
@@ -1938,8 +2435,13 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
     gBootGen = GetDword(L"bootgen", 0) + 1;
     gRstOnFail = GetDword(L"rstonfail", 0);
     ExInitializeWorkItem(&gNoteItem, FlushNote, NULL);
+    ExInitializeWorkItem(&gDiagItem, DiagWorker, NULL);
     ClearStale();
     Step(0x10);
+    /* Do not rewrite the 53 KB ACPI override every boot: with the
+     * rstonfail bugcheck/reset it tore the SYSTEM hive (0xc000014c). The
+     * restored hive already carries the 8-chunk overlay. */
+    WriteDiag(0, 0, 0);
     if (!NT_SUCCESS(PsSetLoadImageNotifyRoutine(OnLoad)))
         Step(0x11);
     drv->DriverExtension->AddDevice = AddDevice;

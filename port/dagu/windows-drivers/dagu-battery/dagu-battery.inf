@@ -12,7 +12,7 @@ Signature   = "$WINDOWS NT$"
 Class       = Battery
 ClassGuid   = {72631e54-78a4-11d0-bcf7-00aa00b7b32a}
 Provider    = %Mfg%
-DriverVer   = 10/30/2026,1.0.0.2
+DriverVer   = 11/09/2026,1.0.0.5
 CatalogFile = dagu-battery.cat
 PnpLockdown = 1
 

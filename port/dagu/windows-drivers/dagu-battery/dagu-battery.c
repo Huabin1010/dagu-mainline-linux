@@ -15,15 +15,33 @@
  *
  * Charger presence comes from PM8150B (SPMI SID 2) USBIN_INT_RT_STS and
  * POWER_PATH_STATUS, read through the SPMI arbiter observer channel the
- * same way dagu-pwrkey reads PON. This driver never writes a PMIC register
- * and never drives the fg-disable pins (gpio117/gpio91); it only reports
- * their level in the diagnostics file \SystemRoot\dagu-battery.txt.
+ * same way dagu-pwrkey reads PON. The poll path never writes a PMIC
+ * register and never drives the fg-disable pins (gpio117/gpio91); it only
+ * reports their level in the diagnostics file \SystemRoot\dagu-battery.txt.
+ *
+ * Shutdown is the one write. Windows turns the panel off and then waits
+ * in a firmware power-off that does not release PS_HOLD, so the rails stay
+ * up and a short power press has nobody to service it. The last-chance
+ * shutdown IRP programs PM8150 PON (see pon-off.h) and writes 0 to
+ * PS_HOLD at 0x0C264000, which is the Linux msm-poweroff sequence.
+ * The poll thread is joined for at most SHUTDOWN_JOIN_MS. It rewrites the
+ * diagnostic file, and this callback runs after the filesystems stop, so
+ * waiting until that write returns never comes back and PS_HOLD stays high.
  *
  * Any read failure keeps the last good snapshot; with no good snapshot the
  * miniport reports no battery. Nothing here can block the boot.
+ *
+ * IOCTL 0x294050 (charging-source change) is a wait. CAD.sys resends it
+ * from the completion routine when the status is success. Completing it
+ * in this dispatch, or forwarding it to the ACPI PDO which completes it
+ * inline, nests that resend until bugcheck 0x2B. The IRP stays parked
+ * until USBIN presence changes; the poll thread completes it then.
  */
 #include <ntddk.h>
 #include <batclass.h>
+#include "charge-wait.h"
+#include "pon-off.h"
+#include "shutdown-join.h"
 
 /* ------------------------------ hardware -------------------------------- */
 #define TLMM_NORTH      0x0F900000ULL
@@ -61,7 +79,15 @@
 #define ARB_FEATURES    0x0004u
 #define ARB_CMD         0x00u
 #define ARB_STATUS      0x08u
+#define ARB_WDATA0      0x10u
 #define ARB_RDATA0      0x18u
+#define CHNL_PHYS       0x0C600000ULL
+#define CHNL_STRIDE     0x10000ULL
+#define PSHOLD_PHYS     0x0C264000ULL
+#define PON_PPID        0x0008u
+#define PON_REV2        0x01u
+#define PON_CTL         0x5au
+#define PON_CTL2        0x5bu
 #define ARB_V5_MIN      0x50000000u
 #define ARB_V7_MIN      0x70000000u
 #define ARB_OP_EXT_READ 13u
@@ -125,7 +151,9 @@ typedef struct _BAT_EXT {
     BUS Bus[2];
     PUCHAR Pin[4];          /* gpio28, 29, 36, 37 */
     PUCHAR Dis[2];          /* gpio117, gpio91 (read only) */
-    PUCHAR Core, Obs, Cnfg;
+    PUCHAR Core, Obs, Cnfg, Chnl, PsHold;
+    ULONG PonApid;
+    BOOLEAN PonOk;
     ULONG Apid[SP_N];
     BOOLEAN ApidOk[SP_N];
     UCHAR Sp[SP_N];
@@ -135,9 +163,17 @@ typedef struct _BAT_EXT {
     PKTHREAD Thread;
     BOOLEAN Run;
     ULONG Iter, Notifies, SpErr;
+    PIRP ChargeIrp;             /* parked IOCTL 0x294050, at most one */
+    PIRP ChargeDead;            /* unlinked by cancel; completed at PASSIVE */
+    CHARGE_WAIT ChargeWait;
+    ULONG ChargeDone;
 } BAT_EXT, *PBAT_EXT;
 
 static ULONG64 gTicksPerUs = 19;
+
+static PIRP DequeueChargeLocked(PBAT_EXT X);
+static VOID FinishCharge(PIRP Irp, NTSTATUS St, BOOLEAN Online);
+static LONG gShutdownReset;
 #define HALF_US     10u             /* 50 kHz */
 #define STRETCH_US  5000u
 
@@ -399,6 +435,34 @@ FindApid(PBAT_EXT X, USHORT Ppid, ULONG *Apid)
     return TRUE;
 }
 
+/* Writable channel only. A fallback APID is owned by another execution
+ * environment; a write there is dropped and the PMIC byte does not change. */
+static BOOLEAN
+FindOwner0(PBAT_EXT X, USHORT Ppid, ULONG *Apid)
+{
+    ULONG ver, count, i, off, reg;
+
+    ver = Rd(X->Core, ARB_VERSION);
+    if (ver < ARB_V5_MIN || ver >= ARB_V7_MIN)
+        return FALSE;
+    count = Rd(X->Core, ARB_FEATURES) & 0x7FFu;
+    if (count == 0 || count > 512)
+        count = 512;
+    for (i = 0; i < count; i++) {
+        off = 0x900u + 4u * i;
+        if (off >= CORE_LIMIT)
+            break;
+        reg = Rd(X->Core, off);
+        if (reg == 0 || ((reg >> 8) & 0xFFFu) != Ppid)
+            continue;
+        if ((Rd(X->Cnfg, 0x700u + 4u * i) & 7u) == 0) {
+            *Apid = i;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static BOOLEAN
 SpmiRead(PBAT_EXT X, ULONG Apid, USHORT Addr, UCHAR *Out)
 {
@@ -420,6 +484,38 @@ SpmiRead(PBAT_EXT X, ULONG Apid, USHORT Addr, UCHAR *Out)
             return TRUE;
         }
         KeStallExecutionProcessor(1);
+    }
+    return FALSE;
+}
+
+/* One-byte EXT_WRITEL on the read/write channel page. EXT_WRITE (opcode 2)
+ * completes and leaves the PMIC byte unchanged for addresses above 0xFF. */
+static BOOLEAN
+SpmiWriteLong(PUCHAR Ch, USHORT Addr, UCHAR Val)
+{
+    ULONG spins, st, saw;
+
+    st = 0;
+    for (spins = 0; spins < 2000; spins++) {
+        st = Rd(Ch, ARB_STATUS);
+        if (st & 1u)
+            break;
+        KeStallExecutionProcessor(1);
+    }
+    if ((st & 1u) == 0)
+        return FALSE;
+    WRITE_REGISTER_ULONG((PULONG)(Ch + ARB_WDATA0), Val);
+    WRITE_REGISTER_ULONG((PULONG)(Ch + ARB_CMD), pon_cmd(Addr));
+    saw = 0;
+    for (spins = 0; spins < 2000; spins++) {
+        st = Rd(Ch, ARB_STATUS);
+        if ((st & 1u) == 0) {
+            saw = 1;
+            continue;
+        }
+        if (!saw)
+            continue;
+        return (st & 0xEu) == 0;
     }
     return FALSE;
 }
@@ -563,6 +659,8 @@ WriteDiag(PBAT_EXT X)
     AppU(&p, e, X->Iter);
     AppS(&p, e, " notifies=");
     AppU(&p, e, X->Notifies);
+    AppS(&p, e, " charge_done=");
+    AppU(&p, e, X->ChargeDone);
     AppS(&p, e, "\nsnap valid=");
     AppU(&p, e, s.Valid);
     AppS(&p, e, " online=");
@@ -665,6 +763,8 @@ ThreadMain(PVOID Context)
     RtlZeroMemory(&prev, sizeof(prev));
     t.QuadPart = -(LONGLONG)POLL_MS * 10000;
     for (;;) {
+        if (KeReadStateEvent(&X->Stop))
+            break;
         read = (X->Iter % FG_EVERY) == 0;
         if (read) {
             ReadCell(&X->Bus[0], &X->Cell[0]);
@@ -673,6 +773,23 @@ ThreadMain(PVOID Context)
         ReadCharger(X);
         Combine(X, read);
         cur = GetSnap(X);
+        {
+            PIRP irp = NULL, dead = NULL;
+            KIRQL irql;
+
+            KeAcquireSpinLock(&X->Lock, &irql);
+            dead = X->ChargeDead;
+            X->ChargeDead = NULL;
+            if (charge_wait_on_sample(&X->ChargeWait, cur.Online))
+                irp = DequeueChargeLocked(X);
+            KeReleaseSpinLock(&X->Lock, irql);
+            if (dead)
+                FinishCharge(dead, STATUS_CANCELLED, FALSE);
+            if (irp) {
+                FinishCharge(irp, STATUS_SUCCESS, cur.Online);
+                X->ChargeDone++;
+            }
+        }
         if (X->Class &&
             (cur.Valid != prev.Valid || cur.Online != prev.Online || cur.Soc != prev.Soc ||
              cur.Full != prev.Full || (X->Iter % NOTIFY_EVERY) == NOTIFY_EVERY - 1)) {
@@ -680,7 +797,7 @@ ThreadMain(PVOID Context)
             BatteryClassStatusNotify(X->Class);
         }
         prev = cur;
-        if ((X->Iter % DIAG_EVERY) == 0)
+        if ((X->Iter % DIAG_EVERY) == 0 && !KeReadStateEvent(&X->Stop))
             WriteDiag(X);
         X->Iter++;
         if (KeWaitForSingleObject(&X->Stop, Executive, KernelMode, FALSE, &t) == STATUS_SUCCESS)
@@ -868,6 +985,9 @@ UnmapAll(PBAT_EXT X)
     if (X->Core) { MmUnmapIoSpace(X->Core, CORE_SIZE); X->Core = NULL; }
     if (X->Obs) { MmUnmapIoSpace(X->Obs, OBS_SIZE); X->Obs = NULL; }
     if (X->Cnfg) { MmUnmapIoSpace(X->Cnfg, CNFG_SIZE); X->Cnfg = NULL; }
+    if (X->Chnl) { MmUnmapIoSpace(X->Chnl, PIN_SIZE); X->Chnl = NULL; }
+    if (X->PsHold) { MmUnmapIoSpace(X->PsHold, PIN_SIZE); X->PsHold = NULL; }
+    X->PonOk = FALSE;
 }
 
 static VOID
@@ -884,6 +1004,21 @@ StopDevice(PBAT_EXT X)
         X->Thread = NULL;
         X->ThreadHandle = NULL;
         X->Run = FALSE;
+    }
+    {
+        PIRP irp, dead;
+        KIRQL irql;
+
+        KeAcquireSpinLock(&X->Lock, &irql);
+        charge_wait_cancel(&X->ChargeWait);
+        irp = DequeueChargeLocked(X);
+        dead = X->ChargeDead;
+        X->ChargeDead = NULL;
+        KeReleaseSpinLock(&X->Lock, irql);
+        if (dead)
+            FinishCharge(dead, STATUS_CANCELLED, FALSE);
+        if (irp)
+            FinishCharge(irp, STATUS_CANCELLED, FALSE);
     }
     if (X->Class) {
         BatteryClassUnload(X->Class);
@@ -924,6 +1059,15 @@ StartDevice(PBAT_EXT X)
         for (i = 0; i < SP_N; i++)
             X->ApidOk[i] = FindApid(X, (USHORT)((PMIC_SID << 8) | (gSpAddr[i] >> 8)),
                                     &X->Apid[i]);
+        if (FindOwner0(X, PON_PPID, &X->PonApid)) {
+            X->Chnl = MapPage(CHNL_PHYS + CHNL_STRIDE * X->PonApid, PIN_SIZE);
+            X->PsHold = MapPage(PSHOLD_PHYS, PIN_SIZE);
+            X->PonOk = X->Chnl && X->PsHold;
+            if (!X->PonOk) {
+                if (X->Chnl) { MmUnmapIoSpace(X->Chnl, PIN_SIZE); X->Chnl = NULL; }
+                if (X->PsHold) { MmUnmapIoSpace(X->PsHold, PIN_SIZE); X->PsHold = NULL; }
+            }
+        }
     } else {
         if (X->Core) { MmUnmapIoSpace(X->Core, CORE_SIZE); X->Core = NULL; }
         if (X->Obs) { MmUnmapIoSpace(X->Obs, OBS_SIZE); X->Obs = NULL; }
@@ -989,6 +1133,7 @@ AddDevice(_In_ PDRIVER_OBJECT Drv, _In_ PDEVICE_OBJECT Pdo)
     }
     fdo->Flags |= DO_POWER_PAGABLE | DO_BUFFERED_IO;
     fdo->Flags &= ~DO_DEVICE_INITIALIZING;
+    IoRegisterLastChanceShutdownNotification(fdo);
     return STATUS_SUCCESS;
 }
 
@@ -1036,6 +1181,7 @@ PnpDispatch(_In_ PDEVICE_OBJECT Fdo, _In_ PIRP Irp)
         PDEVICE_OBJECT lower = X->Lower;
 
         StopDevice(X);
+        IoUnregisterShutdownNotification(Fdo);
         Irp->IoStatus.Status = STATUS_SUCCESS;
         IoSkipCurrentIrpStackLocation(Irp);
         st = IoCallDriver(lower, Irp);
@@ -1048,11 +1194,97 @@ PnpDispatch(_In_ PDEVICE_OBJECT Fdo, _In_ PIRP Irp)
     }
 }
 
+static BOOLEAN
+PonProgram(PBAT_EXT X, ULONG Type)
+{
+    UCHAR rev, ctl, ctl2, got;
+    USHORT base;
+
+    if (!X->PonOk || !X->Chnl)
+        return FALSE;
+    base = PON_PPID << 8;
+    if (!SpmiRead(X, X->PonApid, (USHORT)(base + PON_REV2), &rev) ||
+        !SpmiRead(X, X->PonApid, (USHORT)(base + PON_CTL), &ctl) ||
+        !SpmiRead(X, X->PonApid, (USHORT)(base + PON_CTL2), &ctl2))
+        return FALSE;
+    if (rev == 0) {
+        if (!SpmiWriteLong(X->Chnl, PON_CTL, (UCHAR)pon_enable_clear(ctl)))
+            return FALSE;
+        KeStallExecutionProcessor(1000);
+        if (!SpmiWriteLong(X->Chnl, PON_CTL,
+                           (UCHAR)pon_enable_set(pon_with_type(ctl, Type))))
+            goto restore;
+    } else {
+        if (!SpmiWriteLong(X->Chnl, PON_CTL2, (UCHAR)pon_enable_clear(ctl2)))
+            return FALSE;
+        KeStallExecutionProcessor(1000);
+        if (!SpmiWriteLong(X->Chnl, PON_CTL, (UCHAR)pon_with_type(ctl, Type)))
+            goto restore;
+        if (!SpmiWriteLong(X->Chnl, PON_CTL2, (UCHAR)pon_enable_set(ctl2)))
+            goto restore;
+    }
+    if (!SpmiRead(X, X->PonApid, (USHORT)(base + PON_CTL), &got) ||
+        (got & PON_TYPE_MASK) != (Type & PON_TYPE_MASK))
+        goto restore;
+    return TRUE;
+restore:
+    SpmiWriteLong(X->Chnl, PON_CTL, ctl);
+    if (rev != 0)
+        SpmiWriteLong(X->Chnl, PON_CTL2, ctl2);
+    return FALSE;
+}
+
+static int
+JoinPoll(PBAT_EXT X)
+{
+    LARGE_INTEGER budget;
+
+    if (!X->Run)
+        return 1;
+    KeSetEvent(&X->Stop, IO_NO_INCREMENT, FALSE);
+    budget.QuadPart = -(LONGLONG)SHUTDOWN_JOIN_MS * 10000;
+    if (!X->Thread)
+        return 1;
+    if (KeWaitForSingleObject(X->Thread, Executive, KernelMode, FALSE,
+                              &budget) == STATUS_TIMEOUT)
+        return 0;
+    /* Exited. Leave the mapping in place: power-off is next, and a
+     * timeout path must not unmap pages the thread may still touch. */
+    X->Run = FALSE;
+    return 1;
+}
+
+static NTSTATUS
+ShutdownDispatch(_In_ PDEVICE_OBJECT Fdo, _In_ PIRP Irp)
+{
+    PBAT_EXT X = Fdo->DeviceExtension;
+    ULONG type = pon_type(gShutdownReset == 1);
+    int joined = JoinPoll(X);
+
+    /* A failed program leaves the hard-reset type in place. Do not drop
+     * PS_HOLD then: that would reboot instead of staying off.
+     * joined == 0 means the diagnostic write is still blocked in the
+     * filesystem. Cut power anyway. */
+    if (shutdown_cut_after_join(joined) && PonProgram(X, type) && X->PsHold) {
+        WRITE_REGISTER_ULONG((PULONG)X->PsHold, 0);
+        for (;;)
+            KeStallExecutionProcessor(10000);
+    }
+    return Complete(Irp, STATUS_SUCCESS);
+}
+
 static NTSTATUS
 PowerDispatch(_In_ PDEVICE_OBJECT Fdo, _In_ PIRP Irp)
 {
     PBAT_EXT X = Fdo->DeviceExtension;
+    PIO_STACK_LOCATION sp = IoGetCurrentIrpStackLocation(Irp);
 
+    if (sp->MinorFunction == IRP_MN_SET_POWER &&
+        sp->Parameters.Power.Type == SystemPowerState &&
+        sp->Parameters.Power.State.SystemState == PowerSystemShutdown)
+        InterlockedExchange(&gShutdownReset,
+                            sp->Parameters.Power.ShutdownType ==
+                            PowerActionShutdownReset ? 1 : 0);
     PoStartNextPowerIrp(Irp);
     IoSkipCurrentIrpStackLocation(Irp);
     return PoCallDriver(X->Lower, Irp);
@@ -1065,12 +1297,102 @@ CreateClose(_In_ PDEVICE_OBJECT Fdo, _In_ PIRP Irp)
     return Complete(Irp, STATUS_SUCCESS);
 }
 
+/* Called with X->Lock held. The caller completes the returned IRP. */
+static PIRP
+DequeueChargeLocked(PBAT_EXT X)
+{
+    PIRP irp = X->ChargeIrp;
+
+    X->ChargeIrp = NULL;
+    if (irp)
+        IoSetCancelRoutine(irp, NULL);
+    return irp;
+}
+
+static VOID
+FinishCharge(PIRP Irp, NTSTATUS St, BOOLEAN Online)
+{
+    CHARGE_SOURCE_INFO info;
+
+    Irp->IoStatus.Information = 0;
+    if (NT_SUCCESS(St) && Irp->AssociatedIrp.SystemBuffer) {
+        charge_source_fill(&info, Online);
+        RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, &info, sizeof(info));
+        Irp->IoStatus.Information = sizeof(info);
+    }
+    Irp->IoStatus.Status = St;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
+static VOID
+CancelCharge(_In_ PDEVICE_OBJECT Fdo, _In_ PIRP Irp)
+{
+    PBAT_EXT X = Fdo->DeviceExtension;
+    KIRQL irql;
+    BOOLEAN ours;
+
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+    KeAcquireSpinLock(&X->Lock, &irql);
+    ours = (X->ChargeIrp == Irp);
+    if (ours) {
+        X->ChargeIrp = NULL;
+        charge_wait_cancel(&X->ChargeWait);
+        X->ChargeDead = Irp;
+    }
+    KeReleaseSpinLock(&X->Lock, irql);
+}
+
+/* Park the charging-source wait. Success would make CAD.sys resend from
+ * inside this dispatch, so a duplicate is completed with a failure status
+ * and the new IRP stays pending until the poll thread sees a real change. */
+static NTSTATUS
+ParkCharge(PBAT_EXT X, PIRP Irp)
+{
+    PIO_STACK_LOCATION sp = IoGetCurrentIrpStackLocation(Irp);
+    KIRQL irql;
+    PIRP old = NULL;
+    BOOLEAN online, cancelled;
+
+    if (sp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(CHARGE_SOURCE_INFO) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL)
+        return Complete(Irp, STATUS_BUFFER_TOO_SMALL);
+
+    IoMarkIrpPending(Irp);
+    KeAcquireSpinLock(&X->Lock, &irql);
+    online = X->Snap.Online;
+    IoSetCancelRoutine(Irp, CancelCharge);
+    old = X->ChargeIrp;
+    X->ChargeIrp = Irp;
+    charge_wait_park(&X->ChargeWait, online);
+    cancelled = Irp->Cancel && IoSetCancelRoutine(Irp, NULL) != NULL;
+    if (cancelled) {
+        X->ChargeIrp = NULL;
+        charge_wait_cancel(&X->ChargeWait);
+        if (old) {
+            X->ChargeIrp = old;
+            charge_wait_park(&X->ChargeWait, online);
+            old = NULL;
+        }
+    } else if (old) {
+        IoSetCancelRoutine(old, NULL);
+    }
+    KeReleaseSpinLock(&X->Lock, irql);
+    if (cancelled)
+        FinishCharge(Irp, STATUS_CANCELLED, FALSE);
+    if (old)
+        FinishCharge(old, STATUS_CANCELLED, FALSE);
+    return STATUS_PENDING;
+}
+
 static NTSTATUS
 DeviceControl(_In_ PDEVICE_OBJECT Fdo, _In_ PIRP Irp)
 {
     PBAT_EXT X = Fdo->DeviceExtension;
     NTSTATUS st = STATUS_NOT_SUPPORTED;
 
+    if (IoGetCurrentIrpStackLocation(Irp)->Parameters.DeviceIoControl.IoControlCode ==
+        CHARGE_SOURCE_IOCTL)
+        return ParkCharge(X, Irp);
     if (X->Class)
         st = BatteryClassIoctl(X->Class, Irp);   /* completes the IRP itself */
     if (st == STATUS_NOT_SUPPORTED)
@@ -1106,6 +1428,7 @@ DriverEntry(_In_ PDRIVER_OBJECT Drv, _In_ PUNICODE_STRING RegistryPath)
     Drv->MajorFunction[IRP_MJ_SYSTEM_CONTROL] = SystemControl;
     Drv->MajorFunction[IRP_MJ_PNP] = PnpDispatch;
     Drv->MajorFunction[IRP_MJ_POWER] = PowerDispatch;
+    Drv->MajorFunction[IRP_MJ_SHUTDOWN] = ShutdownDispatch;
     Drv->DriverUnload = Unload;
     Drv->DriverExtension->AddDevice = AddDevice;
     return STATUS_SUCCESS;

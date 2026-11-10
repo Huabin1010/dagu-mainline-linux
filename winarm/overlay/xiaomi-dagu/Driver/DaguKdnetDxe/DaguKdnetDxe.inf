@@ -1,0 +1,35 @@
+## @file
+#  Publish DBG2 for the Type-C DWC3 and stop UsbFn at ExitBootServices.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = DaguKdnetDxe
+  FILE_GUID                      = 3f8c1a60-9e24-4b17-8d55-6a0c2e91b4d7
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = DaguKdnetDxeInitialize
+
+[Sources.common]
+  DaguKdnetDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  ArmPkg/ArmPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Guids]
+  gEfiEventExitBootServicesGuid
+
+[Protocols]
+  gEfiAcpiTableProtocolGuid
+  gEfiUsbFunctionIoProtocolGuid
+
+[Depex]
+  gEfiAcpiTableProtocolGuid

@@ -61,6 +61,9 @@ echo === registry %TIME% >> %LOG%
 reg load HKLM\OFFSYS W:\Windows\System32\config\SYSTEM >> %LOG% 2>&1
 reg add HKLM\OFFSYS\ControlSet001\Control\CrashControl /v AutoReboot /t REG_DWORD /d 0 /f >> %LOG% 2>&1
 reg add HKLM\OFFSYS\ControlSet001\Control\CrashControl /v DisplayParameters /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+rem Do not start the GPU driver on this debug boot. Absent key is left absent.
+reg query HKLM\OFFSYS\ControlSet001\Services\QCDX /v Start >nul 2>&1
+if not errorlevel 1 reg add HKLM\OFFSYS\ControlSet001\Services\QCDX /v Start /t REG_DWORD /d 4 /f >> %LOG% 2>&1
 reg unload HKLM\OFFSYS >> %LOG% 2>&1
 rem Trust the dagu WOA test root CA so the test-signed himax driver loads.
 if exist %M%\woa\rootcert.hex call :trustca
@@ -84,6 +87,13 @@ bcdedit %BCD% /set {default} quietboot no >> %LOG% 2>&1
 rem sos alone is ignored while the boot animation is on; bootux disabled
 rem turns the spinner off so sos prints each driver as it loads.
 bcdedit %BCD% /set {default} bootux disabled >> %LOG% 2>&1
+rem Kernel debug: USB Ethernet Emulation, Aloha host/port/key.
+rem The Windows logo stays up with no spinner until WinDbg connects.
+bcdedit %BCD% /dbgsettings net hostip:169.254.255.255 port:50000 key:1.1.1.1 >> %LOG% 2>&1
+echo dbgsettings rc=%ERRORLEVEL% >> %LOG%
+rem /debug on targets {current}, which WinPE does not have in this store.
+bcdedit %BCD% /set {default} debug on >> %LOG% 2>&1
+echo debug rc=%ERRORLEVEL% >> %LOG%
 bcdedit %BCD% /timeout 0 >> %LOG% 2>&1
 bcdedit %BCD% /enum all >> %LOG% 2>&1
 

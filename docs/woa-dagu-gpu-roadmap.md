@@ -356,3 +356,4 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 [stage17（qcsmmu 写寄存器全图=复位源）](woa-dagu-gpu-stage17-2026-10-31.md)、
 [stage20–22（SMMU 接口/第 25 槽/显示版本门与槽 24/20）](woa-dagu-gpu-stage22-2026-11-08.md)。
 调试/救援：[debug handbook](dagu-woa-debug-handbook.md)。
+下一份工具：[USB（Universal Serial Bus，通用串行总线）上的 KDNET（Kernel Debug Network，内核网络调试）](woa-dagu-kdnet-eem-2026-11-08.md)。

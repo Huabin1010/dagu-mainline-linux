@@ -13,6 +13,7 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiDriverEntryPoint.h>
 #include <Library/UefiLib.h>
+#include <Guid/EventGroup.h>
 #include <IndustryStandard/Usb.h>
 #include <Protocol/UsbFunctionIo.h>
 #include <Protocol/UsbIo.h>
@@ -40,6 +41,8 @@ typedef struct {
 
 STATIC EFI_USBFN_IO_PROTOCOL  *mUsbFn;
 STATIC EFI_EVENT               mTimer;
+STATIC EFI_EVENT               mExitBoot;
+STATIC BOOLEAN                 mControllerStarted;
 STATIC BOOLEAN                 mConfigured;
 STATIC BOOLEAN                 mTxBusy;
 STATIC UINT8                  *mTxBuf;
@@ -328,6 +331,7 @@ DaguCdcStart (
   if (EFI_ERROR (Status) && Status != EFI_ALREADY_STARTED) {
     return Status;
   }
+  mControllerStarted = TRUE;
 
   Status = mUsbFn->GetEndpointMaxPacketSize (
                      mUsbFn,
@@ -359,6 +363,37 @@ DaguCdcStart (
   return EFI_SUCCESS;
 }
 
+STATIC
+VOID
+EFIAPI
+DaguCdcExitBoot (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  (VOID)Event;
+  (VOID)Context;
+
+  if (mTimer != NULL) {
+    gBS->SetTimer (mTimer, TimerCancel, 0);
+    gBS->CloseEvent (mTimer);
+    mTimer = NULL;
+  }
+
+  if (mUsbFn == NULL || !mControllerStarted) {
+    return;
+  }
+
+  mUsbFn->AbortTransfer (mUsbFn, DAGU_CDC_TX_EP, EfiUsbEndpointDirectionDeviceTx);
+  mUsbFn->AbortTransfer (mUsbFn, DAGU_CDC_RX_EP, EfiUsbEndpointDirectionDeviceRx);
+  DEBUG ((
+    DEBUG_ERROR,
+    "dagu CDC-ACM: StopController %r\n",
+    mUsbFn->StopController (mUsbFn)
+    ));
+  mControllerStarted = FALSE;
+}
+
 EFI_STATUS
 EFIAPI
 DaguUsbCdcAcmInitialize (
@@ -385,6 +420,20 @@ DaguUsbCdcAcmInitialize (
   }
 
   Status = DaguCdcStart ();
+  if (mControllerStarted) {
+    EFI_STATUS  ExitStatus;
+    ExitStatus = gBS->CreateEventEx (
+                        EVT_NOTIFY_SIGNAL,
+                        TPL_CALLBACK,
+                        DaguCdcExitBoot,
+                        NULL,
+                        &gEfiEventExitBootServicesGuid,
+                        &mExitBoot
+                        );
+    if (EFI_ERROR (ExitStatus)) {
+      DEBUG ((DEBUG_ERROR, "dagu CDC-ACM: ExitBootServices event %r\n", ExitStatus));
+    }
+  }
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "dagu CDC-ACM: start %r\n", Status));
     return EFI_SUCCESS;
@@ -398,7 +447,7 @@ DaguUsbCdcAcmInitialize (
                   &mTimer
                   );
   if (EFI_ERROR (Status)) {
-    return Status;
+    return mExitBoot != NULL ? EFI_SUCCESS : Status;
   }
 
   Status = gBS->SetTimer (

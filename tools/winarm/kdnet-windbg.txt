@@ -1,0 +1,14 @@
+$$ 内核网络调试验收。主机是另一台 Windows，WinDbg 先听着再让平板进 A 槽。
+$$ 端口 50000，密钥 1.1.1.1，IP 留空。
+$$ 平板会停在 Windows 标志、转圈不出现，直到这里接上。
+
+.sympath srv*
+.reload
+
+$$ 验收断点：启动早期，图形驱动还没加载，不会去配 Adreno 的系统内存管理单元。
+bp nt!Phase1Initialization "r; kb; .echo SAFE-BREAK"
+g
+
+$$ --- 上面停下并继续之后，才下这一条。垫片 Parameters\map 必须是 0。---
+$$ 只记录槽 24 的参数。不要改内存，不要让这次启动去走页表。
+$$ bp qcdxkm8250+0x26772C "r; kb; dps @x0 L8; .echo SLOT24-ARGS"

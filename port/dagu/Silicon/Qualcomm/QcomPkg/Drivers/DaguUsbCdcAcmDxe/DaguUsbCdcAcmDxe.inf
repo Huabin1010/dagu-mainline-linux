@@ -27,6 +27,9 @@
   UefiLib
   CacheMaintenanceLib
 
+[Guids]
+  gEfiEventExitBootServicesGuid
+
 [Protocols]
   gEfiUsbFunctionIoProtocolGuid
 

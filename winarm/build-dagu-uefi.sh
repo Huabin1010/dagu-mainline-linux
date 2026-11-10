@@ -122,6 +122,28 @@ grep -q DaguPcieDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
 	sed -i "s|^\(\s*\).*DaguPlatDxe.inf|&\n\1$PCIE_INF|" "$DEV/xiaomi-dagu/DXE.dsc.inc"
 grep -q DaguPcieDxe "$DEV/xiaomi-dagu/DXE.inc" && grep -q DaguPcieDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
 	{ echo "DaguPcieDxe not registered" >&2; exit 1; }
+# KDNET over the Type-C DWC3. DBG2 names \_SB.URS0 at 0x0A600000; the
+# companion SSDT is the only definition of that device in the default DSDT.
+# ExitBootServices stops UsbFn. No DWC3 register writes.
+KDNET_INF='$(PACKAGE_NAME)/Device/$(TARGET_DEVICE)/Driver/DaguKdnetDxe/DaguKdnetDxe.inf'
+KDNET_DIR="$DEV/xiaomi-dagu/Driver/DaguKdnetDxe"
+python3 "$KDNET_DIR/gen_dbg2.py" "$KDNET_DIR/Dbg2.inc" || { echo "gen_dbg2.py failed" >&2; exit 1; }
+python3 "$KDNET_DIR/test_dbg2_layout.py" || { echo "DBG2 layout check failed" >&2; exit 1; }
+(cd "$KDNET_DIR" && "$IASL_P" -p Urs0Ssdt Urs0Ssdt.asl >/dev/null) || { echo "Urs0Ssdt.asl failed" >&2; exit 1; }
+python3 - "$KDNET_DIR/Urs0Ssdt.aml" "$KDNET_DIR/Urs0Ssdt.inc" <<'PY'
+import sys
+d = open(sys.argv[1], "rb").read()
+if d[:4] != b"SSDT" or b"URS0" not in d:
+    sys.exit("Urs0Ssdt.aml is not the URS0 SSDT")
+open(sys.argv[2], "w").write("".join("  " + ", ".join("0x%02x" % b for b in d[i:i + 16]) + ",\n"
+                                     for i in range(0, len(d), 16)))
+PY
+grep -q DaguKdnetDxe "$DEV/xiaomi-dagu/DXE.inc" || \
+	sed -i "s|^\(\s*\)INF .*DaguPcieDxe.inf|&\n\1INF $KDNET_INF|" "$DEV/xiaomi-dagu/DXE.inc"
+grep -q DaguKdnetDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
+	sed -i "s|^\(\s*\).*DaguPcieDxe.inf|&\n\1$KDNET_INF|" "$DEV/xiaomi-dagu/DXE.dsc.inc"
+grep -q DaguKdnetDxe "$DEV/xiaomi-dagu/DXE.inc" && grep -q DaguKdnetDxe "$DEV/xiaomi-dagu/DXE.dsc.inc" || \
+	{ echo "DaguKdnetDxe not registered" >&2; exit 1; }
 # DSDT: pipa ships a 0-byte DSDT.aml. AcpiPlatformDxe then reads the table
 # Length from an empty RAW section (garbage), asserts Size >= TableSize, and
 # AcpiPlatformChecksum walks off the end of mapped DDR (data abort at

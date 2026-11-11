@@ -32,6 +32,7 @@ bash "$SRC/build-media.sh" umount
 
 cp /root/woa/run-qemu-deploy.sh "$W/run-qemu-deploy.sh"
 cp "$SRC/build-media.sh" "$W/build-media.sh"
+chmod +x "$W/run-qemu-deploy.sh" "$W/build-media.sh"
 cd "$W"
 bash ./run-qemu-deploy.sh >"$W/run.log" 2>&1 || echo "run-qemu-deploy rc=$?" >>"$W/run.log"
 

@@ -116,6 +116,10 @@ dagu 的 UEFI 只有 SimpleFb，没有高通的 `DisplayDxe`，所以不会写�
 
 下一步：从 `0xD3E08` 往后把这 0x78 字节的布局逆出来（已知 `+0x38`、`+0x40`、`+0x48`、`+0x5C` 被读），在 `DaguPlatDxe` 里按 L81A 的真实参数写出 `UEFIDisplayInfo`。这要刷 A 槽的 UEFI，上板前要确认 KTZ8866 背光不会被 qcdx 改走。
 
+布局补充：变量在 GOP（Graphics Output Protocol，图形输出协议）的 GUID 下，公开资料（Linaro 2019 年 `efi/libstub: detect panel-id` 补丁）给出 `+0x00` 是版本（高 16 位为 `0xAA`），`+0x28` 是面板编号。qcdx 只用其中几项：`+0x38` 存成面板编号，`+0x40` 是亮度（1–100），`+0x48`、`+0x5C` 存进显示状态。面板编号随后被二十多个函数使用，说明 qcdx 是拿它去查自带的面板表。L81A 不大可能在这张表里，所以只写这个变量很可能不够。
+
+还有一条没查的入口：`QDIDriverEntry` 里读注册表 `Miniport\PanelOverride`（以及 `Width`、`Height`）。这可能是不刷 UEFI、直接从注册表给面板参数的正路，应当先逆这一条。
+
 ### 关联文档
 
 [阶段 25](woa-dagu-gpu-stage25-2026-11-10.md)、[阶段 19](woa-dagu-gpu-stage19-2026-10-31.md)、[阶段 15](woa-dagu-gpu-stage15-2026-10-31.md)、[适配计划](woa-dagu-gpu-adaptation-plan-2026-11-10.md)、[路线图](woa-dagu-gpu-roadmap.md)。

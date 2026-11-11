@@ -268,6 +268,7 @@ ClearStale(VOID)
         L"io_err", L"io_maps", L"io_iova", L"io_idmiss", L"io_idbytes", L"io_kinds",
         L"io_idwant", L"io_idgot", L"io_leak",
         L"cb0_on", L"cb0_sync", L"cb0_fsr", L"cb0_state", L"pw_cx", L"qcdxoff",
+        L"paths", L"pathn",
         L"ttbr1_lo", L"ttbr1_hi", L"pt1_tables", L"pt1_mapped",
         L"ttbr0_lo", L"ttbr0_hi", L"pt0_tables", L"pt0_mapped",
     };
@@ -1203,6 +1204,16 @@ SiteOf(ULONG_PTR caller, ULONG idx)
 }
 
 /* Values only, no flush. The caller decides when to ZwFlushKey. */
+/* Breadcrumb ring read by FlushRing and by the crash dump. Non-static: the
+ * inline asm below names them, and the compiler cannot see those uses. */
+#define PATH_CAP 32
+ULONG gPathCount;
+ULONG gPathId[PATH_CAP];
+ULONG64 gPathLr[PATH_CAP];
+PVOID gPathReal[8];
+static LONG gPathHooked;
+ULONG gPathInstall;
+
 static VOID
 WriteRing(VOID)
 {
@@ -1255,6 +1266,8 @@ FlushRing(VOID)
     Put(L"io_idgot", gIommuIdGot);
     Put(L"io_leak", (ULONG)gIommuLeak);
     Put(L"io_kinds", gDomKinds);
+    Put(L"paths", gPathInstall);
+    Put(L"pathn", (ULONG)gPathCount);
     Put(L"cb0_on", (ULONG)gCb0On);
     Put(L"cb0_sync", gCb0Sync);
     Put(L"cb0_fsr", gCb0Fsr);
@@ -2626,6 +2639,98 @@ InstallLogHook(PUCHAR base)
         gLogInstall = 0x10u | (stat & 0xFu);
 }
 
+/* ---- temporary breadcrumbs: which qcdx call ran last ---------------------
+ * The 0x124 is an asynchronous SError: its ELR (qcdx+0x2D0430, a pool
+ * release helper) is where the error was taken, not the access that caused
+ * it, and qcdx writes no log record after 0x6E6. These sites record which
+ * call qcdx made last, into memory a crash dump keeps. Measurement only,
+ * not a fix: enter-only, so one id plus the caller's return address says
+ * which path was running when the bus error arrived. */
+/* x9-x17 are caller-saved, so recording them changes nothing for the callee.
+ * w14 is the ring index, w15 the site id, x16/x17 the scratch pair. */
+#define PATH_THUNK(n, idv) \
+    __attribute__((naked)) static VOID PathThunk##n(VOID)                    \
+    {                                                                         \
+        __asm__ volatile(                                                     \
+            "bti c\n\t"                                                       \
+            "adrp x16, gPathCount\n\t"                                        \
+            "ldr w17, [x16, :lo12:gPathCount]\n\t"                            \
+            "add w14, w17, #1\n\t"                                            \
+            "str w14, [x16, :lo12:gPathCount]\n\t"                            \
+            "and w14, w17, #31\n\t"                                           \
+            "adrp x16, gPathId\n\t"                                           \
+            "add x16, x16, :lo12:gPathId\n\t"                                 \
+            "mov w15, #" #idv "\n\t"                                          \
+            "str w15, [x16, w14, uxtw #2]\n\t"                                \
+            "adrp x16, gPathLr\n\t"                                           \
+            "add x16, x16, :lo12:gPathLr\n\t"                                 \
+            "str x30, [x16, w14, uxtw #3]\n\t"                                \
+            "adrp x16, gPathReal\n\t"                                         \
+            "add x16, x16, :lo12:gPathReal\n\t"                               \
+            "ldr x16, [x16, #" #n "*8]\n\t"                                   \
+            "blr x16\n\t"                                                     \
+            "ret\n\t");                                                       \
+    }
+
+PATH_THUNK(0, 1)  /* bl 0x301D4  -> 0xAC9C0, display init entry */
+PATH_THUNK(1, 2)  /* bl 0xAD30C  -> 0xADC00, PMIPower gate */
+PATH_THUNK(2, 4)  /* bl 0xACB3C  -> 0xD5D48, ACPI display resources */
+PATH_THUNK(3, 5)  /* bl 0x2CA8E0 -> 0x2D0430, release caller 1 */
+PATH_THUNK(4, 6)  /* bl 0x2CEB8C -> 0x2D0430, release caller 2 */
+PATH_THUNK(5, 7)  /* bl 0x2D0148 -> 0x2D0430, release caller 3 */
+PATH_THUNK(6, 8)  /* bl 0x2D03A0 -> 0x2D0430, release caller 4 */
+
+typedef struct _PATH_SITE {
+    ULONG Rva;
+    ULONG Target;
+    PVOID Thunk;
+} PATH_SITE;
+
+static const PATH_SITE kPathSite[] = {
+    { 0x301D4u, 0xAC9C0u,  (PVOID)PathThunk0 },
+    { 0xAD30Cu, 0xADC00u,  (PVOID)PathThunk1 },
+    { 0xACB3Cu, 0xD5D48u,  (PVOID)PathThunk2 },
+    { 0x2CA8E0u, 0x2D0430u, (PVOID)PathThunk3 },
+    { 0x2CEB8Cu, 0x2D0430u, (PVOID)PathThunk4 },
+    { 0x2D0148u, 0x2D0430u, (PVOID)PathThunk5 },
+    { 0x2D03A0u, 0x2D0430u, (PVOID)PathThunk6 },
+};
+
+/* Same rule as InstallLogHook: verify the existing bl targets the RVA this
+ * table was derived from, and leave the instruction alone when it does not. */
+static VOID
+InstallPathHooks(PUCHAR base)
+{
+    ULONG i, stat, detail, ok = 0;
+
+    if (InterlockedCompareExchange(&gPathHooked, 1, 0) != 0)
+        return;
+    for (i = 0; i < sizeof(kPathSite) / sizeof(kPathSite[0]); i++) {
+        ULONG *slot = (ULONG *)(base + kPathSite[i].Rva);
+        ULONG cur = 0;
+        ULONG want;
+        LONG_PTR delta;
+        ULONG exp = 0x94000000u |
+                    (((kPathSite[i].Target - kPathSite[i].Rva) >> 2) & 0x03FFFFFFu);
+
+        __try {
+            cur = *slot;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            continue;
+        }
+        if (cur != exp)
+            continue;
+        delta = (LONG_PTR)kPathSite[i].Thunk - (LONG_PTR)slot;
+        if (delta < -(1LL << 27) || delta >= (1LL << 27))
+            continue;
+        want = 0x94000000u | ((ULONG)(delta >> 2) & 0x03FFFFFFu);
+        gPathReal[i] = base + kPathSite[i].Target;
+        if (WriteQcdx(slot, want, &stat, &detail))
+            ok |= 1u << i;
+    }
+    gPathInstall = ok;
+}
+
 #define WALK_OK 0u
 #define WALK_NOT_KERNEL 1u
 #define WALK_GRANULE 2u
@@ -3079,6 +3184,7 @@ OnLoad(PUNICODE_STRING name, HANDLE pid, PIMAGE_INFO info)
         PatchQcdx((PUCHAR)info->ImageBase, TRUE);
         InstallFillHook((PUCHAR)info->ImageBase);
         InstallLogHook((PUCHAR)info->ImageBase);
+        InstallPathHooks((PUCHAR)info->ImageBase);
         QueueDiag();
     }
 out:
@@ -3109,6 +3215,7 @@ NoteCaller(ULONG_PTR ret)
         PatchQcdx(base, FALSE);
         InstallFillHook(base);
         InstallLogHook(base);
+        InstallPathHooks(base);
     }
     if (InterlockedCompareExchange(&gHooked, 1, 0) != 0)
         return;

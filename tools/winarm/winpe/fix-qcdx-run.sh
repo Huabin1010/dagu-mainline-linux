@@ -28,6 +28,7 @@ got=$(wimextract "$W/pe/sources/boot.wim" 1 /Windows/System32/startnet.cmd --to-
 bash "$SRC/build-media.sh" create
 cp -r "$SRC/pkg" /mnt/woa-pe/woa/pkg
 : >/mnt/woa-pe/woa/fixqcdx
+: >/mnt/woa-pe/woa/utilman
 bash "$SRC/build-media.sh" umount
 
 cp /root/woa/run-qemu-deploy.sh "$W/run-qemu-deploy.sh"

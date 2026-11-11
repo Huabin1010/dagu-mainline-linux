@@ -215,6 +215,13 @@ try {
         }
         if (-not [Linq.Enumerable]::SequenceEqual($back, $aml)) { throw 'overlay readback mismatch' }
         Log "overlay written: $($aml.Length) bytes in $idx chunks, readback ok"
+        # ACPI only reads this key at boot. Record when it was written so that
+        # 2-run.cmd can refuse to start qcdx until a boot has picked it up: on
+        # 2026-11-11 install and run in the same boot used the old table and
+        # bugchecked 0x124 again (the dump still showed PMIPowerPmicModel).
+        New-Item (Join-Path $Svc 'dagusmmu\Parameters') -Force | Out-Null
+        Set-ItemProperty (Join-Path $Svc 'dagusmmu\Parameters') -Name ovwrite `
+            -Value ((Get-Date).ToUniversalTime().ToString('o')) -Type String
 
         $shim = Join-Path $Here 'shim'
         # pnputil refuses a third-party INF without a signed catalog
@@ -293,6 +300,19 @@ try {
         }
     } elseif ($Stage -eq 'run') {
         SetStart 'qcsmmu' 4
+        # The GPU0 overlay is read once, at boot. Refuse to start qcdx while a
+        # newer table is still only in the registry: the run would test the old
+        # one (2026-11-11 saw the same 0x124 with PMIPowerPmicModel still live).
+        $p = Get-ItemProperty (Join-Path $Svc 'dagusmmu\Parameters') -ErrorAction SilentlyContinue
+        if ($p -and $p.PSObject.Properties.Name -contains 'ovwrite') {
+            $written = [datetime]::Parse($p.ovwrite, [Globalization.CultureInfo]::InvariantCulture,
+                                        [Globalization.DateTimeStyles]::RoundtripKind)
+            $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime()
+            Log ("overlay written {0:o}, boot {1:o}" -f $written, $boot)
+            if ($written -gt $boot) {
+                throw 'the GPU0 overlay was written after this boot; reboot first, then run 2-run.cmd'
+            }
+        }
         Snapshot
         $dev = & pnputil.exe /enum-devices /instanceid $Gpu 2>&1 | Out-String
         if ($dev -notmatch '(?im)^\s*\S.*:\s*ACPI\\QCOM253A\\0\s*$') {

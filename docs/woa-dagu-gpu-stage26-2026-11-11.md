@@ -120,6 +120,8 @@ dagu 的 UEFI 只有 SimpleFb，没有高通的 `DisplayDxe`，所以不会写�
 
 还有一条没查的入口：`QDIDriverEntry` 里读注册表 `Miniport\PanelOverride`（以及 `Width`、`Height`）。这可能是不刷 UEFI、直接从注册表给面板参数的正路，应当先逆这一条。
 
+已逆（`0x2C07B8`–`0x2C08BC`）：`PanelOverride` 只读 `Width` 和 `Height` 两个值，接受竖屏 480–1600 × 640–2560 或横屏范围，用于模拟面板的分辨率。它不带背光和供电方式，换不掉面板供电走电源管理芯片这一步。所以要让 qcdx 不去开电源管理芯片接口，还是得给它一个真的面板编号或真的面板配置，正路仍是 `UEFIDisplayInfo` 加 qcdx 自带面板表里的 L81A 条目（如果没有，就要补电源管理芯片栈）。
+
 ### 关联文档
 
 [阶段 25](woa-dagu-gpu-stage25-2026-11-10.md)、[阶段 19](woa-dagu-gpu-stage19-2026-10-31.md)、[阶段 15](woa-dagu-gpu-stage15-2026-10-31.md)、[适配计划](woa-dagu-gpu-adaptation-plan-2026-11-10.md)、[路线图](woa-dagu-gpu-roadmap.md)。

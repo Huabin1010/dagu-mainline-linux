@@ -34,9 +34,13 @@ clang-cl --target=aarch64-pc-windows-msvc -c \
     "$SRC" /Fo"$OUT/dagu-smmushim.obj"
 
 echo "[2/2] link"
+# /DLL like every other dagu kernel driver (build-kmdriver.sh). Without it
+# lld-link emits an EXE image (base 0x140000000, no DLL characteristic) and
+# the kernel loader refuses it with STATUS_CONFLICTING_ADDRESSES
+# (0xC0000018), so DriverEntry never runs.
 lld-link "$OUT/dagu-smmushim.obj" \
     /OUT:"$OUT/dagu-smmushim.sys" \
-    /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry \
+    /DLL /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry \
     /MACHINE:ARM64 /NODEFAULTLIB \
     /LIBPATH:"$WDKL" /LIBPATH:"$UCRTL" \
     ntoskrnl.lib hal.lib bufferoverflowfastfailk.lib

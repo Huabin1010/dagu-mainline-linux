@@ -30,6 +30,7 @@
  */
 #include <ntddk.h>
 #include "dagu-dsdt-ov.h"
+#include "dagu-iommu.h"
 
 NTKERNELAPI NTSTATUS ZwFlushBuffersFile(HANDLE FileHandle,
                                         PIO_STATUS_BLOCK IoStatusBlock);
@@ -49,12 +50,18 @@ NTKERNELAPI NTSTATUS ZwFlushBuffersFile(HANDLE FileHandle,
 #define SLOT_LOCK   ((0x108u - IFACE_FN0) / sizeof(PVOID)) /* 29 */
 #define SLOT_PROBE  ((0x180u - IFACE_FN0) / sizeof(PVOID)) /* 44 */
 #define SLOT_MAP    ((0x198u - IFACE_FN0) / sizeof(PVOID)) /* 47 */
+/* Stage 25, from the qcdx wrapper vtable at 0x14BFE8 (see dagu-iommu.c). */
+#define SLOT_RELEASE ((0x078u - IFACE_FN0) / sizeof(PVOID)) /* 11 */
+#define SLOT_UNMAP   ((0x098u - IFACE_FN0) / sizeof(PVOID)) /* 15 */
+#define SLOT_XLATE   ((0x0C0u - IFACE_FN0) / sizeof(PVOID)) /* 20 */
+#define SLOT_IOVA    ((0x0E0u - IFACE_FN0) / sizeof(PVOID)) /* 24 */
+#define SLOT_UNMAP2  ((0x110u - IFACE_FN0) / sizeof(PVOID)) /* 30 */
 /* qcdx checks a subrange against [base, base+length). The address it asks
  * for comes from the display descriptor and is below 4GB, while the size
  * passed to slot 22 is only the named region. Report at least a 4GB window
  * so that check can succeed. This length is never allocated. */
 #define VA_WINDOW   0x100000000ULL
-#define ALLOC_MAX   128u
+#define ALLOC_MAX   1024u
 
 #define SMMU_PHYS   0x03DA0000ULL
 #define SMMU_SIZE   0x00010000u
@@ -257,6 +264,11 @@ ClearStale(VOID)
         L"ovins", L"ovlen", L"ovflt",
         L"acpn", L"acpf", L"acpk0", L"acpk1", L"acpk2", L"acpk3",
         L"acpl0", L"acpl1", L"acpl2", L"acpl3",
+        L"io_err", L"io_maps", L"io_iova", L"io_idmiss", L"io_idbytes", L"io_kinds",
+        L"io_idwant", L"io_idgot", L"io_leak",
+        L"cb0_on", L"cb0_sync", L"cb0_fsr", L"cb0_state", L"pw_cx",
+        L"ttbr1_lo", L"ttbr1_hi", L"pt1_tables", L"pt1_mapped",
+        L"ttbr0_lo", L"ttbr0_hi", L"pt0_tables", L"pt0_mapped",
     };
     static const UCHAR kNoRing[8 * 8 * sizeof(ULONG) + sizeof(ULONG)] = { 0 };
     ULONG i, k;
@@ -419,6 +431,648 @@ FreeHandle(ULONG_PTR p)
     }
 }
 
+/* ---- Stage 25: real address spaces --------------------------------------
+ *
+ * qcdx contract, from the wrapper vtable 0x14BFE8 (dagu-iommu.h header):
+ *   slot 6  (+0x50)  domain = f(base, size, flags)      one per PAGETABLES
+ *   slot 7  (+0x58)  free domain
+ *   slot 22 (+0xD0)  range  = f(domain, size, flags)    ENGS region window
+ *   slot 27 (+0xF8)  base   = f(range)                  1 means failure
+ *   slot 28 (+0x100) length = f(range)                  0 means failure
+ *   slot 24 (+0xE0)  iova   = f(range, size, align_log2-10, flags)
+ *   slot 20 (+0xC0)  addr   = f(iova handle)            1 means failure
+ *   slot 25 (+0xE8)  sub    = f(range, size, offset, flags)  fixed VA
+ *   slot 14 (+0x90)  status = f(sub-or-iova handle, MDL) map pages
+ *   slot 15 (+0x98) / 30 (+0x110)  unmap
+ *   slot 11 (+0x78)  release iova handle
+ * Every address returned is backed by a page table entry once slot 14 runs.
+ * Nothing routes SID 0 here; that stays behind Parameters\map. */
+
+#define DOM_MAGIC   0x4D4F4453u      /* 'SDOM' */
+#define IOVA_MAGIC  0x41564F49u      /* 'IOVA' */
+#define DOM_MAX     32u
+#define IOVA_EXTENTS 1024u
+#define TAG_META    'mMSD'
+#define TAG_BACK    'bBSD'
+
+/* How a slot-6 address space is backed, chosen by its ENGS PAGETABLES
+ * window (graphics-qcom253a.asl). Only CB0 of the Adreno SMMU is ours to
+ * program (stage 24); everything else qcdx describes sits behind the APPS
+ * SMMU (MDP, crypto) or a CB this shim does not own (GMU SID 5, CP_PIXEL),
+ * and those are left as UEFI configured them, in bypass. */
+enum {
+    DK_IDENTITY = 1,   /* IOVA == PA: slot 24 hands out real contiguous DDR */
+    DK_TTBR0,          /* GraphicsPerProcessPT -> CB0.TTBR0 */
+    DK_TTBR1,          /* GraphicsGlobalPT     -> CB0.TTBR1 */
+    DK_PRIVATE,        /* own table, nothing walks it yet (GMU, secure) */
+};
+
+typedef struct { ULONG64 Base, Size; ULONG Kind; } DOM_LAYOUT;
+static const DOM_LAYOUT kLayouts[] = {
+    { 0x0000008000000000ULL, 0x0000000800000000ULL, DK_TTBR1 },     /* GraphicsGlobalPT */
+    { 0x0000000000400000ULL, 0x0000007FFFC00000ULL, DK_TTBR0 },     /* GraphicsPerProcessPT */
+    { 0x0000008000000000ULL, 0x0000000A00000000ULL, DK_PRIVATE },   /* GraphicsSecurePT */
+    { 0x0000000000000000ULL, 0x0000000080000000ULL, DK_PRIVATE },   /* GraphicsGmuPT */
+};
+
+typedef struct _SHIM_DOM {
+    ULONG Magic;
+    ULONG Index;
+    ULONG Kind;
+    ULONG Flags;
+    ULONG64 Base;
+    ULONG64 Size;
+    IOMMU_VA Va;
+    IOMMU_PT *Pt;                   /* &OwnPt, or NULL for identity */
+    IOMMU_PT OwnPt;                 /* one table per domain: per-process
+                                     * domains reuse the same VA window */
+} SHIM_DOM;
+
+typedef struct _SHIM_IOVA {
+    ULONG Magic;
+    ULONG Mapped;
+    SHIM_DOM *Dom;
+    ULONG64 Va;
+    ULONG64 Size;
+    ULONG64 MappedBytes;
+    BOOLEAN Reserved;               /* slot 24/25 took an extent in Dom->Va */
+    PVOID Backing;                  /* identity: the contiguous allocation */
+} SHIM_IOVA;
+
+static BOOLEAN gPtReady;
+static SHIM_DOM *gDom[DOM_MAX];
+static SHIM_DOM *gDomGlobal;        /* GraphicsGlobalPT  -> CB0.TTBR1 */
+static SHIM_DOM *gDomProc;          /* first per-process -> CB0.TTBR0 */
+static KSPIN_LOCK gPtLock;
+/* Telemetry, published from FlushRing at PASSIVE_LEVEL. */
+static ULONG gIommuErr;             /* (slot << 16) | reason */
+static ULONG gIommuMaps;
+static ULONG gIommuIova;
+static ULONG gIommuIdMiss;          /* identity slot 14 with foreign pages */
+static ULONG gIommuIdBytes;         /* last identity slot-24 size */
+static ULONG gIommuIdWant;          /* first mismatch: expected PFN */
+static ULONG gIommuIdGot;           /*                 MDL PFN */
+static LONG gIommuLeak;             /* contiguous pages not freed (IRQL) */
+static ULONG gIdLax;                /* Parameters\idlax, read in DriverEntry */
+static ULONG gDomKinds;             /* 4 bits per domain index */
+
+static void *
+OsTableAlloc(void *ctx, iu64 *pa)
+{
+    PHYSICAL_ADDRESS lo, hi, bound, p;
+    PVOID v;
+
+    UNREFERENCED_PARAMETER(ctx);
+    lo.QuadPart = 0;
+    hi.QuadPart = 0xFFFFFFFFFULL;   /* CB0 output size is 36 bits */
+    bound.QuadPart = 0;
+    v = MmAllocateContiguousMemorySpecifyCache(PAGE_SIZE, lo, hi, bound, MmCached);
+    if (!v)
+        return NULL;
+    RtlZeroMemory(v, PAGE_SIZE);
+    p = MmGetPhysicalAddress(v);
+    *pa = (iu64)p.QuadPart;
+    return v;
+}
+
+static void
+OsTableFree(void *ctx, void *va, iu64 pa)
+{
+    UNREFERENCED_PARAMETER(ctx);
+    UNREFERENCED_PARAMETER(pa);
+    /* MmFreeContiguousMemory is PASSIVE_LEVEL only. A page freed from a
+     * DPC teardown is leaked and counted rather than corrupting the pool. */
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        InterlockedIncrement(&gIommuLeak);
+        return;
+    }
+    MmFreeContiguousMemory(va);
+}
+
+static void *
+OsMetaAlloc(void *ctx, iu64 bytes)
+{
+    PVOID p;
+
+    UNREFERENCED_PARAMETER(ctx);
+    p = ExAllocatePoolWithTag(NonPagedPoolNx, (SIZE_T)bytes, TAG_META);
+    if (p)
+        RtlZeroMemory(p, (SIZE_T)bytes);
+    return p;
+}
+
+static void
+OsMetaFree(void *ctx, void *p)
+{
+    UNREFERENCED_PARAMETER(ctx);
+    ExFreePoolWithTag(p, TAG_META);
+}
+
+static const IOMMU_OPS kOsOps = { OsTableAlloc, OsTableFree, OsMetaAlloc, OsMetaFree, NULL };
+
+/* Domains are created from qcdx callbacks at up to DISPATCH_LEVEL; contiguous
+ * table pages may be allocated there, so nothing has to be prebuilt. */
+static VOID
+IommuInit(VOID)
+{
+    KeInitializeSpinLock(&gPtLock);
+    gPtReady = TRUE;
+}
+
+static SHIM_DOM *
+AsDom(ULONG_PTR p)
+{
+    ULONG i;
+
+    if (p < 0x10000)
+        return NULL;
+    for (i = 0; i < DOM_MAX; i++)
+        if (gDom[i] == (SHIM_DOM *)p && gDom[i]->Magic == DOM_MAGIC)
+            return gDom[i];
+    return NULL;
+}
+
+/* Slot 6. a = VA base, b = VA size (ENGS PAGETABLES fields), c = flags. */
+static UINT64
+DomCreate(ULONG_PTR base, ULONG_PTR size, ULONG flags)
+{
+    SHIM_DOM *d;
+    ULONG i, kind = DK_IDENTITY;
+
+    if (!gPtReady || !size || KeGetCurrentIrql() > DISPATCH_LEVEL) {
+        gIommuErr = (6u << 16) | 1u;
+        return 0;
+    }
+    for (i = 0; i < sizeof(kLayouts) / sizeof(kLayouts[0]); i++)
+        if (kLayouts[i].Base == base && kLayouts[i].Size == size)
+            kind = kLayouts[i].Kind;
+    for (i = 0; i < DOM_MAX && gDom[i]; i++)
+        ;
+    if (i == DOM_MAX) {
+        gIommuErr = (6u << 16) | 2u;
+        return 0;
+    }
+    d = ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(*d), TAG_META);
+    if (!d)
+        return 0;
+    RtlZeroMemory(d, sizeof(*d));
+    if (iommu_va_init(&d->Va, &kOsOps, base, size, IOVA_EXTENTS) != IOMMU_OK) {
+        ExFreePoolWithTag(d, TAG_META);
+        gIommuErr = (6u << 16) | 3u;
+        return 0;
+    }
+    if (kind != DK_IDENTITY && iommu_pt_init(&d->OwnPt, &kOsOps) != IOMMU_OK) {
+        iommu_va_destroy(&d->Va);
+        ExFreePoolWithTag(d, TAG_META);
+        gIommuErr = (6u << 16) | 4u;
+        return 0;
+    }
+    d->Magic = DOM_MAGIC;
+    d->Index = i;
+    d->Kind = kind;
+    d->Flags = flags;
+    d->Base = base;
+    d->Size = size;
+    d->Pt = kind == DK_IDENTITY ? NULL : &d->OwnPt;
+    gDom[i] = d;
+    if (kind == DK_TTBR1 && !gDomGlobal)
+        gDomGlobal = d;
+    if (kind == DK_TTBR0 && !gDomProc)
+        gDomProc = d;
+    if (i < 8)
+        gDomKinds = (gDomKinds & ~(0xFu << (4 * i))) | (kind << (4 * i));
+    return (UINT64)(ULONG_PTR)d;
+}
+
+static VOID IovaRelease(SHIM_IOVA *h);
+
+/* qcdx frees a domain after its IOVAs, but a handle left behind would
+ * otherwise point at freed memory. */
+static VOID
+DomDestroy(SHIM_DOM *d)
+{
+    ULONG i;
+
+    for (i = 0; i < ALLOC_MAX; i++) {
+        SHIM_IOVA *h = (SHIM_IOVA *)gAlloc[i];
+        if (h && h->Magic == IOVA_MAGIC && h->Dom == d)
+            IovaRelease(h);
+    }
+    if (gDomGlobal == d)
+        gDomGlobal = NULL;
+    if (gDomProc == d)
+        gDomProc = NULL;
+    gDom[d->Index] = NULL;
+    d->Magic = 0;
+    iommu_va_destroy(&d->Va);
+    if (d->Kind != DK_IDENTITY)
+        iommu_pt_destroy(&d->OwnPt);
+    ExFreePoolWithTag(d, TAG_META);
+}
+
+static SHIM_IOVA *
+NewIova(SHIM_DOM *d, ULONG64 va, ULONG64 size)
+{
+    SHIM_IOVA *h = ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(*h), TAG_META);
+    ULONG i;
+
+    if (!h)
+        return NULL;
+    RtlZeroMemory(h, sizeof(*h));
+    h->Magic = IOVA_MAGIC;
+    h->Dom = d;
+    h->Va = va;
+    h->Size = size;
+    for (i = 0; i < ALLOC_MAX; i++) {
+        if (gAlloc[i] == NULL) {
+            gAlloc[i] = h;
+            gIommuIova++;
+            return h;
+        }
+    }
+    /* A handle we cannot find again could never be released or mapped. */
+    ExFreePoolWithTag(h, TAG_META);
+    return NULL;
+}
+
+static SHIM_IOVA *
+AsIova(ULONG_PTR p)
+{
+    ULONG i;
+
+    if (p < 0x10000)
+        return NULL;
+    for (i = 0; i < ALLOC_MAX; i++)
+        if (gAlloc[i] == (PVOID)p)
+            return ((SHIM_IOVA *)p)->Magic == IOVA_MAGIC ? (SHIM_IOVA *)p : NULL;
+    return NULL;
+}
+
+/* MDL -> frame list -> page table. Returns an NTSTATUS. Identity domains
+ * have no table: the device sees PA, so the MDL must already describe the
+ * pages at this IOVA, otherwise the device would read other memory. */
+static NTSTATUS
+IovaMap(SHIM_IOVA *h, PMDL mdl)
+{
+    KIRQL irql;
+    ULONG64 off = 0;
+    PMDL m;
+    int rc = IOMMU_OK;
+
+    if (!h || !mdl || !h->Dom)
+        return STATUS_INVALID_PARAMETER;
+    if (!h->Dom->Pt) {
+        for (m = mdl; m; m = m->Next) {
+            ULONG n = ADDRESS_AND_SIZE_TO_SPAN_PAGES(MmGetMdlVirtualAddress(m), MmGetMdlByteCount(m));
+            PPFN_NUMBER pfn = MmGetMdlPfnArray(m);
+            ULONG k;
+
+            for (k = 0; k < n; k++) {
+                if ((ULONG64)pfn[k] != ((h->Va + off) >> PAGE_SHIFT)) {
+                    if (!gIommuIdMiss) {
+                        gIommuIdWant = (ULONG)((h->Va + off) >> PAGE_SHIFT);
+                        gIommuIdGot = (ULONG)pfn[k];
+                    }
+                    gIommuIdMiss++;
+                    gIommuErr = (14u << 16) | 0x11u;
+                    /* Parameters\idlax=1: report success anyway. The device
+                     * then reaches the block slot 24 allocated (we own it),
+                     * not qcdx's pages: memory-safe, functionally wrong.
+                     * Diagnostic only, to see the gate after this one. */
+                    if (gIdLax)
+                        goto identity_done;
+                    return STATUS_NOT_SUPPORTED;
+                }
+                off += PAGE_SIZE;
+            }
+        }
+identity_done:
+        h->Mapped = 1;
+        h->MappedBytes = off;
+        gIommuMaps++;
+        return STATUS_SUCCESS;
+    }
+    KeAcquireSpinLock(&gPtLock, &irql);
+    for (m = mdl; m && rc == IOMMU_OK; m = m->Next) {
+        ULONG n = ADDRESS_AND_SIZE_TO_SPAN_PAGES(MmGetMdlVirtualAddress(m), MmGetMdlByteCount(m));
+        PPFN_NUMBER pfn = MmGetMdlPfnArray(m);
+        iu64 frames[64];
+        ULONG done = 0;
+
+        if (off + (ULONG64)n * PAGE_SIZE > h->Size) {
+            rc = IOMMU_EINVAL;
+            break;
+        }
+        while (done < n && rc == IOMMU_OK) {
+            ULONG k, chunk = n - done > 64 ? 64 : n - done;
+
+            for (k = 0; k < chunk; k++)
+                frames[k] = (iu64)pfn[done + k];
+            rc = iommu_map_pfns(h->Dom->Pt, h->Va + off, frames, chunk,
+                                IOMMU_PROT_READ | IOMMU_PROT_WRITE | IOMMU_PROT_CACHE);
+            if (rc == IOMMU_OK) {
+                off += (ULONG64)chunk * PAGE_SIZE;
+                done += chunk;
+            }
+        }
+    }
+    if (rc != IOMMU_OK && off) {
+        iommu_unmap(h->Dom->Pt, h->Va, off);
+        off = 0;
+    }
+    KeReleaseSpinLock(&gPtLock, irql);
+    if (rc != IOMMU_OK) {
+        gIommuErr = (14u << 16) | (ULONG)(-rc);
+        return rc == IOMMU_ENOMEM ? STATUS_INSUFFICIENT_RESOURCES : STATUS_INVALID_PARAMETER;
+    }
+    h->Mapped = 1;
+    h->MappedBytes = off;
+    gIommuMaps++;
+    return STATUS_SUCCESS;
+}
+
+static VOID Cb0Flush(VOID);
+
+static NTSTATUS
+IovaUnmap(SHIM_IOVA *h)
+{
+    KIRQL irql;
+
+    if (!h)
+        return STATUS_INVALID_PARAMETER;
+    if (h->Mapped && h->Dom && h->Dom->Pt) {
+        KeAcquireSpinLock(&gPtLock, &irql);
+        iommu_unmap(h->Dom->Pt, h->Va, h->MappedBytes);
+        KeReleaseSpinLock(&gPtLock, irql);
+        Cb0Flush();
+    }
+    h->Mapped = 0;
+    h->MappedBytes = 0;
+    return STATUS_SUCCESS;
+}
+
+static VOID
+IovaRelease(SHIM_IOVA *h)
+{
+    KIRQL irql;
+    ULONG i;
+
+    if (!h)
+        return;
+    IovaUnmap(h);
+    if (h->Dom && h->Reserved) {
+        KeAcquireSpinLock(&gPtLock, &irql);
+        iommu_va_free(&h->Dom->Va, h->Va);
+        KeReleaseSpinLock(&gPtLock, irql);
+    }
+    if (h->Backing) {
+        if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+            MmFreeContiguousMemory(h->Backing);
+        else
+            InterlockedIncrement(&gIommuLeak);
+    }
+    h->Magic = 0;
+    for (i = 0; i < ALLOC_MAX; i++)
+        if (gAlloc[i] == h)
+            gAlloc[i] = NULL;
+    ExFreePoolWithTag(h, TAG_META);
+}
+
+/* Slot 24: a fresh IOVA of size bytes in the domain behind the range.
+ * Identity domains get real contiguous DDR below 4 GB (qcdx drops display
+ * addresses >= 4 GB, 0x29EB80) so the address is valid for both the device
+ * and the CPU; this is what WHEA 0x124 was missing in stage 22. */
+static SHIM_IOVA *
+IovaAlloc(SHIM_DOM *d, ULONG64 size, ULONG alignCode)
+{
+    ULONG64 align = 1ULL << ((alignCode + 10u) > 30u ? 30u : (alignCode + 10u));
+    SHIM_IOVA *h;
+    KIRQL irql;
+    ULONG64 va;
+
+    if (align < PAGE_SIZE)
+        align = PAGE_SIZE;
+    size = (size + PAGE_SIZE - 1) & ~(ULONG64)(PAGE_SIZE - 1);
+    if (!size || KeGetCurrentIrql() > DISPATCH_LEVEL) {
+        gIommuErr = (24u << 16) | 1u;
+        return NULL;
+    }
+    if (!d->Pt) {
+        PHYSICAL_ADDRESS lo, hi, bound, pa;
+        PVOID mem;
+
+        lo.QuadPart = d->Base;
+        hi.QuadPart = (d->Base + d->Size - 1) > 0xFFFFFFFFULL ? 0xFFFFFFFFULL : (d->Base + d->Size - 1);
+        bound.QuadPart = 0;
+        mem = MmAllocateContiguousMemorySpecifyCache((SIZE_T)size, lo, hi, bound, MmWriteCombined);
+        if (!mem) {
+            gIommuErr = (24u << 16) | 2u;
+            return NULL;
+        }
+        RtlZeroMemory(mem, (SIZE_T)size);
+        pa = MmGetPhysicalAddress(mem);
+        gIommuIdBytes = (ULONG)size;
+        if ((ULONG64)pa.QuadPart & (align - 1)) {
+            /* The device would get a misaligned base; say so, do not round. */
+            if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+                MmFreeContiguousMemory(mem);
+            else
+                InterlockedIncrement(&gIommuLeak);
+            gIommuErr = (24u << 16) | 4u;
+            return NULL;
+        }
+        h = NewIova(d, (ULONG64)pa.QuadPart, size);
+        if (!h) {
+            MmFreeContiguousMemory(mem);
+            return NULL;
+        }
+        h->Backing = mem;
+        KeAcquireSpinLock(&gPtLock, &irql);
+        h->Reserved = iommu_va_reserve(&d->Va, h->Va, size) == IOMMU_OK;
+        KeReleaseSpinLock(&gPtLock, irql);
+        return h;
+    }
+    KeAcquireSpinLock(&gPtLock, &irql);
+    va = iommu_va_alloc(&d->Va, size, align, 0, 0);
+    KeReleaseSpinLock(&gPtLock, irql);
+    if (!va) {
+        gIommuErr = (24u << 16) | 3u;
+        return NULL;
+    }
+    h = NewIova(d, va, size);
+    if (!h) {
+        KeAcquireSpinLock(&gPtLock, &irql);
+        iommu_va_free(&d->Va, va);
+        KeReleaseSpinLock(&gPtLock, irql);
+        return NULL;
+    }
+    h->Reserved = TRUE;
+    return h;
+}
+
+/* Slot 25: the caller fixes the IOVA (offset), e.g. the UEFI framebuffer
+ * at 0x9C000000 in the identity MDP domain. */
+static SHIM_IOVA *
+IovaAt(SHIM_DOM *d, ULONG64 va, ULONG64 size)
+{
+    SHIM_IOVA *h;
+    KIRQL irql;
+    int rc;
+
+    size = (size + PAGE_SIZE - 1) & ~(ULONG64)(PAGE_SIZE - 1);
+    h = NewIova(d, va & ~(ULONG64)(PAGE_SIZE - 1), size);
+    if (!h)
+        return NULL;
+    KeAcquireSpinLock(&gPtLock, &irql);
+    rc = iommu_va_reserve(&d->Va, h->Va, size);
+    KeReleaseSpinLock(&gPtLock, irql);
+    /* The same fixed range can be described twice (display + its copy);
+     * for identity that is harmless, for a table it would be a double map. */
+    if (rc != IOMMU_OK && (d->Pt || rc != IOMMU_EBUSY)) {
+        gIommuErr = (25u << 16) | (ULONG)(-rc);
+        IovaRelease(h);
+        return NULL;
+    }
+    h->Reserved = rc == IOMMU_OK;
+    return h;
+}
+
+/* ---- CB0 programming (stage 24 sequence) -------------------------------- */
+
+#define GCC_PHYS        0x00100000ULL
+#define GCC_SIZE        0x00080000u
+#define GPUCC_PHYS      0x03D90000ULL
+#define GPUCC_SIZE      0x00009000u
+#define CB_BASE0        0x8000u
+#define GR1_CBAR0       0x1000u
+#define GR1_CBA2R0      0x1800u
+#define CB_SCTLR        0x000u
+#define CB_ACTLR        0x004u
+#define CB_TCR2         0x010u
+#define CB_TTBR0        0x020u
+#define CB_TTBR1        0x028u
+#define CB_TCR          0x030u
+#define CB_MAIR0        0x038u
+#define CB_MAIR1        0x03Cu
+#define CB_FSR          0x058u
+#define CB_TLBIASID     0x610u
+#define CB_TLBSYNC      0x7F0u
+#define CB_TLBSTATUS    0x7F4u
+#define LX_ACTLR        0x00000303u
+#define LX_CBA2R        0x00000001u
+#define LX_CBAR         0x0001F300u
+#define LX_MAIR0        0xF404FF44u
+#define LX_SCTLR        0x00001167u
+
+static volatile UCHAR *gSmmu;       /* mapped once, at PASSIVE_LEVEL */
+static LONG gSmmuTried;
+static LONG gCb0On;
+static ULONG gCb0Sync;              /* last TLB sync spin count, ~0 = timeout */
+static ULONG gCb0Fsr;
+
+/* GPU CX and the three SMMU clocks must run, or the access stalls the bus
+ * (stage 12/16). */
+static BOOLEAN
+SmmuPowered(VOID)
+{
+    PHYSICAL_ADDRESS pa;
+    volatile UCHAR *gcc, *gpucc;
+    ULONG cfg, memnoc, snoc, cx, ahb;
+
+    pa.QuadPart = GCC_PHYS;
+    gcc = MmMapIoSpaceEx(pa, GCC_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+    if (!gcc)
+        return FALSE;
+    cfg = READ_REGISTER_ULONG((volatile ULONG *)(gcc + 0x71004u));
+    memnoc = READ_REGISTER_ULONG((volatile ULONG *)(gcc + 0x7100Cu));
+    snoc = READ_REGISTER_ULONG((volatile ULONG *)(gcc + 0x71018u));
+    MmUnmapIoSpace((PVOID)gcc, GCC_SIZE);
+    if ((cfg | memnoc | snoc) & 0x80000000u)
+        return FALSE;
+    pa.QuadPart = GPUCC_PHYS;
+    gpucc = MmMapIoSpaceEx(pa, GPUCC_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+    if (!gpucc)
+        return FALSE;
+    cx = READ_REGISTER_ULONG((volatile ULONG *)(gpucc + 0x106Cu));
+    ahb = READ_REGISTER_ULONG((volatile ULONG *)(gpucc + 0x1078u));
+    MmUnmapIoSpace((PVOID)gpucc, GPUCC_SIZE);
+    Put(L"pw_cx", cx);
+    return (cx & 0x80000000u) && !(ahb & 0x80000000u);
+}
+
+static ULONG
+Cb0Sync(VOID)
+{
+    ULONG i;
+
+    WRITE_REGISTER_ULONG((volatile ULONG *)(gSmmu + CB_BASE0 + CB_TLBIASID), 0);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(gSmmu + CB_BASE0 + CB_TLBSYNC), 0);
+    for (i = 0; i < 1000000u; i++)
+        if (!(READ_REGISTER_ULONG((volatile ULONG *)(gSmmu + CB_BASE0 + CB_TLBSTATUS)) & 1u))
+            return i;
+    return 0xFFFFFFFFu;
+}
+
+/* Stale walk-cache or TLB entries for a page that was just unmapped would
+ * let the GPU keep reaching memory Windows has reused. */
+static VOID
+Cb0Flush(VOID)
+{
+    if (gSmmu && gCb0On)
+        gCb0Sync = Cb0Sync();
+}
+
+/* Linux arm_smmu_write_context_bank() order with the qcdx split: TTBR0 is
+ * the per-process table (VA < 2^39), TTBR1 the global one (SEP = bit 39).
+ * No stream is routed to CB0 here, so nothing walks these tables yet; the
+ * SMR/S2CR write stays behind Parameters\map. Called when a TTBR domain
+ * appears, so the base registers always hold live tables. */
+static VOID
+Cb0Program(VOID)
+{
+    volatile UCHAR *cb;
+    ULONG64 t0, t1;
+
+    if (!gSmmu)
+        return;
+    cb = gSmmu + CB_BASE0;
+    t0 = gDomProc ? iommu_pt_root(&gDomProc->OwnPt) : 0;
+    t1 = gDomGlobal ? iommu_pt_root(&gDomGlobal->OwnPt) : 0;
+    WRITE_REGISTER_ULONG((volatile ULONG *)(cb + CB_SCTLR), 0);
+    Cb0Sync();
+    WRITE_REGISTER_ULONG((volatile ULONG *)(cb + CB_ACTLR), LX_ACTLR);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(gSmmu + GR1_CBA2R0), LX_CBA2R);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(gSmmu + GR1_CBAR0), LX_CBAR);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(cb + CB_TCR2), IOMMU_TCR2_QCDX);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(cb + CB_TCR), iommu_cb_tcr(t0 != 0, t1 != 0));
+    WRITE_REGISTER_ULONG64((volatile ULONG64 *)(cb + CB_TTBR0), t0);
+    WRITE_REGISTER_ULONG64((volatile ULONG64 *)(cb + CB_TTBR1), t1);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(cb + CB_MAIR0), LX_MAIR0);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(cb + CB_MAIR1), 0);
+    WRITE_REGISTER_ULONG((volatile ULONG *)(cb + CB_SCTLR), LX_SCTLR);
+    gCb0Sync = Cb0Sync();
+    gCb0Fsr = READ_REGISTER_ULONG((volatile ULONG *)(cb + CB_FSR));
+    InterlockedExchange(&gCb0On, 1);
+}
+
+static VOID
+SmmuMapOnce(VOID)
+{
+    PHYSICAL_ADDRESS pa;
+
+    if (GetDword(L"cb0", 1) == 0) {
+        Put(L"cb0_state", 0xC0);        /* disabled by the registry */
+        return;
+    }
+    if (!SmmuPowered()) {
+        Put(L"cb0_state", 0xA2);        /* unpowered: never touch it */
+        return;
+    }
+    pa.QuadPart = SMMU_PHYS;
+    gSmmu = MmMapIoSpaceEx(pa, SMMU_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
+    Put(L"cb0_state", gSmmu ? 1u : 0xE1u);
+}
+
 /* Slot 22 builds one of these. Slot 28 must return its byte length and
  * slot 27 its base (1 is qcdx's failure sentinel, so the base stays 0).
  * Slot 25 then carves a subrange and has to return that pointer: NULL is
@@ -435,6 +1089,7 @@ typedef struct _VA_RANGE {
     ULONG_PTR Offset;
     ULONG Flags;
     struct _VA_RANGE *Parent;
+    SHIM_DOM *Dom;                  /* slot 22 on a real domain */
 } VA_RANGE;
 
 static VA_RANGE *
@@ -580,6 +1235,30 @@ FlushRing(VOID)
     if (!gKey || KeGetCurrentIrql() != PASSIVE_LEVEL)
         return;
     WriteRing();
+    Put(L"io_err", gIommuErr);
+    Put(L"io_maps", gIommuMaps);
+    Put(L"io_iova", gIommuIova);
+    Put(L"io_idmiss", gIommuIdMiss);
+    Put(L"io_idbytes", gIommuIdBytes);
+    Put(L"io_idwant", gIommuIdWant);
+    Put(L"io_idgot", gIommuIdGot);
+    Put(L"io_leak", (ULONG)gIommuLeak);
+    Put(L"io_kinds", gDomKinds);
+    Put(L"cb0_on", (ULONG)gCb0On);
+    Put(L"cb0_sync", gCb0Sync);
+    Put(L"cb0_fsr", gCb0Fsr);
+    if (gDomGlobal) {
+        Put(L"ttbr1_lo", (ULONG)iommu_pt_root(&gDomGlobal->OwnPt));
+        Put(L"ttbr1_hi", (ULONG)(iommu_pt_root(&gDomGlobal->OwnPt) >> 32));
+        Put(L"pt1_tables", gDomGlobal->OwnPt.tables);
+        Put(L"pt1_mapped", (ULONG)(gDomGlobal->OwnPt.mapped >> 12));
+    }
+    if (gDomProc) {
+        Put(L"ttbr0_lo", (ULONG)iommu_pt_root(&gDomProc->OwnPt));
+        Put(L"ttbr0_hi", (ULONG)(iommu_pt_root(&gDomProc->OwnPt) >> 32));
+        Put(L"pt0_tables", gDomProc->OwnPt.tables);
+        Put(L"pt0_mapped", (ULONG)(gDomProc->OwnPt.mapped >> 12));
+    }
     Put(L"step", 0x60);
     StampGen();
     ZwFlushKey(gKey);
@@ -605,34 +1284,87 @@ SlotDispatch(ULONG slot, ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d, ULO
         gC24 = (ULONG)c;
         gD24 = (ULONG)d;
     }
-    if (slot == SLOT_ALLOC)
-        ret = AllocHandle();
-    else if (slot == SLOT_BIND) {
+    if (slot == SLOT_ALLOC) {
+        /* a, b are the PAGETABLES window. Fall back to the old zero page
+         * only if the real domain could not be built, so the stage-21
+         * path keeps working. */
+        ret = DomCreate(a, b, (ULONG)c);
+        if (!ret)
+            ret = AllocHandle();
+    } else if (slot == SLOT_FREE) {
+        SHIM_DOM *dm = AsDom(a);
+        if (dm)
+            DomDestroy(dm);
+        else
+            FreeHandle(a);
+    } else if (slot == SLOT_BIND) {
         VA_RANGE *parent;
+        SHIM_DOM *dm = AsDom(a);
         ULONG_PTR window = b;
 
-        if (window < VA_WINDOW)
-            window = VA_WINDOW;
-        parent = NewRange(VA_PARENT, 0, window, 0, (ULONG)c, NULL);
+        if (dm) {
+            /* The window qcdx checks offsets against is the whole domain:
+             * slot 25 offsets are absolute IOVAs inside it. */
+            parent = NewRange(VA_PARENT, (ULONG_PTR)dm->Base, (ULONG_PTR)dm->Size, 0, (ULONG)c, NULL);
+            if (parent)
+                parent->Dom = dm;
+        } else {
+            if (window < VA_WINDOW)
+                window = VA_WINDOW;
+            parent = NewRange(VA_PARENT, 0, window, 0, (ULONG)c, NULL);
+        }
         ret = parent ? (UINT64)(ULONG_PTR)parent : 0;
     } else if (slot == SLOT_SUB) {
+        VA_RANGE *pr = AsRange(a);
         VA_RANGE *sub = NULL;
 
-        if (b != 0)
-            sub = NewRange(VA_SUB, c, b, c, (ULONG)d, AsRange(a));
-        ret = sub ? (UINT64)(ULONG_PTR)sub : 0;
+        if (pr && pr->Dom && b != 0) {
+            SHIM_IOVA *h = IovaAt(pr->Dom, c, b);
+            ret = (UINT64)(ULONG_PTR)h;
+        } else {
+            if (b != 0)
+                sub = NewRange(VA_SUB, c, b, c, (ULONG)d, pr);
+            ret = sub ? (UINT64)(ULONG_PTR)sub : 0;
+        }
         gLastSubOk = ret ? 1u : 0u;
         Put(L"suboff", (ULONG)c);
         Put(L"subsz", (ULONG)b);
         Put(L"subok", ret ? 1u : 0u);
+    } else if (slot == SLOT_IOVA) {
+        /* 0x267610: x0 range handle, x1 page-aligned size, w2 = log2(align)
+         * - 10 (minimum 2 => 4 KB), w3 flags. NULL -> 0xC0001817. */
+        VA_RANGE *pr = AsRange(a);
+        SHIM_IOVA *h = (pr && pr->Dom) ? IovaAlloc(pr->Dom, b, (ULONG)c) : NULL;
+        if (!pr || !pr->Dom)
+            gIommuErr = (24u << 16) | 0xFu;
+        ret = (UINT64)(ULONG_PTR)h;
+    } else if (slot == SLOT_XLATE) {
+        /* 0x267770: the device address for a slot-24 handle; 1 is failure. */
+        SHIM_IOVA *h = AsIova(a);
+        ret = h ? h->Va : 1;
+    } else if (slot == SLOT_COMMIT) {
+        /* 0x268034: x0 handle from slot 24/25, x1 MDL. NTSTATUS. */
+        SHIM_IOVA *h = AsIova(a);
+        ret = h ? (UINT64)(LONG)IovaMap(h, (PMDL)b) : 0;
+    } else if (slot == SLOT_UNMAP || slot == SLOT_UNMAP2) {
+        SHIM_IOVA *h = AsIova(a);
+        ret = h ? (UINT64)(LONG)IovaUnmap(h) : 0;
+    } else if (slot == SLOT_RELEASE || slot == SLOT_UNBIND || slot == SLOT_DROP) {
+        SHIM_IOVA *h = AsIova(a);
+        if (h)
+            IovaRelease(h);
+        else
+            FreeHandle(a);
     } else if (slot == SLOT_BASE) {
         VA_RANGE *r = AsRange(a);
         ret = r ? r->Base : 0;
     } else if (slot == SLOT_PHYS) {
         VA_RANGE *r = AsRange(a);
         ret = r ? r->Size : (a ? (UINT64)a : 1);
-    } else if (slot == SLOT_FREE || slot == SLOT_UNBIND || slot == SLOT_DROP)
-        FreeHandle(a);
+    }
+    if ((slot == SLOT_ALLOC || slot == SLOT_FREE) && gSmmu &&
+        KeGetCurrentIrql() <= DISPATCH_LEVEL && (gDomGlobal || gDomProc))
+        Cb0Program();
     rec = &gRing[gNcall & 7];
     rec->Slot = slot;
     rec->A = (ULONG)a;
@@ -773,6 +1505,10 @@ FillInterface(PSHIM_EXT ext, const GUID *type, USHORT size, USHORT version, PINT
         return STATUS_NOT_SUPPORTED;
     gIfaceKind = GuidEq(type, &kIfaceVideo) ? 2 : 1;
     Put(L"iface", (ULONG)gIfaceKind);
+    /* Only now, when qcdx starts (2-run.cmd), never at boot: the boot path
+     * must not read GPU_CC or the Adreno SMMU. */
+    if (!InterlockedExchange(&gSmmuTried, 1) && KeGetCurrentIrql() == PASSIVE_LEVEL)
+        SmmuMapOnce();
     Put(L"qsize", size);
     Put(L"qver", version);
     raw = (PUCHAR)iface;
@@ -2434,10 +3170,12 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
     OpenParams(reg);
     gBootGen = GetDword(L"bootgen", 0) + 1;
     gRstOnFail = GetDword(L"rstonfail", 0);
+    gIdLax = GetDword(L"idlax", 0);
     ExInitializeWorkItem(&gNoteItem, FlushNote, NULL);
     ExInitializeWorkItem(&gDiagItem, DiagWorker, NULL);
     ClearStale();
     Step(0x10);
+    IommuInit();
     /* Do not rewrite the 53 KB ACPI override every boot: with the
      * rstonfail bugcheck/reset it tore the SYSTEM hive (0xc000014c). The
      * restored hive already carries the 8-chunk overlay. */

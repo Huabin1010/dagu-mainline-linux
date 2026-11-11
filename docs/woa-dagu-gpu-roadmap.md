@@ -331,7 +331,7 @@ test-signing=On、`C:\dagu\asl.exe` 在、qcdx 驱动 staged、确认当前 `QCD
 | qcdx 下一道墙 | 启动时阻塞等 qcsmmu 接口 `{36079AE4-78E8-452D-AF50-0CFF78B2F1CA}`（30 s×4），等不到在回退路径 `0xA` 蓝屏（[stage15](woa-dagu-gpu-stage15-2026-10-31.md) §5） |
 | SMMU 可写性（阶段18 更正） | **GPU 流能从 HLOS 完整路由、不复位**：SMR[0]=valid/ID0 + S2CR[0]=translate→CB0 + CB0.TTBR0 都写得进；sCR0.USFCFG/sCR2/CBAR/假ID-SMR/bypass-S2CR 被静默还原不复位。阶段14/17“一碰就复位/架构级墙”的结论被推翻 |
 | CB0 生效配置（阶段24） | Windows 按 Linux 顺序写 `ACTLR/CBA2R/CBAR/TCR2/TCR/TTBR1/MAIR/SCTLR`，`SCTLR.M=1` 留住、`FSR` 无故障、不复位；CB0 原值是未初始化的随机内容，不是 QHEE 预置。`CBAR` 可从 0 改成 S1 类型、改不回 0。见 [stage24](woa-dagu-gpu-stage24-2026-11-10.md) |
-| 真实地址空间之后（阶段26） | 补回 `dagu-qcif`、槽 24 对齐以后，qcdx 过了 SMMU 接口和槽 24/20，停在电源：它要的三个电源引擎插件接口无人提供，投票全失败，随后 SError，WHEA `0x124`（`qcdx+0x2D0430`）。见 [stage26](woa-dagu-gpu-stage26-2026-11-11.md) |
+| 真实地址空间之后（阶段26） | 补回 `dagu-qcif`、槽 24 对齐以后，qcdx 过了 SMMU 接口和槽 24/20，在显示初始化里因面板供电接口（`qcpmic8250`，dagu 没有 `QCOM250C`/`QCOM252E`）缺失而失败，随后 SError，WHEA `0x124`（`qcdx+0x2D0430`）。GX 在 Linux 上由 GMU 上电，不是死墙。见 [stage26](woa-dagu-gpu-stage26-2026-11-11.md) §6 |
 | qcsmmu 复位源 | 不在 SMMU 寄存器写本身（每类都测过不复位，[stage18](woa-dagu-gpu-stage18-2026-10-31.md)）；疑在 qcsmmu init 的中断连接/GMU(SID5) 重配瞬间打 fault，待定位 |
 | qcsmmu 复位（阶段19 定位） | 关 SCLCK/PowerManaged（自管时钟/PoFx）仍复位 → 时钟假设证伪。复位在 qcsmmu 的"活配置"序列：配成生效翻译后 QHEE 在**真实走表**时才判违规复位，注册表旋钮关不掉、孤立写复现不了 |
 | GPU 整链判断（阶段19 定论） | stock HyperOS 固件下 WDDM 走不通：卡点是 QHEE 对 GPU SMMU 走表的保护 + GX/RPMh（Linux 已超时）+ zap/PIL（TZ），全在安全世界，非安全侧改不动。已交付收益=大核调频（阶段13）；显示走 BasicDisplay |

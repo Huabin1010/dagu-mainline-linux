@@ -79,7 +79,23 @@ qcdx 的错误/警告环（`--qcdx-log`），两次的尾巴一致：
 
 ## 5. 下一步
 
-照[适配计划](woa-dagu-gpu-adaptation-plan-2026-11-10.md) §2.1：先在 UEFI（Unified Extensible Firmware Interface，统一可扩展固件接口）里**只读**探测 GX 电源域和 GMU（Graphics Management Unit，图形管理单元）的状态，确认 Windows 接手时它们是什么状态。不要伪造这三个电源接口去“报成功”：那只会让 qcdx 更早地碰没电的硬件。也不要在没弄清 RPMh（Resource Power Manager hardened，硬化资源电源管理器）投票之前写电源控制寄存器。
+**本节被 §6 取代。**
+
+## 6. 更正（同日稍后）
+
+§3.2 的结论下错了，原因有两处：
+
+1. **三个接口属于电源管理芯片驱动，不是电源引擎插件。** 按 GUID 查回去，它们是 `qcpmic8250.sys`（ACPI `QCOM252E`，挂在 SPMI（System Power Management Interface，系统电源管理接口）`QCOM250C` 下）发布的。调用它们的是 qcdx 的显示初始化（`0xAC9C0` → `0xADC00` → `0xD9570` / `0xD8D20`），不是图形核心上电。这一串请求是面板和背光的供电（qcdx 的面板配置里有 `BacklightPmic*`、`PMIPowerPmic*`）。dagu 的 Windows 里 `QCOM252E` 和 `QCOM250C` 两个设备都没有，所以接口不存在。
+2. **GX 在这块板上不是死墙。** 同一台平板的 Linux 7.0 里，GPU 已经能用：GMU（Graphics Management Unit，图形管理单元）固件 v2.1.8 加载，Turnip（Mesa 的 Adreno Vulkan 驱动）能出图，GX 由 GMU 经它自己的 RSCC（RSC Controller，资源状态协调控制器）上电。超时的是 CPU 侧互连带宽投票，不是 GX。[阶段 19](woa-dagu-gpu-stage19-2026-10-31.md) 把两者混在了一起。
+
+所以 `0x124` 出在显示初始化里，发生在面板供电请求全部失败之后，具体是哪一次访问还没定位。两次的报错地址都是 `qcdx+0x2D0430`，是确定性的。
+
+另外查到一处 ACPI（Advanced Configuration and Power Interface，高级配置与电源接口）资源问题，现在还碰不到，但 GMU 初始化时会碰到：GPU0 的 `_CRS` 和 `RESI` 里没有 `GPU_RSCC`。qcdx 在 `0x2AC61C` 缺这一项时，按 `GFX_REG_CONT + 0x2D000` 推算 RSCC 地址，也就是 `0x3D8D000`。那是 SM8150 的布局。SM8250 的 RSCC 在 `0x3DE0000`：主线 `sm8250.dtsi` 的 `gmu` 节点写的是这个地址，平板上活的设备树 `reg` 读出来也是这个地址。
+
+下一步有两条路，都需要实机验证：
+
+- **定位 SError 的那次访问**：给垫片加调用点面包屑（把 qcdx 显示初始化里几处 `bl` 改到记录站点后再跳回的跳板），转储里读最后进入的函数。
+- **补电源管理芯片驱动**：给 Windows 加 `QCOM250C` / `QCOM252E` 两个节点，让 qcdx 的面板供电请求有人接。这一步会碰电源轨，`dagu-battery` 已经在直接访问 SPMI，要先确认两者不冲突。
 
 ### 关联文档
 

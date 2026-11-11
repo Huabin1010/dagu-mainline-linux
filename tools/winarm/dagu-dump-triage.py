@@ -26,26 +26,50 @@ def main():
     bc      = struct.unpack_from("<I", hdr, 0x38)[0]
     params  = [struct.unpack_from("<Q", hdr, 0x40 + 8*i)[0] for i in range(4)]
     f.seek(0x2000); bh = f.read(0x40)
-    if bh[:8] != b"SDMPDUMP":
-        sys.exit("unexpected secondary header: %r" % bh[:8])
-    data_start  = struct.unpack_from("<Q", bh, 0x20)[0]
-    total_pages = struct.unpack_from("<Q", bh, 0x30)[0]
     print("bugcheck=0x%x" % bc, "params=", [hex(x) for x in params])
+    if bh[:8] == b"SDMPDUMP":
+        data_start  = struct.unpack_from("<Q", bh, 0x20)[0]
+        total_pages = struct.unpack_from("<Q", bh, 0x30)[0]
+        f.seek(0x2038); bitmap = f.read((total_pages + 7)//8)
+        words = list(struct.unpack_from("<%dQ" % (len(bitmap)//8), bitmap, 0))
+        pre = [0]*(len(words)+1)
+        for i, w in enumerate(words):
+            pre[i+1] = pre[i] + bin(w).count("1")
 
-    f.seek(0x2038); bitmap = f.read((total_pages + 7)//8)
-    words = list(struct.unpack_from("<%dQ" % (len(bitmap)//8), bitmap, 0))
-    pre = [0]*(len(words)+1)
-    for i, w in enumerate(words):
-        pre[i+1] = pre[i] + bin(w).count("1")
+        def pa2off(pa):
+            pg = pa >> 12; w = pg >> 6; b = pg & 63
+            if w >= len(words) or not (words[w] >> b) & 1:
+                return None
+            return data_start + (pre[w] + bin(words[w] & ((1 << b)-1)).count("1"))*0x1000 + (pa & 0xFFF)
+    else:
+        # Full (run-based) dump, DumpType 1: PHYSICAL_MEMORY_DESCRIPTOR at
+        # 0x88 = NumberOfRuns, NumberOfPages, then {BasePage, PageCount}
+        # pairs; page data starts at 0x2000 in run order.
+        nruns = struct.unpack_from("<Q", hdr, 0x88)[0]
+        if not 0 < nruns < 256:
+            sys.exit("unknown dump layout: %r runs=%d" % (bh[:8], nruns))
+        runs = []
+        off = 0x2000
+        for i in range(nruns):
+            base_pg, cnt = struct.unpack_from("<QQ", hdr, 0x98 + 16*i)
+            runs.append((base_pg, cnt, off))
+            off += cnt * 0x1000
+        f.seek(0, 2); fsize = f.tell()
+        print("full dump: %d runs, %d pages, file holds %d" % (nruns, sum(r[1] for r in runs), (fsize - 0x2000) // 0x1000))
 
-    def pa2off(pa):
-        pg = pa >> 12; w = pg >> 6; b = pg & 63
-        if w >= len(words) or not (words[w] >> b) & 1:
+        def pa2off(pa):
+            pg = pa >> 12
+            for base_pg, cnt, o in runs:
+                if base_pg <= pg < base_pg + cnt:
+                    o = o + (pg - base_pg)*0x1000 + (pa & 0xFFF)
+                    return o if o < fsize else None
             return None
-        return data_start + (pre[w] + bin(words[w] & ((1 << b)-1)).count("1"))*0x1000 + (pa & 0xFFF)
 
     def rdpa(pa, n):
-        o = pa2off(pa);  f.seek(o); return f.read(n) if o else None
+        o = pa2off(pa)
+        if o is None:
+            return None
+        f.seek(o); return f.read(n)
 
     TBL = 0x0000FFFFFFFFF000
     def tr(va):

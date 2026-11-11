@@ -16,12 +16,17 @@ tells which gate failed (0xDA0xxx).
   powershell -ExecutionPolicy Bypass -File gpu.ps1 -Stage install
   powershell -ExecutionPolicy Bypass -File gpu.ps1 -Stage run
 #>
-param([ValidateSet('install', 'run', 'status')][string]$Stage = 'status')
+param(
+    [ValidateSet('install', 'run', 'status')][string]$Stage = 'status',
+    [switch]$NoFastboot
+)
 
 $ErrorActionPreference = 'Stop'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Log = Join-Path $Here "gpu-$Stage.txt"
 $Copy = "C:\Windows\Temp\dagu-gpu-$Stage.txt"
+$script:GoFastboot = $false
+$script:FastbootWhy = ''
 $Gpu = 'ACPI\QCOM253A\0'
 $Thumb = 'F11518C396DAEEAEF651812116C5783B35A9F746'
 $RootThumb = 'EB968A1AC3F69712139302D3B8687BAF8815FF73'
@@ -81,6 +86,142 @@ function SetStart([string]$name, [int]$v) {
         Set-ItemProperty $k -Name Start -Value $v -Type DWord
         Log "$name Start=$v"
     }
+}
+# Push service-key edits past the hive log before a bugcheck can roll them
+# back. After the 2026-11-11 22:38 install the on-disk SYSTEM hive still
+# pointed at 1.0.7 because the crash landed before the checkpoint.
+function FlushSvc([string]$name) {
+    $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+        "SYSTEM\CurrentControlSet\Services\$name", $true)
+    if ($k) { $k.Flush(); $k.Dispose() }
+}
+function PublishDesktop {
+    $src = Join-Path $Here 'desktop'
+    if (-not (Test-Path $src)) { return }
+    $dirs = @(
+        [Environment]::GetFolderPath('Desktop'),
+        [Environment]::GetFolderPath('CommonDesktopDirectory'),
+        'C:\Users\Public\Desktop',
+        'C:\Users\dagu\Desktop')
+    foreach ($d in $dirs) {
+        if (-not $d -or -not (Test-Path $d)) { continue }
+        Copy-Item (Join-Path $src '*') $d -Force
+        Log "desktop helpers -> $d"
+    }
+}
+# DaguPlatDxe reads \dagu-fastboot on the ESP and cold-resets into fastboot.
+# Prefer doing that ourselves when already SYSTEM. Otherwise schedule a SYSTEM
+# one-shot: an elevated SSH token is filtered and mountvol /S fails.
+# Never let schtasks stderr abort the GPU path under ErrorAction Stop —
+# 2026-11-11 23:45 ArmWatchdog threw "系统找不到指定的文件" before
+# pnputil /restart-device, so qcdx never started and the ESP flag was never
+# written even though the catch path logged to-fastboot.
+function WriteFastbootCmd([string]$path) {
+    @(
+        '@echo off',
+        'mountvol S: /S',
+        'if errorlevel 1 exit /b 1',
+        'break > S:\dagu-fastboot',
+        'mountvol S: /D',
+        'shutdown /r /t 0'
+    ) | Set-Content -Path $path -Encoding ASCII
+}
+function SchtasksQuiet([string[]]$argv) {
+    $exe = Join-Path $env:SystemRoot 'System32\schtasks.exe'
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $exe @argv 2>&1 | Out-String
+        return @{ Rc = $LASTEXITCODE; Out = $out }
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+function CancelWatchdog {
+    [void](SchtasksQuiet @('/Delete', '/TN', 'dagu-gpu-watchdog', '/F'))
+}
+function IsSystemToken {
+    try {
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        return ($sid -eq 'S-1-5-18')
+    } catch { return $false }
+}
+function DropEspFastbootFlag {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & mountvol.exe S: /S 2>&1 | Out-Null
+        if (-not (Test-Path 'S:\')) { throw 'mountvol S: /S failed' }
+        Set-Content -Path 'S:\dagu-fastboot' -Value '' -Encoding ASCII
+        & mountvol.exe S: /D 2>&1 | Out-Null
+        return $true
+    } catch {
+        Log "ESP flag failed: $_"
+        return $false
+    } finally {
+        $ErrorActionPreference = $prev
+        try { & mountvol.exe S: /D 2>&1 | Out-Null } catch {}
+    }
+}
+function ArmWatchdog([int]$seconds = 120) {
+    if ($NoFastboot) { return }
+    try {
+        CancelWatchdog
+        $cmd = 'C:\Windows\Temp\dagu-fb-watchdog.cmd'
+        WriteFastbootCmd $cmd
+        # schtasks /ST is minute-granular; keep at least one full minute ahead.
+        $when = (Get-Date).AddSeconds([Math]::Max(90, $seconds)).ToString('HH:mm')
+        $tr = "cmd.exe /c `"$cmd`""
+        $r = SchtasksQuiet @(
+            '/Create', '/TN', 'dagu-gpu-watchdog', '/TR', $tr,
+            '/SC', 'ONCE', '/ST', $when, '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F')
+        if ($r.Rc -ne 0) {
+            Log ("watchdog schtasks rc={0}: {1}" -f $r.Rc, (($r.Out -replace '\s+', ' ').Trim()))
+            return
+        }
+        Log "watchdog armed for $when (to-fastboot if we hang)"
+    } catch {
+        Log "watchdog arm failed (continuing run): $_"
+    }
+}
+function RebootToFastboot([string]$why) {
+    if ($NoFastboot) {
+        Log "to-fastboot skipped (-NoFastboot): $why"
+        return
+    }
+    Log "to-fastboot: $why"
+    try { Copy-Item $Log $Copy -Force -ErrorAction SilentlyContinue } catch {}
+    CancelWatchdog
+    $cmd = 'C:\Windows\Temp\dagu-to-fastboot.cmd'
+    try {
+        WriteFastbootCmd $cmd
+        WriteFastbootCmd (Join-Path $Here 'to-fastboot.cmd')
+    } catch {
+        Log "WriteFastbootCmd failed: $_"
+    }
+    if (IsSystemToken) {
+        if (DropEspFastbootFlag) {
+            Log 'ESP flag written; shutting down to fastboot'
+            & shutdown.exe /r /t 0
+            Start-Sleep -Seconds 30
+            return
+        }
+        Log 'SYSTEM mountvol failed; falling back to schtasks'
+    }
+    $tr = "cmd.exe /c `"$cmd`""
+    $c = SchtasksQuiet @(
+        '/Create', '/TN', 'dagu-to-fastboot', '/TR', $tr,
+        '/SC', 'ONCE', '/ST', '00:00', '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F')
+    if ($c.Rc -ne 0) {
+        Log ("to-fastboot schtasks create rc={0}: {1}" -f $c.Rc, (($c.Out -replace '\s+', ' ').Trim()))
+    }
+    $r = SchtasksQuiet @('/Run', '/TN', 'dagu-to-fastboot')
+    if ($r.Rc -ne 0) {
+        Log ("to-fastboot schtasks run rc={0}: {1}" -f $r.Rc, (($r.Out -replace '\s+', ' ').Trim()))
+    } else {
+        Log 'to-fastboot schtasks started'
+    }
+    Start-Sleep -Seconds 60
 }
 # pnputil refuses a third-party INF without a signed catalog (0xE000022F).
 function SignCatalog([string]$dir, [string]$name, $cert) {
@@ -260,6 +401,7 @@ try {
         $have = if (Test-Path $img) { (Get-FileHash $img -Algorithm SHA256).Hash } else { 'missing' }
         Log "service image $img sha256 $($have.Substring(0, [Math]::Min(16, $have.Length)))"
         if ($have -ne $want) { throw 'the shim service still points at an old build; send me this report' }
+        FlushSvc 'dagusmmu'
         $shimSt = & $devcon status 'root\DAGUSMMU' 2>&1 | Out-String
         foreach ($l in ($shimSt -split "`r?`n")) { if ($l.Trim()) { Log "  shim: $l" } }
         if ($shimSt -notmatch 'Driver is running') { throw 'shim did not start; send me this report' }
@@ -298,6 +440,10 @@ try {
         } else {
             Log 'RESULT staged; reboot once so the GPU device appears, then run 2-run.cmd.'
         }
+        FlushSvc 'QCDX'
+        FlushSvc 'dagusmmu'
+        FlushSvc 'daguqcif'
+        PublishDesktop
     } elseif ($Stage -eq 'run') {
         SetStart 'qcsmmu' 4
         # The GPU0 overlay is read once, at boot. Refuse to start qcdx while a
@@ -365,19 +511,37 @@ try {
         $k = Join-Path $Svc 'QCDX'
         Set-ItemProperty $k -Name Start -Value 3 -Type DWord
         Log 'QCDX Start=3 for this start only'
+        # If StartDevice hangs / blacks the panel, the watchdog still drops us
+        # into fastboot so the host can read logs from Linux.
+        ArmWatchdog 120
         $rc = Run 'pnputil.exe' @('/restart-device', $Gpu)
         Start-Sleep -Seconds 20
         Set-ItemProperty $k -Name Start -Value 4 -Type DWord
         Log 'QCDX Start=4 again'
+        FlushSvc 'QCDX'
         Snapshot
+        PublishDesktop
         $v = Get-CimInstance Win32_VideoController | Where-Object Name -like '*Adreno*'
-        if ($v -and $v.ConfigManagerErrorCode -eq 0) { Log "RESULT adapter running: $($v.Name)" } else { Log 'RESULT adapter not running' }
+        if ($v -and $v.ConfigManagerErrorCode -eq 0) {
+            CancelWatchdog
+            Log "RESULT adapter running: $($v.Name)"
+        } else {
+            Log 'RESULT adapter not running'
+            $script:GoFastboot = $true
+            $script:FastbootWhy = 'adapter not running after 2-run'
+        }
     } else {
         Snapshot
+        PublishDesktop
     }
 } catch {
     Log "ERROR $_"
+    $script:GoFastboot = $true
+    $script:FastbootWhy = "ERROR $_"
 } finally {
     Copy-Item $Log $Copy -Force -ErrorAction SilentlyContinue
     Log "report: $Log and $Copy"
+    if ($script:GoFastboot) {
+        RebootToFastboot $script:FastbootWhy
+    }
 }

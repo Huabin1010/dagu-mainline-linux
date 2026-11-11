@@ -1214,6 +1214,16 @@ PVOID gPathReal[8];
 static LONG gPathHooked;
 ULONG gPathInstall;
 
+/* Breadcrumb flush timer: declared here because Unload cancels it. */
+static KTIMER gPathTimer;
+static KDPC gPathDpc;
+static WORK_QUEUE_ITEM gPathItem;
+static LONG gPathQueued;
+static LONG gPathBusy;
+static LONG gPathStop;
+static ULONG gPathFlushed;
+static ULONG gPathTick;
+
 static VOID
 WriteRing(VOID)
 {
@@ -1651,7 +1661,21 @@ static VOID OnLoad(PUNICODE_STRING name, HANDLE pid, PIMAGE_INFO info);
 static VOID
 Unload(PDRIVER_OBJECT drv)
 {
+    LARGE_INTEGER wait;
+    ULONG i;
+
     UNREFERENCED_PARAMETER(drv);
+    /* The breadcrumb timer and its work item must be gone before the image
+     * goes away: devcon restarts this device on every install, and a timer
+     * still armed at unload bugchecked 0xD4 on 2026-11-11 21:22. */
+    InterlockedExchange(&gPathStop, 1);
+    KeCancelTimer(&gPathTimer);
+    wait.QuadPart = -10 * 1000 * 10;   /* 10 ms, 100 ns units */
+    for (i = 0; i < 100; i++) {
+        if (!gPathQueued && !gPathBusy)
+            break;
+        KeDelayExecutionThread(KernelMode, FALSE, &wait);
+    }
     PsRemoveLoadImageNotifyRoutine(OnLoad);
     if (gKey) {
         ZwClose(gKey);
@@ -2735,10 +2759,6 @@ InstallPathHooks(PUCHAR base)
  * (2026-11-11 21:05: 2-run ended in a black screen, pagefile had no dump).
  * A periodic timer flushes the newest breadcrumb into Parameters, which is
  * on disk before the next event can hang the machine. */
-static KTIMER gPathTimer;
-static KDPC gPathDpc;
-static WORK_QUEUE_ITEM gPathItem;
-static LONG gPathQueued;
 
 static VOID
 PathFlushWorker(PVOID ctx)
@@ -2747,9 +2767,18 @@ PathFlushWorker(PVOID ctx)
 
     UNREFERENCED_PARAMETER(ctx);
     InterlockedExchange(&gPathQueued, 0);
-    if (!gKey || KeGetCurrentIrql() != PASSIVE_LEVEL)
+    if (gPathStop || !gKey || KeGetCurrentIrql() != PASSIVE_LEVEL)
         return;
+    InterlockedIncrement(&gPathBusy);
     n = (ULONG)InterlockedCompareExchange((LONG *)&gPathCount, 0, 0);
+    /* Flushing the whole hive five times a second is wasteful; write only
+     * when a new breadcrumb appeared, plus a 10 s heartbeat for step. */
+    gPathTick++;
+    if (n == gPathFlushed && (gPathTick % 50) != 0) {
+        InterlockedDecrement(&gPathBusy);
+        return;
+    }
+    gPathFlushed = n;
     Put(L"pathn", n);
     Put(L"paths", gPathInstall);
     if (n) {
@@ -2761,6 +2790,7 @@ PathFlushWorker(PVOID ctx)
         Put(L"pstep", gLastStep);
     }
     ZwFlushKey(gKey);
+    InterlockedDecrement(&gPathBusy);
 }
 
 static VOID
@@ -2770,6 +2800,8 @@ PathFlushDpc(PKDPC dpc, PVOID ctx, PVOID arg1, PVOID arg2)
     UNREFERENCED_PARAMETER(ctx);
     UNREFERENCED_PARAMETER(arg1);
     UNREFERENCED_PARAMETER(arg2);
+    if (gPathStop)
+        return;
     if (InterlockedCompareExchange(&gPathQueued, 1, 0) == 0)
         ExQueueWorkItem(&gPathItem, DelayedWorkQueue);
 }

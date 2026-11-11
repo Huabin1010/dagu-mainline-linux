@@ -861,16 +861,26 @@ IovaAlloc(SHIM_DOM *d, ULONG64 size, ULONG alignCode)
     if (!d->Pt) {
         PHYSICAL_ADDRESS lo, hi, bound, pa;
         PVOID mem;
+        ULONG64 span;
 
+        /* MmAllocateContiguousMemory only promises page alignment; on
+         * 2026-11-11 the 16 KB / 16 KB request came back misaligned and
+         * slot 24 failed (io_err 0x180004). A power-of-two span that may
+         * not cross its own boundary must start on one. */
+        span = iommu_contig_span(size, align, 1ULL << 30);
+        if (!span) {
+            gIommuErr = (24u << 16) | 5u;
+            return NULL;
+        }
         lo.QuadPart = d->Base;
         hi.QuadPart = (d->Base + d->Size - 1) > 0xFFFFFFFFULL ? 0xFFFFFFFFULL : (d->Base + d->Size - 1);
-        bound.QuadPart = 0;
-        mem = MmAllocateContiguousMemorySpecifyCache((SIZE_T)size, lo, hi, bound, MmWriteCombined);
+        bound.QuadPart = align > PAGE_SIZE ? (LONGLONG)span : 0;
+        mem = MmAllocateContiguousMemorySpecifyCache((SIZE_T)span, lo, hi, bound, MmWriteCombined);
         if (!mem) {
             gIommuErr = (24u << 16) | 2u;
             return NULL;
         }
-        RtlZeroMemory(mem, (SIZE_T)size);
+        RtlZeroMemory(mem, (SIZE_T)span);
         pa = MmGetPhysicalAddress(mem);
         gIommuIdBytes = (ULONG)size;
         if ((ULONG64)pa.QuadPart & (align - 1)) {

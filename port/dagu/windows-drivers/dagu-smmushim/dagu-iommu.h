@@ -330,6 +330,32 @@ iommu_align_up(iu64 v, iu64 align)
     return (v + align - 1) & ~(align - 1);
 }
 
+/* Bytes to request from a physically contiguous allocator so the block
+ * starts on an align boundary. Windows only promises page alignment, so
+ * the request is the smallest power of two >= max(size, align), passed
+ * as both length and BoundaryAddressMultiple: a block that may not cross
+ * a span boundary and is span bytes long must start on one. size must be
+ * page-aligned and non-zero, align a power of two. Returns 0 when the span
+ * would exceed max_span. */
+static iu64
+iommu_contig_span(iu64 size, iu64 align, iu64 max_span)
+{
+    iu64 need, span;
+
+    if (!size || (size & (IOMMU_PAGE - 1)) || !align || (align & (align - 1)))
+        return 0;
+    if (align <= IOMMU_PAGE)
+        return size;
+    need = size > align ? size : align;
+    span = align;
+    while (span < need) {
+        if (span > (max_span >> 1))
+            return 0;
+        span <<= 1;
+    }
+    return span <= max_span ? span : 0;
+}
+
 /* First fit of size bytes, aligned, inside [lo, hi) and the allocator's
  * window. align must be a power of two >= 4 KB. Returns 0 on failure;
  * callers keep IOVA 0 out of every window, so 0 is never a real result. */

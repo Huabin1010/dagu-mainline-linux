@@ -321,6 +321,47 @@ static void test_tcr2_sep_is_bit39(void)
     CHECK(IOMMU_TCR2_QCDX & (1u << 4));
 }
 
+/* ---- contiguous span for aligned identity allocations ---- */
+
+static void test_span_page_align_is_size(void)
+{
+    CHECK(iommu_contig_span(0x4000, 0x1000, 1ull << 30) == 0x4000);
+    CHECK(iommu_contig_span(0x3000, 0x1000, 1ull << 30) == 0x3000);
+}
+
+static void test_span_covers_size_and_align(void)
+{
+    /* 2026-11-11 14:42: slot 24 asked 16 KB with align code 4 (2^14). */
+    CHECK(iommu_contig_span(0x4000, 0x4000, 1ull << 30) == 0x4000);
+    CHECK(iommu_contig_span(0x4000, 0x100000, 1ull << 30) == 0x100000);
+    CHECK(iommu_contig_span(0x300000, 0x100000, 1ull << 30) == 0x400000);
+    CHECK(iommu_contig_span(0x100000, 0x100000, 1ull << 30) == 0x100000);
+}
+
+static void test_span_is_power_of_two_multiple_of_align(void)
+{
+    iu64 sizes[] = { 0x1000, 0x5000, 0x10000, 0x123000, 0x800000 };
+    iu64 aligns[] = { 0x2000, 0x10000, 0x200000 };
+    unsigned i, j;
+    for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
+        for (j = 0; j < sizeof(aligns) / sizeof(aligns[0]); j++) {
+            iu64 s = iommu_contig_span(sizes[i], aligns[j], 1ull << 30);
+            CHECK(s >= sizes[i] && s >= aligns[j]);
+            CHECK((s & (s - 1)) == 0);
+            CHECK((s % aligns[j]) == 0);
+        }
+}
+
+static void test_span_rejects_bad_input_and_cap(void)
+{
+    CHECK(iommu_contig_span(0, 0x10000, 1ull << 30) == 0);
+    CHECK(iommu_contig_span(0x1800, 0x10000, 1ull << 30) == 0);
+    CHECK(iommu_contig_span(0x4000, 0x3000, 1ull << 30) == 0);
+    CHECK(iommu_contig_span(0x4000, 0, 1ull << 30) == 0);
+    CHECK(iommu_contig_span(0x500000, 0x100000, 0x400000) == 0);
+    CHECK(iommu_contig_span(0x400000, 0x100000, 0x400000) == 0x400000);
+}
+
 int main(void)
 {
     TEST(test_init_gives_zeroed_root);
@@ -342,6 +383,10 @@ int main(void)
     TEST(test_init_rejects_bad_window);
     TEST(test_tcr_matches_linux_fields_for_qcdx_split);
     TEST(test_tcr2_sep_is_bit39);
+    TEST(test_span_page_align_is_size);
+    TEST(test_span_covers_size_and_align);
+    TEST(test_span_is_power_of_two_multiple_of_align);
+    TEST(test_span_rejects_bad_input_and_cap);
     printf("%d tests, %d failures\n", g_run, g_fail);
     return g_fail != 0;
 }

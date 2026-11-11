@@ -2731,6 +2731,49 @@ InstallPathHooks(PUCHAR base)
     gPathInstall = ok;
 }
 
+/* A hang leaves no crash dump, so the in-memory ring alone is not enough
+ * (2026-11-11 21:05: 2-run ended in a black screen, pagefile had no dump).
+ * A periodic timer flushes the newest breadcrumb into Parameters, which is
+ * on disk before the next event can hang the machine. */
+static KTIMER gPathTimer;
+static KDPC gPathDpc;
+static WORK_QUEUE_ITEM gPathItem;
+static LONG gPathQueued;
+
+static VOID
+PathFlushWorker(PVOID ctx)
+{
+    ULONG n, idx, last;
+
+    UNREFERENCED_PARAMETER(ctx);
+    InterlockedExchange(&gPathQueued, 0);
+    if (!gKey || KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
+    n = (ULONG)InterlockedCompareExchange((LONG *)&gPathCount, 0, 0);
+    Put(L"pathn", n);
+    Put(L"paths", gPathInstall);
+    if (n) {
+        idx = (n - 1) & (PATH_CAP - 1);
+        last = gPathId[idx];
+        Put(L"plast", last);
+        Put(L"plrlo", (ULONG)gPathLr[idx]);
+        Put(L"plrhi", (ULONG)(gPathLr[idx] >> 32));
+        Put(L"pstep", gLastStep);
+    }
+    ZwFlushKey(gKey);
+}
+
+static VOID
+PathFlushDpc(PKDPC dpc, PVOID ctx, PVOID arg1, PVOID arg2)
+{
+    UNREFERENCED_PARAMETER(dpc);
+    UNREFERENCED_PARAMETER(ctx);
+    UNREFERENCED_PARAMETER(arg1);
+    UNREFERENCED_PARAMETER(arg2);
+    if (InterlockedCompareExchange(&gPathQueued, 1, 0) == 0)
+        ExQueueWorkItem(&gPathItem, DelayedWorkQueue);
+}
+
 #define WALK_OK 0u
 #define WALK_NOT_KERNEL 1u
 #define WALK_GRANULE 2u
@@ -3333,6 +3376,17 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
     gIdLax = GetDword(L"idlax", 0);
     ExInitializeWorkItem(&gNoteItem, FlushNote, NULL);
     ExInitializeWorkItem(&gDiagItem, DiagWorker, NULL);
+    ExInitializeWorkItem(&gPathItem, PathFlushWorker, NULL);
+    KeInitializeTimerEx(&gPathTimer, NotificationTimer);
+    KeInitializeDpc(&gPathDpc, PathFlushDpc, NULL);
+    /* 100 ms period: the newest breadcrumb reaches the hive long before a
+     * display step can stall the bus. */
+    {
+        LARGE_INTEGER due;
+
+        due.QuadPart = -2000000;    /* 200 ms relative, 100 ns units */
+        KeSetTimerEx(&gPathTimer, due, 200, &gPathDpc);
+    }
     ClearStale();
     Step(0x10);
     IommuInit();

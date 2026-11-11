@@ -97,6 +97,25 @@ qcdx 的错误/警告环（`--qcdx-log`），两次的尾巴一致：
 - **定位 SError 的那次访问**：给垫片加调用点面包屑（把 qcdx 显示初始化里几处 `bl` 改到记录站点后再跳回的跳板），转储里读最后进入的函数。
 - **补电源管理芯片驱动**：给 Windows 加 `QCOM250C` / `QCOM252E` 两个节点，让 qcdx 的面板供电请求有人接。这一步会碰电源轨，`dagu-battery` 已经在直接访问 SPMI，要先确认两者不冲突。
 
+补充：面板供电这一段由 qcdx 的面板配置决定。`0xADC00` 只在面板配置 `+0xF00` 的 bit 16 置位、`+0x5C`（电源管理芯片型号）非零时才去开这三个接口；随后按配置里的型号去查型号表。dagu 的面板 L81A 用两颗 I2C 背光芯片 KTZ8866，供电不走电源管理芯片的 WLED（White LED，白光背光驱动）/ LAB（LCD 正压）/ IBB（LCD 负压）。所以 qcdx 现在拿到的面板配置不是 dagu 的：要么是参考板的默认值，要么是从 `UEFIDisplayInfo` 固件变量（GUID `{9042a9de-23dc-4a38-96fb-7aded080516a}`，长度 `0x78`）推出来的。
+
+这样排出的第三条路，应该排在前两条之前：
+
+- **给 qcdx 正确的面板配置**：让它知道面板供电不走电源管理芯片，这三个接口就不会去开。先在 Windows 里读一次 `UEFIDisplayInfo` 变量，看它在不在、内容是什么；再顺着 `0xADC00` 的 `+0xF00` / `+0x5C` 往回找，它们是从哪里填进去的。
+
+从 15:57 的转储里读到的（只读）：
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| qcdx 日志 `#36` | `ERR 0x226`，`qcdx+0xD3EC8`，参数 `0 0x78` | `0xD3D38` 读 `UEFIDisplayInfo` 失败的分支：`ExGetFirmwareEnvironmentVariable` 返回非 0 |
+| qcdx 里这份变量的副本（`+0x21F5CC`） | 前 0x28 字节全 0 | 没读到 |
+| `BacklightPmicModel` / `BacklightPmicNum` | 2 / 2 | 默认值，不是 dagu 的 |
+| `PMIPowerPmicNum` | `0x1E` | 同上 |
+
+dagu 的 UEFI 只有 SimpleFb，没有高通的 `DisplayDxe`，所以不会写这个变量。qcdx 读不到，就用自带的参考板面板默认值：背光走电源管理芯片，于是去开那三个接口。这和 §6 第 1 条对得上，也说明面板配置不对是在接口缺失之前的一环。
+
+下一步：从 `0xD3E08` 往后把这 0x78 字节的布局逆出来（已知 `+0x38`、`+0x40`、`+0x48`、`+0x5C` 被读），在 `DaguPlatDxe` 里按 L81A 的真实参数写出 `UEFIDisplayInfo`。这要刷 A 槽的 UEFI，上板前要确认 KTZ8866 背光不会被 qcdx 改走。
+
 ### 关联文档
 
 [阶段 25](woa-dagu-gpu-stage25-2026-11-10.md)、[阶段 19](woa-dagu-gpu-stage19-2026-10-31.md)、[阶段 15](woa-dagu-gpu-stage15-2026-10-31.md)、[适配计划](woa-dagu-gpu-adaptation-plan-2026-11-10.md)、[路线图](woa-dagu-gpu-roadmap.md)。

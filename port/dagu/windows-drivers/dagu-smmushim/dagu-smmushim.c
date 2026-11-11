@@ -181,6 +181,7 @@ static WORK_QUEUE_ITEM gNoteItem;
 static LONG gNoteQueued;
 static VOID NoteCaller(ULONG_PTR ret);
 static VOID NoteFlush(VOID);
+static VOID QcdxSafeStart(VOID);
 static UINT64 SlotDispatch(ULONG slot, ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d, ULONG_PTR caller);
 
 static VOID
@@ -1505,6 +1506,9 @@ FillInterface(PSHIM_EXT ext, const GUID *type, USHORT size, USHORT version, PINT
         return STATUS_NOT_SUPPORTED;
     gIfaceKind = GuidEq(type, &kIfaceVideo) ? 2 : 1;
     Put(L"iface", (ULONG)gIfaceKind);
+    /* qcdx is past AddDevice and inside StartDevice: make the next boot
+     * safe before anything below can crash. */
+    QcdxSafeStart();
     /* Only now, when qcdx starts (2-run.cmd), never at boot: the boot path
      * must not read GPU_CC or the Adreno SMMU. */
     if (!InterlockedExchange(&gSmmuTried, 1) && KeGetCurrentIrql() == PASSIVE_LEVEL)
@@ -2977,15 +2981,18 @@ FlushNote(PVOID ctx)
 /* 2-run.cmd sets QCDX Start=3 for one PnP restart and put Start=4 back
  * after a 20 s sleep. On 2026-11-11 qcdx bugchecked (0xA in its own
  * fallback path) a few seconds after load, the 4 was never written, and the
- * flushed Start=3 would have loaded qcdx again on every boot. The service
- * start type has already been read by the time the image is mapped, so the
- * safe value is written and flushed here, from a worker, the moment qcdx
- * is seen. qcdxoff is that NTSTATUS (0 = on disk). */
-static WORK_QUEUE_ITEM gSafeItem;
-static LONG gSafeQueued;
+ * flushed Start=3 would have loaded qcdx again on every boot.
+ *
+ * Start=4 must not be written when the image maps: PnP still checks the
+ * service after DriverEntry, and AddDevice then failed with
+ * CM_PROB_FAILED_ADD / 0xC00000BB (2026-11-11 14:12, ncall=0). It is
+ * written here instead, when qcdx first queries the shim interface from
+ * StartDevice: AddDevice is done and nothing that crashed has run yet.
+ * qcdxoff is 1 once Start=4 is flushed, otherwise the failing NTSTATUS. */
+static LONG gSafeDone;
 
 static VOID
-QcdxSafeStart(PVOID ctx)
+QcdxSafeStart(VOID)
 {
     UNICODE_STRING path, name;
     OBJECT_ATTRIBUTES oa;
@@ -2993,7 +3000,8 @@ QcdxSafeStart(PVOID ctx)
     ULONG v = 4;
     NTSTATUS st;
 
-    UNREFERENCED_PARAMETER(ctx);
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || InterlockedExchange(&gSafeDone, 1))
+        return;
     RtlInitUnicodeString(&path, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\QCDX");
     InitializeObjectAttributes(&oa, &path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
     st = ZwOpenKey(&k, KEY_SET_VALUE, &oa);
@@ -3004,16 +3012,9 @@ QcdxSafeStart(PVOID ctx)
             st = ZwFlushKey(k);
         ZwClose(k);
     }
-    Put(L"qcdxoff", (ULONG)st);
+    Put(L"qcdxoff", NT_SUCCESS(st) ? 1u : (ULONG)st);
     if (gKey)
         ZwFlushKey(gKey);
-}
-
-static VOID
-QueueSafeStart(VOID)
-{
-    if (InterlockedCompareExchange(&gSafeQueued, 1, 0) == 0)
-        ExQueueWorkItem(&gSafeItem, DelayedWorkQueue);
 }
 
 /* Queue only. OnLoad stays off the registry so a loader lock cannot meet
@@ -3061,7 +3062,6 @@ OnLoad(PUNICODE_STRING name, HANDLE pid, PIMAGE_INFO info)
     else
         goto out;
     gIhit = how;
-    QueueSafeStart();
     gQcdxBase = (ULONG_PTR)info->ImageBase;
     gQcdxSize = info->ImageSize > 0xFFFFFFFFu ? 0xFFFFFFFFu : (ULONG)info->ImageSize;
     gNirq = KeGetCurrentIrql();
@@ -3096,7 +3096,6 @@ NoteCaller(ULONG_PTR ret)
         }
     }
     if (base) {
-        QueueSafeStart();
         PatchQcdx(base, FALSE);
         InstallFillHook(base);
         InstallLogHook(base);
@@ -3217,7 +3216,6 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
     gIdLax = GetDword(L"idlax", 0);
     ExInitializeWorkItem(&gNoteItem, FlushNote, NULL);
     ExInitializeWorkItem(&gDiagItem, DiagWorker, NULL);
-    ExInitializeWorkItem(&gSafeItem, QcdxSafeStart, NULL);
     ClearStale();
     Step(0x10);
     IommuInit();

@@ -122,6 +122,25 @@ dagu 的 UEFI 只有 SimpleFb，没有高通的 `DisplayDxe`，所以不会写�
 
 已逆（`0x2C07B8`–`0x2C08BC`）：`PanelOverride` 只读 `Width` 和 `Height` 两个值，接受竖屏 480–1600 × 640–2560 或横屏范围，用于模拟面板的分辨率。它不带背光和供电方式，换不掉面板供电走电源管理芯片这一步。所以要让 qcdx 不去开电源管理芯片接口，还是得给它一个真的面板编号或真的面板配置，正路仍是 `UEFIDisplayInfo` 加 qcdx 自带面板表里的 L81A 条目（如果没有，就要补电源管理芯片栈）。
 
+## 7. 再更正：面板配置来自我们自己的 `_ROM`
+
+§6 关于 `UEFIDisplayInfo` 的推论又错了一半。qcdx 自带的驱动里没有任何面板 XML，面板配置走的是 `0xE3AB8` → `0xD49D0`，后者调 ACPI 的 `_ROM` 分块读 XML。15:57 那次转储里 qcdx 解析出来的值是：
+
+| 项 | 转储里的值 | 来自 |
+|---|---|---|
+| `PanelName` | `L81A` | 我们覆盖表里的 `_ROM` |
+| `HorizontalActive` / `VerticalActive` | 1600 / 2560 | 同上 |
+| `InterfaceType` / `DSILanes` | 8 / 4 | 同上 |
+| `PMIPowerPmicNum` / `PMIPowerPmicModel` / `PMIPowerConfig` | 1 / `0x1E` / 1 | 同上 |
+
+所以 qcdx 读的就是我们的 L81A XML，[阶段 22](woa-dagu-gpu-stage22-2026-11-08.md) §2.1 “`_ROM` 被证伪”的结论不对（那次失败链没变，是因为卡在更早的显示版本门，没有走到解析结果被用的地方）。`UEFIDisplayInfo` 读不到只影响面板编号和亮度，不影响供电方式。
+
+真正把 qcdx 引去电源管理芯片的是这三行：`PMIPowerPmicNum=1`、`PMIPowerPmicModel=0x1E`、`PMIPowerConfig=1`。`0xADC00` 拿 `PMIPowerPmicModel` 去查型号表 `0x193FD0`，命中后按 `PMIPowerConfig` 开那三个接口。小米原厂 `Panel_L81A_42_04_0a_dualdsi_dphy_lcd_vid.xml` 里**没有**任何 `PMIPower*` 字段，这三行和参考板 `qcom-mtp8250` 的 Sharp/TFT 面板配置一字不差，是移植时从参考板带进来的。
+
+改法：从 `graphics-qcom253a.asl` 的 `PCFG` 里删掉这三行（`tools/winarm/pcfg-edit.py`，6 项单元测试）。`PMIPowerPmicModel` 为 0 时，`0xADC00` 在 `0xADC40` 直接返回，不碰那三个接口。新覆盖表 53,424 字节，SHA256 开头 `ECD901FA`，`build-gpu-overlay.py` 全部检查通过；改之前用同一套工具从 ASL 重建，和板上那份逐字节相同，说明构建路径可靠。
+
+预期：qcdx 不再开电源管理芯片接口，不再发那八个面板供电请求。`0x124` 如果是这一串失败引起的，就会消失；如果还在，出错位置会后移，届时再看。背光仍由 UEFI 的 `DaguBacklightDxe` 点亮的 KTZ8866 维持。
+
 ### 关联文档
 
 [阶段 25](woa-dagu-gpu-stage25-2026-11-10.md)、[阶段 19](woa-dagu-gpu-stage19-2026-10-31.md)、[阶段 15](woa-dagu-gpu-stage15-2026-10-31.md)、[适配计划](woa-dagu-gpu-adaptation-plan-2026-11-10.md)、[路线图](woa-dagu-gpu-roadmap.md)。

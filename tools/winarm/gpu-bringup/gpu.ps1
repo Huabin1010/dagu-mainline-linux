@@ -33,6 +33,33 @@ $QcifIfaces = @(
     '{ae865c08-4a07-404d-be51-d9a0465e23e5}',
     '{16a1ab50-7413-4875-893d-2e5aa0b79888}',
     '{eb3c7242-1b1a-4d51-ab55-f268f018f860}')
+# CM_Get_Device_Interface_List with PRESENT (0): enabled interfaces only.
+if (-not ('DaguIface' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class DaguIface {
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern int CM_Get_Device_Interface_List_SizeW(out int len, ref Guid cls, string dev, int flags);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern int CM_Get_Device_Interface_ListW(ref Guid cls, string dev, char[] buf, int len, int flags);
+    const int CR_BUFFER_SMALL = 0x1A;
+    public static string[] Present(Guid cls) {
+        for (int i = 0; i < 4; i++) {
+            int n;
+            int cr = CM_Get_Device_Interface_List_SizeW(out n, ref cls, null, 0);
+            if (cr != 0) throw new Exception("CM_Get_Device_Interface_List_Size cr=0x" + cr.ToString("x"));
+            char[] buf = new char[n];
+            cr = CM_Get_Device_Interface_ListW(ref cls, null, buf, n, 0);
+            if (cr == CR_BUFFER_SMALL) continue;
+            if (cr != 0) throw new Exception("CM_Get_Device_Interface_List cr=0x" + cr.ToString("x"));
+            return new string(buf).Split(new char[] { '\0' }, StringSplitOptions.RemoveEmptyEntries);
+        }
+        throw new Exception("interface list kept changing");
+    }
+}
+'@
+}
 
 Remove-Item $Log -ErrorAction SilentlyContinue
 function Log([string]$m) {
@@ -291,14 +318,13 @@ try {
         }
         $missing = @()
         foreach ($g in $QcifIfaces) {
-            # DeviceClasses keeps a link after its device is gone; only
-            # #\Control\Linked=1 means the interface is enabled right now.
-            $live = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceClasses\$g" -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $c = Get-ItemProperty -LiteralPath (Join-Path $_.PSPath '#\Control') -ErrorAction SilentlyContinue
-                    $c -and $c.Linked -eq 1
-                }
-            if (-not $live) { $missing += $g }
+            # Ask PnP itself, like qcdx's IoGetDeviceInterfaces: the list holds
+            # only interfaces that are enabled right now. Reading Linked under
+            # DeviceClasses reported all four missing on 2026-11-11 while qcif
+            # had registered and enabled them (step 0x30).
+            $links = @([DaguIface]::Present([Guid]$g))
+            foreach ($l in $links) { Log "  iface $g -> $l" }
+            if (-not $links.Count) { $missing += $g }
         }
         if ($missing.Count) { throw "qcif interfaces missing: $($missing -join ', '); qcdx is not started." }
         Log 'qcif interfaces present: SCM, TrEE PassThrough, WinSecApp, MemSharing'

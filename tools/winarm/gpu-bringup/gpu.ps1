@@ -2,15 +2,16 @@
 <#
 dagu GPU bring-up, run inside Windows.
 
-Stage 1 (-Stage install): stage the dagu SMMU shim and the qcdx display
-driver. Both services are left so that nothing GPU-related loads at boot:
-QCDX Start=4. The shim root device is created through devcon so its
-interfaces exist before qcdx asks for them.
+Stage 1 (-Stage install): stage the dagu SMMU shim, the dagu-qcif SCM/TrEE
+interface stand-in and the qcdx display driver. Nothing GPU-related loads
+at boot: QCDX Start=4. The shim and qcif root devices are created through
+devcon so their interfaces exist before qcdx asks for them.
 
-Stage 2 (-Stage run): start qcdx once at runtime. QCDX is set back to
-Start=4 before the device is restarted, so a crash or a reset brings
-the next boot back to the safe state. The shim's stop code tells which
-gate failed (0xDA0xxx).
+Stage 2 (-Stage run): start qcdx once at runtime, only when the shim and
+all four qcif interfaces are live. QCDX is back at Start=4 on disk before
+qcdx runs any code (the shim writes it when the image maps), so a crash or
+a reset brings the next boot back to the safe state. The shim's stop code
+tells which gate failed (0xDA0xxx).
 
   powershell -ExecutionPolicy Bypass -File gpu.ps1 -Stage install
   powershell -ExecutionPolicy Bypass -File gpu.ps1 -Stage run
@@ -25,6 +26,13 @@ $Gpu = 'ACPI\QCOM253A\0'
 $Thumb = 'F11518C396DAEEAEF651812116C5783B35A9F746'
 $RootThumb = 'EB968A1AC3F69712139302D3B8687BAF8815FF73'
 $Svc = 'HKLM:\SYSTEM\CurrentControlSet\Services'
+# Interfaces qcdx waits on after the SMMU callbacks (qcdx 0x29ac00 SCM,
+# 0x29ae70 TrEE PassThrough/WinSecApp, 0x29b02c TrEE MemSharing).
+$QcifIfaces = @(
+    '{41c66d2a-a9f1-40ca-a329-ae096c03ee68}',
+    '{ae865c08-4a07-404d-be51-d9a0465e23e5}',
+    '{16a1ab50-7413-4875-893d-2e5aa0b79888}',
+    '{eb3c7242-1b1a-4d51-ab55-f268f018f860}')
 
 Remove-Item $Log -ErrorAction SilentlyContinue
 function Log([string]$m) {
@@ -47,6 +55,37 @@ function SetStart([string]$name, [int]$v) {
         Log "$name Start=$v"
     }
 }
+# pnputil refuses a third-party INF without a signed catalog (0xE000022F).
+function SignCatalog([string]$dir, [string]$name, $cert) {
+    $cat = Join-Path $dir $name
+    Remove-Item $cat -ErrorAction SilentlyContinue
+    New-FileCatalog -Path $dir -CatalogFilePath $cat -CatalogVersion 2.0 | Out-Null
+    $sig = Set-AuthenticodeSignature -FilePath $cat -Certificate $cert -HashAlgorithm SHA256
+    Log "$name signed: $($sig.Status) $($sig.StatusMessage)"
+    if ($sig.Status -ne 'Valid') { throw "$name signature is $($sig.Status)" }
+}
+# devcon names root devices ROOT\SYSTEM\NNNN, so match by hardware id.
+# Exactly one device: extra copies are removed, a missing one is created,
+# and the remaining one is moved onto this driver build.
+function RootDevice([string]$devcon, [string]$inf, [string]$hwid) {
+    $ids = @()
+    foreach ($l in ((& $devcon find $hwid 2>&1 | Out-String) -split "`r?`n")) {
+        if ($l -match '^(ROOT\\\S+)\s*:') { $ids += $Matches[1] }
+    }
+    Log "$hwid devices: $($ids -join ', ')"
+    if ($ids.Count -gt 1) {
+        foreach ($id in $ids[1..($ids.Count - 1)]) { Run $devcon @('remove', "@$id") | Out-Null }
+    }
+    if ($ids.Count -eq 0) {
+        $rc = Run $devcon @('install', $inf, $hwid)
+        if ($rc -ne 0 -and $rc -ne 1) { throw "devcon install $hwid rc=$rc" }
+    } else {
+        $rc = Run $devcon @('update', $inf, $hwid)
+        if ($rc -ne 0 -and $rc -ne 1) { throw "devcon update $hwid rc=$rc" }
+        Run $devcon @('restart', $hwid) | Out-Null
+    }
+    Start-Sleep -Seconds 2
+}
 function FixClock {
     $cert = Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $RootThumb
     if (-not $cert) { return }
@@ -64,7 +103,7 @@ function FixClock {
 function Snapshot {
     Run 'pnputil.exe' @('/enum-devices', '/instanceid', $Gpu, '/drivers') | Out-Null
     Run (Join-Path $Here 'devcon.exe') @('status', 'root\DAGUSMMU') | Out-Null
-    foreach ($n in @('QCDX', 'dagusmmu', 'qcsmmu')) {
+    foreach ($n in @('QCDX', 'dagusmmu', 'daguqcif', 'qcsmmu')) {
         $k = Join-Path $Svc $n
         if (Test-Path $k) {
             $p = Get-ItemProperty $k
@@ -82,8 +121,16 @@ function Snapshot {
         $have = @($p.PSObject.Properties.Name)
         foreach ($n in @('bootgen', 'step', 'qpatch', 'ihit', 'nirq', 'ncall', 'fail', 'fsite', 'fcall', 'nfail', 'subok', 'fmcall', 'fmhit', 'map', 'rstonfail',
                          'cb0', 'idlax', 'cb0_state', 'cb0_on', 'cb0_sync', 'cb0_fsr', 'io_err', 'io_maps', 'io_iova', 'io_idmiss', 'io_kinds',
-                         'pt0_tables', 'pt0_mapped', 'pt1_tables', 'pt1_mapped', 'io_leak')) {
+                         'pt0_tables', 'pt0_mapped', 'pt1_tables', 'pt1_mapped', 'io_leak', 'qcdxoff')) {
             if ($have -contains $n) { Log ("shim {0} = 0x{1:x}" -f $n, [uint32]$p.$n) }
+        }
+    }
+    $qpar = Join-Path $Svc 'daguqcif\Parameters'
+    if (Test-Path $qpar) {
+        $p = Get-ItemProperty $qpar
+        $have = @($p.PSObject.Properties.Name)
+        foreach ($n in @('step', 'creates', 'ioctl', 'qguid', 'regif', 'enif', 'which')) {
+            if ($have -contains $n) { Log ("qcif {0} = 0x{1:x}" -f $n, [uint32]$p.$n) }
         }
     }
     Get-CimInstance Win32_VideoController | ForEach-Object { Log "video: $($_.Name) status=$($_.Status) err=$($_.ConfigManagerErrorCode)" }
@@ -155,12 +202,7 @@ try {
             Log "imported signing cert $($cert.Thumbprint)"
         }
         if (-not $cert -or -not $cert.HasPrivateKey) { throw 'signing cert has no private key' }
-        $cat = Join-Path $shim 'dagu-smmushim.cat'
-        Remove-Item $cat -ErrorAction SilentlyContinue
-        New-FileCatalog -Path $shim -CatalogFilePath $cat -CatalogVersion 2.0 | Out-Null
-        $sig = Set-AuthenticodeSignature -FilePath $cat -Certificate $cert -HashAlgorithm SHA256
-        Log "shim catalog signed: $($sig.Status) $($sig.StatusMessage)"
-        if ($sig.Status -ne 'Valid') { throw "shim catalog signature is $($sig.Status)" }
+        SignCatalog $shim 'dagu-smmushim.cat' $cert
 
         $rc = Run 'pnputil.exe' @('/add-driver', (Join-Path $shim 'dagu-smmushim.inf'))
         if ($rc -ne 0 -and $rc -ne 259) { throw "shim add-driver rc=$rc" }
@@ -178,27 +220,8 @@ try {
         Set-ItemProperty (Join-Path $Svc 'dagusmmu\Parameters') -Name cb0 -Value 1 -Type DWord
         Set-ItemProperty (Join-Path $Svc 'dagusmmu\Parameters') -Name idlax -Value 1 -Type DWord
         Log 'shim map=0 rstonfail=1 cb0=1 idlax=1'
-        # devcon names root devices ROOT\SYSTEM\NNNN, so match by hardware id.
-        # Exactly one shim device: extra copies are removed, a missing one is
-        # created, and the remaining one is moved onto the new driver build.
         $devcon = Join-Path $Here 'devcon.exe'
-        $ids = @()
-        foreach ($l in ((& $devcon find 'root\DAGUSMMU' 2>&1 | Out-String) -split "`r?`n")) {
-            if ($l -match '^(ROOT\\\S+)\s*:') { $ids += $Matches[1] }
-        }
-        Log "shim devices: $($ids -join ', ')"
-        if ($ids.Count -gt 1) {
-            foreach ($id in $ids[1..($ids.Count - 1)]) { Run $devcon @('remove', "@$id") | Out-Null }
-        }
-        if ($ids.Count -eq 0) {
-            $rc = Run $devcon @('install', (Join-Path $shim 'dagu-smmushim.inf'), 'root\DAGUSMMU')
-            if ($rc -ne 0 -and $rc -ne 1) { throw "devcon install rc=$rc" }
-        } else {
-            $rc = Run $devcon @('update', (Join-Path $shim 'dagu-smmushim.inf'), 'root\DAGUSMMU')
-            if ($rc -ne 0 -and $rc -ne 1) { throw "devcon update rc=$rc" }
-            Run $devcon @('restart', 'root\DAGUSMMU') | Out-Null
-        }
-        Start-Sleep -Seconds 2
+        RootDevice $devcon (Join-Path $shim 'dagu-smmushim.inf') 'root\DAGUSMMU'
         $img = (Get-ItemProperty (Join-Path $Svc 'dagusmmu')).ImagePath -replace '^\\SystemRoot', $env:SystemRoot
         $have = if (Test-Path $img) { (Get-FileHash $img -Algorithm SHA256).Hash } else { 'missing' }
         Log "service image $img sha256 $($have.Substring(0, [Math]::Min(16, $have.Length)))"
@@ -206,6 +229,16 @@ try {
         $shimSt = & $devcon status 'root\DAGUSMMU' 2>&1 | Out-String
         foreach ($l in ($shimSt -split "`r?`n")) { if ($l.Trim()) { Log "  shim: $l" } }
         if ($shimSt -notmatch 'Driver is running') { throw 'shim did not start; send me this report' }
+
+        # qcdx needs the SCM and TrEE interfaces after the SMMU callbacks.
+        $qcif = Join-Path $Here 'qcif'
+        SignCatalog $qcif 'dagu-qcif.cat' $cert
+        $rc = Run 'pnputil.exe' @('/add-driver', (Join-Path $qcif 'dagu-qcif.inf'))
+        if ($rc -ne 0 -and $rc -ne 259) { throw "qcif add-driver rc=$rc" }
+        RootDevice $devcon (Join-Path $qcif 'dagu-qcif.inf') 'root\DAGUQCIF'
+        $qcSt = & $devcon status 'root\DAGUQCIF' 2>&1 | Out-String
+        foreach ($l in ($qcSt -split "`r?`n")) { if ($l.Trim()) { Log "  qcif: $l" } }
+        if ($qcSt -notmatch 'Driver is running') { throw 'dagu-qcif did not start; send me this report' }
 
         # Re-adding qcdx8250.inf re-registers QCDX as demand start and PnP
         # restarts the GPU device right away, before 2-run.cmd. Add it only
@@ -247,6 +280,28 @@ try {
             throw 'dagu SMMU shim is not running; qcdx is not started. Send me this report.'
         }
         Log 'shim device running'
+        # qcdx opens four SCM/TrEE interfaces after the SMMU callbacks. With
+        # none present (2026-11-11) it failed StartDevice with 0xC00000C0 and
+        # bugchecked 0xA in its own fallback path (KeWait on a KMUTEX it never
+        # initialised). dagu-qcif publishes all four; never start without it.
+        $qcSt = & $devcon status 'root\DAGUQCIF' 2>&1 | Out-String
+        foreach ($l in ($qcSt -split "`r?`n")) { if ($l.Trim()) { Log "  qcif: $l" } }
+        if ($qcSt -notmatch 'Driver is running') {
+            throw 'dagu-qcif is not running; qcdx is not started. Run 1-install.cmd again.'
+        }
+        $missing = @()
+        foreach ($g in $QcifIfaces) {
+            # DeviceClasses keeps a link after its device is gone; only
+            # #\Control\Linked=1 means the interface is enabled right now.
+            $live = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceClasses\$g" -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $c = Get-ItemProperty -LiteralPath (Join-Path $_.PSPath '#\Control') -ErrorAction SilentlyContinue
+                    $c -and $c.Linked -eq 1
+                }
+            if (-not $live) { $missing += $g }
+        }
+        if ($missing.Count) { throw "qcif interfaces missing: $($missing -join ', '); qcdx is not started." }
+        Log 'qcif interfaces present: SCM, TrEE PassThrough, WinSecApp, MemSharing'
         if (-not (Test-Path (Join-Path $Svc 'QCDX'))) {
             # devcon update starts the device right away, so QCDX must already
             # be off. The service key does not exist yet; create Start=4 first.
@@ -257,6 +312,9 @@ try {
             if (-not (Test-Path (Join-Path $Svc 'QCDX'))) { throw 'QCDX service still missing after binding the driver' }
         }
         # Safe state first: if this start crashes, the next boot does not load qcdx.
+        # The shim also writes and flushes Start=4 itself the moment the qcdx
+        # image maps (qcdxoff), because a bugcheck inside the 20 s below never
+        # reaches the second Set-ItemProperty.
         SetStart 'QCDX' 4
         $k = Join-Path $Svc 'QCDX'
         Set-ItemProperty $k -Name Start -Value 3 -Type DWord

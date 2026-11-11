@@ -266,7 +266,7 @@ ClearStale(VOID)
         L"acpl0", L"acpl1", L"acpl2", L"acpl3",
         L"io_err", L"io_maps", L"io_iova", L"io_idmiss", L"io_idbytes", L"io_kinds",
         L"io_idwant", L"io_idgot", L"io_leak",
-        L"cb0_on", L"cb0_sync", L"cb0_fsr", L"cb0_state", L"pw_cx",
+        L"cb0_on", L"cb0_sync", L"cb0_fsr", L"cb0_state", L"pw_cx", L"qcdxoff",
         L"ttbr1_lo", L"ttbr1_hi", L"pt1_tables", L"pt1_mapped",
         L"ttbr0_lo", L"ttbr0_hi", L"pt0_tables", L"pt0_mapped",
     };
@@ -2974,6 +2974,48 @@ FlushNote(PVOID ctx)
         NoteFlush();
 }
 
+/* 2-run.cmd sets QCDX Start=3 for one PnP restart and put Start=4 back
+ * after a 20 s sleep. On 2026-11-11 qcdx bugchecked (0xA in its own
+ * fallback path) a few seconds after load, the 4 was never written, and the
+ * flushed Start=3 would have loaded qcdx again on every boot. The service
+ * start type has already been read by the time the image is mapped, so the
+ * safe value is written and flushed here, from a worker, the moment qcdx
+ * is seen. qcdxoff is that NTSTATUS (0 = on disk). */
+static WORK_QUEUE_ITEM gSafeItem;
+static LONG gSafeQueued;
+
+static VOID
+QcdxSafeStart(PVOID ctx)
+{
+    UNICODE_STRING path, name;
+    OBJECT_ATTRIBUTES oa;
+    HANDLE k;
+    ULONG v = 4;
+    NTSTATUS st;
+
+    UNREFERENCED_PARAMETER(ctx);
+    RtlInitUnicodeString(&path, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\QCDX");
+    InitializeObjectAttributes(&oa, &path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    st = ZwOpenKey(&k, KEY_SET_VALUE, &oa);
+    if (NT_SUCCESS(st)) {
+        RtlInitUnicodeString(&name, L"Start");
+        st = ZwSetValueKey(k, &name, 0, REG_DWORD, &v, sizeof(v));
+        if (NT_SUCCESS(st))
+            st = ZwFlushKey(k);
+        ZwClose(k);
+    }
+    Put(L"qcdxoff", (ULONG)st);
+    if (gKey)
+        ZwFlushKey(gKey);
+}
+
+static VOID
+QueueSafeStart(VOID)
+{
+    if (InterlockedCompareExchange(&gSafeQueued, 1, 0) == 0)
+        ExQueueWorkItem(&gSafeItem, DelayedWorkQueue);
+}
+
 /* Queue only. OnLoad stays off the registry so a loader lock cannot meet
  * ZwFlushKey, and the flush does not wait for a slot callback. The aperture
  * check returns before any slot call, so a callback-time flush would never
@@ -3019,6 +3061,7 @@ OnLoad(PUNICODE_STRING name, HANDLE pid, PIMAGE_INFO info)
     else
         goto out;
     gIhit = how;
+    QueueSafeStart();
     gQcdxBase = (ULONG_PTR)info->ImageBase;
     gQcdxSize = info->ImageSize > 0xFFFFFFFFu ? 0xFFFFFFFFu : (ULONG)info->ImageSize;
     gNirq = KeGetCurrentIrql();
@@ -3053,6 +3096,7 @@ NoteCaller(ULONG_PTR ret)
         }
     }
     if (base) {
+        QueueSafeStart();
         PatchQcdx(base, FALSE);
         InstallFillHook(base);
         InstallLogHook(base);
@@ -3173,6 +3217,7 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
     gIdLax = GetDword(L"idlax", 0);
     ExInitializeWorkItem(&gNoteItem, FlushNote, NULL);
     ExInitializeWorkItem(&gDiagItem, DiagWorker, NULL);
+    ExInitializeWorkItem(&gSafeItem, QcdxSafeStart, NULL);
     ClearStale();
     Step(0x10);
     IommuInit();

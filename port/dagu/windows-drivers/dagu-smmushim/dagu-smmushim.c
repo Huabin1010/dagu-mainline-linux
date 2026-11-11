@@ -1666,10 +1666,13 @@ Unload(PDRIVER_OBJECT drv)
 
     UNREFERENCED_PARAMETER(drv);
     /* The breadcrumb timer and its work item must be gone before the image
-     * goes away: devcon restarts this device on every install, and a timer
-     * still armed at unload bugchecked 0xD4 on 2026-11-11 21:22. */
+     * goes away: devcon restarts this device on every install. 1.0.7 left the
+     * timer armed (0xD4 at 21:22); 1.0.8 cancelled it but skipped
+     * KeFlushQueuedDpcs, so a DPC already on the queue still pointed into the
+     * image and 1-install bugchecked 0xD4 again at 21:42 while unloading. */
     InterlockedExchange(&gPathStop, 1);
     KeCancelTimer(&gPathTimer);
+    KeFlushQueuedDpcs();
     wait.QuadPart = -10 * 1000 * 10;   /* 10 ms, 100 ns units */
     for (i = 0; i < 100; i++) {
         if (!gPathQueued && !gPathBusy)
@@ -2753,6 +2756,15 @@ InstallPathHooks(PUCHAR base)
             ok |= 1u << i;
     }
     gPathInstall = ok;
+    /* Arm only after qcdx is in: 1-install restarts this device with no qcdx
+     * image, and a DriverEntry-armed timer is what made unloading 1.0.7/1.0.8
+     * bugcheck 0xD4 before the new package could start. */
+    if (ok && !gPathStop) {
+        LARGE_INTEGER due;
+
+        due.QuadPart = -2000000;    /* 200 ms relative, 100 ns units */
+        KeSetTimerEx(&gPathTimer, due, 200, &gPathDpc);
+    }
 }
 
 /* A hang leaves no crash dump, so the in-memory ring alone is not enough
@@ -3411,14 +3423,9 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING reg)
     ExInitializeWorkItem(&gPathItem, PathFlushWorker, NULL);
     KeInitializeTimerEx(&gPathTimer, NotificationTimer);
     KeInitializeDpc(&gPathDpc, PathFlushDpc, NULL);
-    /* 100 ms period: the newest breadcrumb reaches the hive long before a
-     * display step can stall the bus. */
-    {
-        LARGE_INTEGER due;
-
-        due.QuadPart = -2000000;    /* 200 ms relative, 100 ns units */
-        KeSetTimerEx(&gPathTimer, due, 200, &gPathDpc);
-    }
+    /* Do not arm the breadcrumb timer here. InstallPathHooks starts it only
+     * after qcdx is patched; 1-install must be able to unload a fresh shim
+     * that never saw qcdx without leaving a timer/DPC behind. */
     ClearStale();
     Step(0x10);
     IommuInit();

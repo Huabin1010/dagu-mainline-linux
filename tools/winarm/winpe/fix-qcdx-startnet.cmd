@@ -30,9 +30,15 @@ echo === hive %TIME% >> %LOG%
 reg load HKLM\OFFSYS W:\Windows\System32\config\SYSTEM >> %LOG% 2>&1
 echo --- before >> %LOG%
 reg query HKLM\OFFSYS\ControlSet001\Services\QCDX /v Start >> %LOG% 2>&1
+reg query HKLM\OFFSYS\ControlSet001\Services\dagusmmu /v Start >> %LOG% 2>&1
 reg add HKLM\OFFSYS\ControlSet001\Services\QCDX /v Start /t REG_DWORD /d 4 /f >> %LOG% 2>&1
+rem 1.0.7/1.0.8 arm a breadcrumb timer in DriverEntry. Unloading them via
+rem 1-install bugchecks 0xD4. Keep the shim off for this boot so 1-install
+rem can load 1.0.9 without tearing down the broken image first.
+reg add HKLM\OFFSYS\ControlSet001\Services\dagusmmu /v Start /t REG_DWORD /d 4 /f >> %LOG% 2>&1
 echo --- after >> %LOG%
 reg query HKLM\OFFSYS\ControlSet001\Services\QCDX /v Start >> %LOG% 2>&1
+reg query HKLM\OFFSYS\ControlSet001\Services\dagusmmu /v Start >> %LOG% 2>&1
 reg unload HKLM\OFFSYS >> %LOG% 2>&1
 echo unload rc=%ERRORLEVEL% >> %LOG%
 
@@ -41,6 +47,14 @@ echo === package %TIME% >> %LOG%
 xcopy /e /i /y %M%\woa\pkg W:\dagu-gpu >> %LOG% 2>&1
 echo xcopy rc=%ERRORLEVEL% >> %LOG%
 for %%f in (W:\dagu-gpu\shim\dagu-smmushim.sys W:\dagu-gpu\qcif\dagu-qcif.sys W:\dagu-gpu\gpu.ps1) do certutil -hashfile %%f SHA256 >> %LOG% 2>&1
+
+echo === desktop %TIME% >> %LOG%
+if exist W:\dagu-gpu\desktop (
+  if not exist "W:\Users\dagu\Desktop" mkdir "W:\Users\dagu\Desktop"
+  if not exist "W:\Users\Public\Desktop" mkdir "W:\Users\Public\Desktop"
+  xcopy /y W:\dagu-gpu\desktop\* "W:\Users\dagu\Desktop\" >> %LOG% 2>&1
+  xcopy /y W:\dagu-gpu\desktop\* "W:\Users\Public\Desktop\" >> %LOG% 2>&1
+)
 
 :done
 echo === DONE %DATE% %TIME% >> %LOG%
